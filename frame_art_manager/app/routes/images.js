@@ -614,7 +614,7 @@ router.post('/:filename/rename', async (req, res) => {
 router.put('/:filename', async (req, res) => {
   try {
     const helper = new MetadataHelper(req.frameArtPath);
-    const { matte, filter, tags } = req.body || {};
+    const { matte, filter, tags, fields } = req.body || {};
 
     const updates = {};
     if (matte !== undefined) {
@@ -629,6 +629,12 @@ router.put('/:filename', async (req, res) => {
         : typeof tags === 'string'
           ? tags.split(',').map(tag => tag.trim()).filter(Boolean)
           : [];
+    }
+    if (fields !== undefined && typeof fields === 'object' && !Array.isArray(fields)) {
+      // Only allow string values
+      updates.fields = Object.fromEntries(
+        Object.entries(fields).map(([k, v]) => [k, String(v ?? '')])
+      );
     }
 
     const imageData = await helper.updateImage(req.params.filename, updates);

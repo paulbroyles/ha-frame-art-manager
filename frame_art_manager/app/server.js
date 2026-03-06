@@ -10,6 +10,7 @@ const os = require('os');
 // Import route handlers
 const imagesRouter = require('./routes/images');
 const tagsRouter = require('./routes/tags');
+const fieldsRouter = require('./routes/fields');
 const syncRouter = require('./routes/sync');
 const haRouter = require('./routes/ha');
 const analyticsRouter = require('./routes/analytics');
@@ -63,6 +64,7 @@ app.use((req, res, next) => {
 // API Routes
 app.use('/api/images', imagesRouter);
 app.use('/api/tags', tagsRouter);
+app.use('/api/fields', fieldsRouter);
 app.use('/api/sync', syncRouter);
 app.use('/api/ha', haRouter);
 app.use('/api/analytics', analyticsRouter);

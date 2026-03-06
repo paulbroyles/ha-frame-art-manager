@@ -86,6 +86,7 @@ let allImages = {};
 let allTags = [];
 let allTVs = [];
 let allGlobalTagsets = {}; // Global tagsets (name -> {tags, exclude_tags})
+let allFields = []; // Global custom field names
 let currentImage = null;
 let selectedImages = new Set();
 let lastClickedIndex = null;
@@ -881,7 +882,7 @@ function getSimilarBreakpointCounts() {
 }
 
 const ADVANCED_TAB_DEFAULT = 'tags';
-const VALID_ADVANCED_TABS = new Set(['tags', 'recency', 'settings', 'metadata', 'sync']);
+const VALID_ADVANCED_TABS = new Set(['tags', 'fields', 'recency', 'settings', 'metadata', 'sync']);
 
 function normalizeEditingFilterName(name) {
   if (!name) return 'none';
@@ -993,6 +994,8 @@ function switchToAdvancedSubTab(tabName) {
     loadMetadata();
   } else if (targetTab === 'tags') {
     loadTagsTab();
+  } else if (targetTab === 'fields') {
+    loadFieldsTab();
   } else if (targetTab === 'recency') {
     loadRecencyTab();
   }
@@ -1316,6 +1319,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load UI first so user can start working immediately
   loadGallery();
   loadTags();
+  loadFields();
   loadTVs();
   initUploadForm();
   initBatchUploadForm(); // Initialize batch upload
@@ -5069,6 +5073,15 @@ async function loadTags() {
   }
 }
 
+async function loadFields() {
+  try {
+    const response = await fetch(`${API_BASE}/fields`);
+    allFields = await response.json();
+  } catch (error) {
+    console.error('Error loading fields:', error);
+  }
+}
+
 // Count images that match a TV's include/exclude tag criteria
 function countImagesForTV(tv) {
   const includeTags = tv.tags || [];
@@ -8083,6 +8096,9 @@ function openImageModal(filename) {
   renderImageTagBadges(imageData.tags || []);
   renderTvTagsHelper();
 
+  // Render custom fields
+  renderModalFields(imageData.fields || {});
+
   exitEditMode();
   const initialPreset = detectInitialCropPreset(imageData);
   resetEditState({ hasBackup: false, keepDimensions: false, silent: true, initialPreset });
@@ -8184,6 +8200,51 @@ async function saveFilenameChange() {
   } catch (error) {
     console.error('Error renaming image:', error);
     alert('Failed to rename image');
+  }
+}
+
+function renderModalFields(imageFields) {
+  const section = document.getElementById('modal-fields-section');
+  const container = document.getElementById('modal-fields-inputs');
+  if (!section || !container) return;
+
+  if (!allFields || allFields.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = '';
+
+  const sorted = [...allFields].sort((a, b) => a.localeCompare(b));
+  container.innerHTML = sorted.map(fieldName => {
+    const value = escapeHtml(String((imageFields && imageFields[fieldName]) || ''));
+    return `
+      <div class="modal-field-row">
+        <label class="modal-field-label">${escapeHtml(fieldName)}:</label>
+        <input type="text" class="modal-field-input" data-field="${escapeHtml(fieldName)}" value="${value}" placeholder="" />
+      </div>
+    `;
+  }).join('');
+
+  container.querySelectorAll('.modal-field-input').forEach(input => {
+    input.addEventListener('change', () => saveImageField(input.dataset.field, input.value));
+  });
+}
+
+async function saveImageField(fieldName, value) {
+  if (!currentImage) return;
+  try {
+    const response = await fetch(`${API_BASE}/images/${encodeURIComponent(currentImage)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: { [fieldName]: value } })
+    });
+    const result = await response.json();
+    if (result.success && result.data) {
+      allImages[currentImage] = result.data;
+    }
+  } catch (error) {
+    console.error('Error saving field:', error);
   }
 }
 
@@ -11312,6 +11373,127 @@ async function loadTagsTab() {
   renderTVAssignments();
 }
 
+// ============================================================================
+// FIELDS TAB
+// ============================================================================
+
+async function loadFieldsTab() {
+  await loadFields();
+  renderFieldsTable();
+  initNewFieldButton();
+}
+
+function renderFieldsTable() {
+  const container = document.getElementById('fields-table-container');
+  if (!container) return;
+
+  if (!allFields || allFields.length === 0) {
+    container.innerHTML = '<p class="empty-state">No custom fields defined. Click "+ New Field" to create one.</p>';
+    return;
+  }
+
+  let html = `
+    <table class="tagsets-table">
+      <thead>
+        <tr>
+          <th>Field Name</th>
+          <th class="th-actions"></th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  for (const fieldName of [...allFields].sort((a, b) => a.localeCompare(b))) {
+    html += `
+      <tr>
+        <td>${escapeHtml(fieldName)}</td>
+        <td class="td-actions">
+          <button class="btn-icon btn-danger-icon delete-field-btn" data-field="${escapeHtml(fieldName)}" title="Delete field">✕</button>
+        </td>
+      </tr>
+    `;
+  }
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+
+  container.querySelectorAll('.delete-field-btn').forEach(btn => {
+    btn.addEventListener('click', () => deleteField(btn.dataset.field));
+  });
+}
+
+function initNewFieldButton() {
+  const btn = document.getElementById('new-field-btn');
+  if (!btn || btn.dataset.fieldsInitialized) return;
+  btn.dataset.fieldsInitialized = '1';
+  btn.addEventListener('click', promptNewField);
+}
+
+async function promptNewField() {
+  const name = prompt('Enter field name:');
+  if (!name || !name.trim()) return;
+
+  const trimmed = name.trim();
+
+  if (allFields.includes(trimmed)) {
+    alert(`Field "${trimmed}" already exists.`);
+    return;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}/fields`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: trimmed })
+    });
+    const result = await response.json();
+    if (result.success) {
+      allFields = result.fields;
+      renderFieldsTable();
+    } else {
+      alert(result.error || 'Failed to add field');
+    }
+  } catch (error) {
+    console.error('Error adding field:', error);
+    alert('Failed to add field');
+  }
+}
+
+async function deleteField(fieldName) {
+  try {
+    // Check if any images have a non-empty value for this field
+    const usageResponse = await fetch(`${API_BASE}/fields/${encodeURIComponent(fieldName)}/usage`);
+    const usageData = await usageResponse.json();
+    const imagesWithValue = usageData.imagesWithValue || [];
+
+    if (imagesWithValue.length > 0) {
+      const confirmMsg = `${imagesWithValue.length} image(s) have a value for "${fieldName}". Deleting this field will remove those values. Continue?`;
+      if (!confirm(confirmMsg)) return;
+    }
+
+    const response = await fetch(`${API_BASE}/fields/${encodeURIComponent(fieldName)}`, {
+      method: 'DELETE'
+    });
+    const result = await response.json();
+    if (result.success) {
+      allFields = result.fields;
+      // Update local image cache to remove this field
+      for (const imageData of Object.values(allImages)) {
+        if (imageData.fields) {
+          delete imageData.fields[fieldName];
+        }
+      }
+      renderFieldsTable();
+    } else {
+      alert(result.error || 'Failed to delete field');
+    }
+  } catch (error) {
+    console.error('Error deleting field:', error);
+    alert('Failed to delete field');
+  }
+}
+
+// ============================================================================
 // Load and render the Recency tab content
 async function loadRecencyTab() {
   // Initialize controls if not already done

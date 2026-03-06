@@ -354,6 +354,7 @@
         <!-- Sub-tabs for Advanced section -->
         <div class="advanced-tabs">
           <button class="advanced-tab-btn active" data-tab="tags">Tags</button>
+          <button class="advanced-tab-btn" data-tab="fields">Fields</button>
           <button class="advanced-tab-btn" data-tab="recency">Recency</button>
           <button class="advanced-tab-btn" data-tab="settings">Settings</button>
           <button class="advanced-tab-btn" data-tab="metadata">Metadata</button>
@@ -389,6 +390,20 @@
             </div>
             <div id="tagsets-table-container">
               <div class="loading-indicator">Loading tagsets...</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Fields Sub-tab -->
+        <div id="advanced-fields-content" class="advanced-tab-content">
+          <div class="subsection subsection-no-card">
+            <div class="tagsets-header">
+              <h3>Custom Fields</h3>
+              <button type="button" id="new-field-btn" class="btn-primary btn-small">+ New Field</button>
+            </div>
+            <p class="pool-health-description">Custom fields let you store arbitrary text metadata on each image. Fields appear in the image info panel when editing.</p>
+            <div id="fields-table-container">
+              <div class="loading-indicator">Loading fields...</div>
             </div>
           </div>
         </div>
@@ -990,6 +1005,14 @@
                 <span id="tv-shuffle-indicator" class="tv-shuffle-indicator"></span>
               </div>
               <div id="modal-tags-badges" class="tag-cloud">
+                <!-- Populated by JavaScript -->
+              </div>
+            </div>
+            <div id="modal-fields-section" class="modal-fields-section" style="display:none;">
+              <div class="image-tag-section-header">
+                <label>Fields:</label>
+              </div>
+              <div id="modal-fields-inputs" class="modal-fields-inputs">
                 <!-- Populated by JavaScript -->
               </div>
             </div>

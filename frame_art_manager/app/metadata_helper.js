@@ -114,10 +114,19 @@ class MetadataHelper {
       throw new Error(`Invalid image file: ${filename}`);
     }
     
+    // Initialize fields from global fields list
+    const initialFields = {};
+    if (metadata.fields && Array.isArray(metadata.fields)) {
+      metadata.fields.forEach(fieldName => {
+        initialFields[fieldName] = '';
+      });
+    }
+
     metadata.images[filename] = {
       matte: normalizedMatte,
       filter: normalizedFilter,
       tags,
+      fields: initialFields,
       dimensions,
       aspectRatio,
       added: new Date().toISOString()
@@ -155,6 +164,12 @@ class MetadataHelper {
     }
     if (Object.prototype.hasOwnProperty.call(sanitizedUpdates, 'filter')) {
       sanitizedUpdates.filter = normalizeFilterValue(sanitizedUpdates.filter);
+    }
+
+    // Handle fields update: merge into existing fields rather than replace
+    if (sanitizedUpdates.fields && typeof sanitizedUpdates.fields === 'object') {
+      const existingFields = metadata.images[filename].fields || {};
+      sanitizedUpdates.fields = { ...existingFields, ...sanitizedUpdates.fields };
     }
 
     metadata.images[filename] = {
@@ -459,6 +474,70 @@ class MetadataHelper {
   async getAllTags() {
     const metadata = await this.readMetadata();
     return metadata.tags || [];
+  }
+
+  /**
+   * Get all custom fields
+   */
+  async getAllFields() {
+    const metadata = await this.readMetadata();
+    return metadata.fields || [];
+  }
+
+  /**
+   * Add a custom field to the library and initialize it (empty) on all images
+   */
+  async addField(fieldName) {
+    const metadata = await this.readMetadata();
+
+    if (!metadata.fields) {
+      metadata.fields = [];
+    }
+
+    if (!metadata.fields.includes(fieldName)) {
+      metadata.fields.push(fieldName);
+      // Add empty value to all existing images
+      for (const filename of Object.keys(metadata.images)) {
+        if (!metadata.images[filename].fields) {
+          metadata.images[filename].fields = {};
+        }
+        if (!(fieldName in metadata.images[filename].fields)) {
+          metadata.images[filename].fields[fieldName] = '';
+        }
+      }
+      await this.writeMetadata(metadata);
+    }
+
+    return metadata.fields;
+  }
+
+  /**
+   * Remove a custom field from the library and all images
+   */
+  async removeField(fieldName) {
+    const metadata = await this.readMetadata();
+
+    metadata.fields = (metadata.fields || []).filter(f => f !== fieldName);
+
+    for (const filename of Object.keys(metadata.images)) {
+      if (metadata.images[filename].fields) {
+        delete metadata.images[filename].fields[fieldName];
+      }
+    }
+
+    await this.writeMetadata(metadata);
+    return metadata.fields;
+  }
+
+  /**
+   * Get list of images that have a non-empty value for a field
+   */
+  async getImagesWithFieldValue(fieldName) {
+    const metadata = await this.readMetadata();
+    return Object.keys(metadata.images).filter(filename => {
+      const fields = metadata.images[filename].fields || {};
+      return fields[fieldName] !== undefined && String(fields[fieldName]).trim() !== '';
+    });
   }
 
   /**

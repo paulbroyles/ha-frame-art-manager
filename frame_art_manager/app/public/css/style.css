@@ -10749,3 +10749,66 @@ body.dropdown-open .image-card:hover {
     font-size: 11px;
   }
 }
+
+/* ============================================================
+   Custom Fields
+   ============================================================ */
+
+.modal-fields-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color, #e0e0e0);
+}
+
+.modal-fields-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.modal-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-field-label {
+  flex: 0 0 auto;
+  min-width: 80px;
+  font-size: 13px;
+  color: var(--text-muted, #666);
+  text-align: right;
+}
+
+.modal-field-input {
+  flex: 1 1 auto;
+  padding: 4px 8px;
+  font-size: 13px;
+  border: 1px solid var(--border-color, #ccc);
+  border-radius: 4px;
+  background: var(--input-bg, #fff);
+  color: var(--text-color, #333);
+  min-width: 0;
+}
+
+.modal-field-input:focus {
+  outline: none;
+  border-color: var(--accent-color, #4a90d9);
+  box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.15);
+}
+
+.delete-field-btn {
+  color: var(--danger-color, #c0392b);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 14px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.delete-field-btn:hover {
+  background: var(--danger-bg, #fdecea);
+}
