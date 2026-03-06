@@ -3,7 +3,7 @@ name: Frame Art Manager
 version: "1.25.11"
 slug: frame_art_manager
 description: Manage Frame TV artwork library
-url: https://github.com/billyfw/ha-frame-art-manager
+url: https://github.com/paulbroyles/ha-frame-art-manager
 arch:
   - aarch64
   - amd64
