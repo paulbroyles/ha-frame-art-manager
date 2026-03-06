@@ -14,6 +14,7 @@ const attributesRouter = require('./routes/attributes');
 const syncRouter = require('./routes/sync');
 const haRouter = require('./routes/ha');
 const analyticsRouter = require('./routes/analytics');
+const entitiesRouter = require('./routes/entities');
 
 const app = express();
 const PORT = process.env.PORT || 8099;
@@ -68,6 +69,7 @@ app.use('/api/attributes', attributesRouter);
 app.use('/api/sync', syncRouter);
 app.use('/api/ha', haRouter);
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/entities', entitiesRouter);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

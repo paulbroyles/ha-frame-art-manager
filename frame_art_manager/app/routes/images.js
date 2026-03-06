@@ -461,6 +461,31 @@ router.post('/upload', upload.single('image'), async (req, res) => {
           // ignore invalid JSON - attributes remain as initialized by addImage
         }
       }
+
+      // Apply entity data if provided: { entityId: { attrName: value } }
+      if (req.body.entityDataJson) {
+        try {
+          const parsedEntityData = JSON.parse(req.body.entityDataJson);
+          if (parsedEntityData && typeof parsedEntityData === 'object') {
+            const entityRefs = {};
+            for (const [entityId, data] of Object.entries(parsedEntityData)) {
+              if (!data || typeof data !== 'object') continue;
+              try {
+                const result = await helper.upsertEntityInstance(entityId, data);
+                entityRefs[entityId] = result.key;
+              } catch (e) {
+                // skip invalid entity data (e.g. missing key attribute)
+              }
+            }
+            if (Object.keys(entityRefs).length > 0) {
+              await helper.updateImage(finalFilename, { entityRefs });
+              imageData.entityRefs = { ...(imageData.entityRefs || {}), ...entityRefs };
+            }
+          }
+        } catch (e) {
+          // ignore invalid JSON
+        }
+      }
     } catch (validationError) {
       await removeFileIfExists(finalFilePath);
       console.error('Error validating uploaded image:', validationError);
@@ -630,7 +655,7 @@ router.post('/:filename/rename', async (req, res) => {
 router.put('/:filename', async (req, res) => {
   try {
     const helper = new MetadataHelper(req.frameArtPath);
-    const { matte, filter, tags, attributes } = req.body || {};
+    const { matte, filter, tags, attributes, entityRefs } = req.body || {};
 
     const updates = {};
     if (matte !== undefined) {
@@ -650,6 +675,14 @@ router.put('/:filename', async (req, res) => {
       // Only allow string values
       updates.attributes = Object.fromEntries(
         Object.entries(attributes).map(([k, v]) => [k, String(v ?? '')])
+      );
+    }
+    if (entityRefs !== undefined && typeof entityRefs === 'object' && !Array.isArray(entityRefs)) {
+      // Values must be strings (instance keys) or null (to remove ref)
+      updates.entityRefs = Object.fromEntries(
+        Object.entries(entityRefs)
+          .filter(([, v]) => v === null || typeof v === 'string')
+          .map(([k, v]) => [k, v])
       );
     }
 

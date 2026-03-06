@@ -10126,6 +10126,12 @@ body.dropdown-open .image-card:hover {
     min-height: auto !important;
   }
 
+  .custom-data-actions .btn-primary.btn-small {
+    padding: 4px 10px !important;
+    font-size: 12px;
+    min-height: auto !important;
+  }
+
   /* Hide desktop-only columns */
   .tagsets-table th.desktop-only,
   .tagsets-table td.desktop-only,
@@ -10841,4 +10847,237 @@ body.dropdown-open .image-card:hover {
 
 .attributes-table tr.drag-over td {
   border-top: 2px solid var(--accent-color, #4a90d9);
+}
+
+/* ============================================================
+   Custom Data tab — unified list + entity management
+   ============================================================ */
+
+.custom-data-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.custom-data-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Shared item row */
+.custom-data-item {
+  display: flex;
+  flex-direction: column;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #e0e0e0);
+  background: var(--card-bg, #fff);
+  user-select: none;
+}
+
+.custom-data-item.dragging {
+  opacity: 0.4;
+}
+
+.custom-data-item.drag-over {
+  border-top: 2px solid var(--accent-color, #4a90d9);
+}
+
+/* Attribute row */
+.custom-data-item.item-attribute {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.custom-data-item.item-attribute .drag-handle {
+  flex-shrink: 0;
+}
+
+.item-label {
+  flex: 1 1 auto;
+  font-size: 14px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Entity type card */
+.entity-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.entity-toggle-btn {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-muted, #888);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  line-height: 1;
+  border-radius: 3px;
+}
+
+.entity-toggle-btn:hover {
+  background: var(--hover-bg, #f0f0f0);
+}
+
+.entity-type-name {
+  font-weight: 500;
+}
+
+/* Entity attribute sub-list */
+.entity-attrs-sublist {
+  border-top: 1px solid var(--border-color, #e0e0e0);
+  padding: 4px 0 4px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.entity-attrs-sublist.hidden {
+  display: none;
+}
+
+.entity-attr-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px 5px 4px;
+  border-radius: 4px;
+  cursor: default;
+}
+
+.entity-attr-item:hover {
+  background: var(--hover-bg, #f5f5f5);
+}
+
+.entity-attr-item.dragging {
+  opacity: 0.4;
+}
+
+.entity-attr-item.drag-over {
+  border-top: 2px solid var(--accent-color, #4a90d9);
+}
+
+.entity-attr-name {
+  flex: 1 1 auto;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.entity-attr-empty {
+  font-size: 12px;
+  color: var(--text-muted, #888);
+  padding: 6px 4px;
+  font-style: italic;
+}
+
+.entity-key-star {
+  color: var(--accent-color, #4a90d9);
+  font-size: 12px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.entity-key-placeholder {
+  display: inline-block;
+  width: 14px;
+  flex-shrink: 0;
+}
+
+/* ============================================================
+   Entity input boxes (in upload form and modal)
+   ============================================================ */
+
+.entity-input-box {
+  border: 1px solid var(--border-color, #d0d0d0);
+  border-radius: 6px;
+  margin-top: 10px;
+  overflow: hidden;
+  background: var(--card-bg, #fff);
+}
+
+.entity-input-header {
+  background: var(--hover-bg, #f5f7fa);
+  border-bottom: 1px solid var(--border-color, #e0e0e0);
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #555);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.entity-input-attrs {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.entity-attr-field-wrapper {
+  flex: 1 1 auto;
+  position: relative;
+  min-width: 0;
+}
+
+.entity-attr-field-wrapper .modal-attribute-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Autocomplete dropdown */
+.entity-autocomplete-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--border-color, #ccc);
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+  z-index: 200;
+  max-height: 160px;
+  overflow-y: auto;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.12);
+}
+
+.entity-autocomplete-item {
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-color, #333);
+}
+
+.entity-autocomplete-item:hover {
+  background: var(--hover-bg, #f0f6ff);
+  color: var(--accent-color, #4a90d9);
+}
+
+/* Star on key attribute label */
+.entity-key-star {
+  color: var(--accent-color, #4a90d9);
+  font-size: 11px;
+  margin-right: 2px;
+}
+
+/* Modal entities section */
+#modal-entities-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color, #e0e0e0);
 }

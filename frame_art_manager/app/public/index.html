@@ -326,6 +326,9 @@
             <div id="upload-attributes-section" style="display:none;">
               <!-- Populated by JavaScript when custom attributes exist -->
             </div>
+            <div id="upload-entities-section" style="display:none;">
+              <!-- Populated by JavaScript when entity types exist -->
+            </div>
           </div>
 
           <div class="upload-form-footer">
@@ -402,12 +405,15 @@
         <div id="advanced-custom-data-content" class="advanced-tab-content">
           <div class="subsection subsection-no-card">
             <div class="tagsets-header">
-              <h3>Attributes</h3>
-              <button type="button" id="new-attribute-btn" class="btn-primary btn-small">+ New Attribute</button>
+              <h3>Custom Data</h3>
+              <div class="custom-data-actions">
+                <button type="button" id="new-attribute-btn" class="btn-primary btn-small">+ New Attribute</button>
+                <button type="button" id="new-entity-btn" class="btn-primary btn-small">+ New Entity</button>
+              </div>
             </div>
-            <p class="pool-health-description">Attributes let you store arbitrary text metadata on each image. Attributes appear in the image info panel when editing.</p>
-            <div id="attributes-table-container">
-              <div class="loading-indicator">Loading attributes...</div>
+            <p class="pool-health-description">Attributes store text metadata on each image. Entities group attributes under a shared key — link multiple images to the same entity instance.</p>
+            <div id="custom-data-list-container">
+              <div class="loading-indicator">Loading...</div>
             </div>
           </div>
         </div>
@@ -1018,6 +1024,11 @@
               </div>
               <div id="modal-attributes-inputs" class="modal-attributes-inputs">
                 <!-- Populated by JavaScript -->
+              </div>
+            </div>
+            <div id="modal-entities-section" style="display:none;">
+              <div id="modal-entities-inputs">
+                <!-- Populated by JavaScript: one box per entity type -->
               </div>
             </div>
           </div>

@@ -87,6 +87,9 @@ let allTags = [];
 let allTVs = [];
 let allGlobalTagsets = {}; // Global tagsets (name -> {tags, exclude_tags})
 let allAttributes = []; // Global custom attribute names
+let allEntityTypes = []; // Global entity type definitions
+let allEntityInstances = {}; // entityId → { instanceKey → { attrName: value } }
+let allCustomDataOrder = []; // [{type:'attribute',name:str}|{type:'entity',id:str}]
 let currentImage = null;
 let selectedImages = new Set();
 let lastClickedIndex = null;
@@ -1320,6 +1323,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadGallery();
   loadTags();
   loadAttributes();
+  loadEntities();
   loadTVs();
   initUploadForm();
   initBatchUploadForm(); // Initialize batch upload
@@ -1905,6 +1909,7 @@ function switchToTab(tabName) {
     renderUploadTvTagsHelper();
     renderUploadAppliedTags();
     renderUploadAttributes();
+    renderUploadEntities();
   }
 }
 
@@ -4400,6 +4405,7 @@ function initUploadForm() {
             renderUploadAppliedTags();
             renderUploadTvTagsHelper();
             renderUploadAttributes();
+            renderUploadEntities();
             
             // Reload tags in case new ones were added
             await loadTags();
@@ -4459,6 +4465,12 @@ function initUploadForm() {
     const attributeValues = collectUploadAttributes();
     if (attributeValues) {
       formData.append('attributesJson', JSON.stringify(attributeValues));
+    }
+
+    // Append entity data as JSON
+    const entityValues = collectUploadEntities();
+    if (entityValues) {
+      formData.append('entityDataJson', JSON.stringify(entityValues));
     }
 
     // Send the request
@@ -5127,6 +5139,18 @@ async function loadAttributes() {
     allAttributes = await response.json();
   } catch (error) {
     console.error('Error loading attributes:', error);
+  }
+}
+
+async function loadEntities() {
+  try {
+    const response = await fetch(`${API_BASE}/entities/with-instances`);
+    const data = await response.json();
+    allEntityTypes = data.entityTypes || [];
+    allEntityInstances = data.entityInstances || {};
+    allCustomDataOrder = data.customDataOrder || [];
+  } catch (error) {
+    console.error('Error loading entities:', error);
   }
 }
 
@@ -8144,8 +8168,9 @@ function openImageModal(filename) {
   renderImageTagBadges(imageData.tags || []);
   renderTvTagsHelper();
 
-  // Render custom attributes
+  // Render custom attributes and entities
   renderModalAttributes(imageData.attributes || {});
+  renderModalEntities(imageData);
 
   exitEditMode();
   const initialPreset = detectInitialCropPreset(imageData);
@@ -11430,9 +11455,10 @@ async function loadTagsTab() {
 // ============================================================================
 
 async function loadCustomDataTab() {
-  await loadAttributes();
-  renderAttributesTable();
+  await Promise.all([loadAttributes(), loadEntities()]);
+  renderCustomDataList();
   initNewAttributeButton();
+  initNewEntityButton();
 }
 
 function renderAttributesTable() {
@@ -11573,7 +11599,9 @@ async function promptNewAttribute() {
     const result = await response.json();
     if (result.success) {
       allAttributes = result.attributes;
-      renderAttributesTable();
+      // Rebuild customDataOrder to include new attribute
+      await loadEntities();
+      renderCustomDataList();
     } else {
       alert(result.error || 'Failed to add attribute');
     }
@@ -11607,13 +11635,682 @@ async function deleteAttribute(attributeName) {
           delete imageData.attributes[attributeName];
         }
       }
-      renderAttributesTable();
+      await loadEntities(); // refresh customDataOrder
+      renderCustomDataList();
     } else {
       alert(result.error || 'Failed to delete attribute');
     }
   } catch (error) {
     console.error('Error deleting attribute:', error);
     alert('Failed to delete attribute');
+  }
+}
+
+// ============================================================================
+// Entity-related helpers
+// ============================================================================
+
+// Must match server-side slugify in metadata_helper.js
+function entitySlugify(str) {
+  return String(str)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    || 'entity';
+}
+
+// Build entity input box HTML (shared by upload and modal contexts)
+function renderEntityInputBox(entityType, instanceData, instanceKey) {
+  return `
+    <div class="entity-input-box" data-entity-id="${escapeHtml(entityType.id)}" data-instance-key="${escapeHtml(instanceKey || '')}">
+      <div class="entity-input-header">${escapeHtml(entityType.name)}</div>
+      <div class="entity-input-attrs">
+        ${entityType.attributes.map((attrName, i) => {
+          const val = escapeHtml(String((instanceData && instanceData[attrName]) || ''));
+          const isKey = i === 0;
+          return `
+            <div class="modal-attribute-row">
+              <label class="modal-attribute-label">
+                ${isKey ? '<span class="entity-key-star" title="Key attribute">★</span> ' : ''}${escapeHtml(attrName)}:
+              </label>
+              <div class="entity-attr-field-wrapper">
+                <input type="text"
+                       class="modal-attribute-input entity-field-input${isKey ? ' entity-key-input' : ''}"
+                       data-entity-id="${escapeHtml(entityType.id)}"
+                       data-attribute="${escapeHtml(attrName)}"
+                       data-is-key="${isKey ? '1' : '0'}"
+                       value="${val}"
+                       placeholder="${isKey ? 'Type to search or add new…' : ''}"
+                       autocomplete="off" />
+                ${isKey ? `<div class="entity-autocomplete-dropdown" data-entity-id="${escapeHtml(entityType.id)}"></div>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// Render entity input boxes in the upload form
+function renderUploadEntities() {
+  const section = document.getElementById('upload-entities-section');
+  if (!section) return;
+
+  if (!allEntityTypes || allEntityTypes.length === 0) {
+    section.style.display = 'none';
+    section.innerHTML = '';
+    return;
+  }
+
+  section.style.display = '';
+  section.innerHTML = allEntityTypes.map(et => renderEntityInputBox(et, {}, '')).join('');
+
+  section.querySelectorAll('.entity-key-input').forEach(input => {
+    initEntityKeyAutocomplete(input, allEntityInstances[input.dataset.entityId] || {});
+  });
+}
+
+// Collect entity data from the upload form
+function collectUploadEntities() {
+  const result = {};
+  document.querySelectorAll('#upload-entities-section .entity-input-box').forEach(box => {
+    const entityId = box.dataset.entityId;
+    const data = {};
+    box.querySelectorAll('.entity-field-input').forEach(input => {
+      data[input.dataset.attribute] = input.value;
+    });
+    const entityType = allEntityTypes.find(e => e.id === entityId);
+    const keyAttr = entityType && entityType.attributes[0];
+    if (keyAttr && data[keyAttr] && data[keyAttr].trim()) {
+      result[entityId] = data;
+    }
+  });
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+// Render entity input boxes in the image edit modal
+function renderModalEntities(imageData) {
+  const section = document.getElementById('modal-entities-section');
+  const container = document.getElementById('modal-entities-inputs');
+  if (!section || !container) return;
+
+  if (!allEntityTypes || allEntityTypes.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = '';
+  const entityRefs = (imageData && imageData.entityRefs) || {};
+
+  container.innerHTML = allEntityTypes.map(entityType => {
+    const instanceKey = entityRefs[entityType.id] || '';
+    const instanceData = instanceKey ? ((allEntityInstances[entityType.id] || {})[instanceKey] || {}) : {};
+    return renderEntityInputBox(entityType, instanceData, instanceKey);
+  }).join('');
+
+  container.querySelectorAll('.entity-input-box').forEach(box => {
+    const entityId = box.dataset.entityId;
+    const keyInput = box.querySelector('.entity-key-input');
+    if (keyInput) {
+      initEntityKeyAutocomplete(keyInput, allEntityInstances[entityId] || {});
+    }
+    box.querySelectorAll('.entity-field-input').forEach(input => {
+      input.addEventListener('blur', () => {
+        setTimeout(() => saveModalEntityBox(box), 150);
+      });
+    });
+  });
+}
+
+// Initialize autocomplete on an entity key field
+function initEntityKeyAutocomplete(keyInput, instances) {
+  const entityId = keyInput.dataset.entityId;
+  const entityType = allEntityTypes.find(e => e.id === entityId);
+  if (!entityType) return;
+  const keyAttr = entityType.attributes[0];
+  const wrapper = keyInput.closest('.entity-attr-field-wrapper');
+  const dropdown = wrapper && wrapper.querySelector('.entity-autocomplete-dropdown');
+  if (!dropdown) return;
+
+  function showDropdown(matches) {
+    if (matches.length === 0) {
+      dropdown.style.display = 'none';
+      dropdown.innerHTML = '';
+      return;
+    }
+    dropdown.innerHTML = matches
+      .map(([key, data]) => `<div class="entity-autocomplete-item" data-key="${escapeHtml(key)}">${escapeHtml(data[keyAttr] || key)}</div>`)
+      .join('');
+    dropdown.style.display = '';
+    dropdown.querySelectorAll('.entity-autocomplete-item').forEach(item => {
+      item.addEventListener('mousedown', e => {
+        e.preventDefault();
+        selectEntityInstance(keyInput, instances, item.dataset.key, entityType);
+        dropdown.style.display = 'none';
+        dropdown.innerHTML = '';
+      });
+    });
+  }
+
+  keyInput.addEventListener('input', () => {
+    const q = keyInput.value.trim().toLowerCase();
+    if (!q) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
+    const matches = Object.entries(instances).filter(([, data]) =>
+      String(data[keyAttr] || '').toLowerCase().includes(q)
+    );
+    showDropdown(matches);
+  });
+
+  keyInput.addEventListener('blur', () => {
+    setTimeout(() => { dropdown.style.display = 'none'; dropdown.innerHTML = ''; }, 200);
+  });
+
+  keyInput.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { dropdown.style.display = 'none'; dropdown.innerHTML = ''; }
+  });
+}
+
+// Fill entity fields from a selected autocomplete instance
+function selectEntityInstance(keyInput, instances, instanceKey, entityType) {
+  const instanceData = instances[instanceKey];
+  if (!instanceData) return;
+  const box = keyInput.closest('.entity-input-box');
+  if (!box) return;
+  box.dataset.instanceKey = instanceKey;
+  box.querySelectorAll('.entity-field-input').forEach(input => {
+    const attr = input.dataset.attribute;
+    if (attr in instanceData) input.value = instanceData[attr];
+  });
+}
+
+// Save entity data from the modal after blur
+async function saveModalEntityBox(box) {
+  if (!currentImage) return;
+  const entityId = box.dataset.entityId;
+  const entityType = allEntityTypes.find(e => e.id === entityId);
+  if (!entityType) return;
+
+  const keyAttr = entityType.attributes[0];
+  const data = {};
+  box.querySelectorAll('.entity-field-input').forEach(input => {
+    data[input.dataset.attribute] = input.value;
+  });
+
+  const keyValue = (data[keyAttr] || '').trim();
+
+  // If key is empty, clear any existing ref
+  if (!keyValue) {
+    const oldKey = box.dataset.instanceKey;
+    if (oldKey) {
+      try {
+        const resp = await fetch(`${API_BASE}/images/${encodeURIComponent(currentImage)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entityRefs: { [entityId]: null } })
+        });
+        const result = await resp.json();
+        if (result.success && result.data) allImages[currentImage] = result.data;
+      } catch (e) {
+        console.error('Error clearing entity ref:', e);
+      }
+      box.dataset.instanceKey = '';
+    }
+    return;
+  }
+
+  const candidateKey = entitySlugify(keyValue);
+  const existingInstances = allEntityInstances[entityId] || {};
+  const oldKey = box.dataset.instanceKey;
+
+  // Warn if modifying an existing instance also used by other images
+  if (candidateKey in existingInstances && candidateKey === oldKey) {
+    const otherImages = Object.keys(allImages).filter(f =>
+      f !== currentImage && ((allImages[f].entityRefs || {})[entityId] === candidateKey)
+    );
+    if (otherImages.length > 0) {
+      const plural = otherImages.length === 1 ? 'image' : 'images';
+      const confirmed = confirm(
+        `This ${entityType.name} is also linked to ${otherImages.length} other ${plural}. ` +
+        `Saving will update the ${entityType.name} data for all of them. Continue?`
+      );
+      if (!confirmed) {
+        // Revert fields to original instance data
+        const orig = existingInstances[oldKey] || {};
+        box.querySelectorAll('.entity-field-input').forEach(input => {
+          input.value = orig[input.dataset.attribute] || '';
+        });
+        return;
+      }
+    }
+  }
+
+  try {
+    const upsertResp = await fetch(`${API_BASE}/entities/${encodeURIComponent(entityId)}/instances`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data })
+    });
+    const upsertResult = await upsertResp.json();
+    if (!upsertResult.success) {
+      console.error('Failed to save entity instance:', upsertResult.error);
+      return;
+    }
+
+    const newKey = upsertResult.key;
+    const refResp = await fetch(`${API_BASE}/images/${encodeURIComponent(currentImage)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entityRefs: { [entityId]: newKey } })
+    });
+    const refResult = await refResp.json();
+    if (refResult.success && refResult.data) {
+      allImages[currentImage] = refResult.data;
+      box.dataset.instanceKey = newKey;
+      if (!allEntityInstances[entityId]) allEntityInstances[entityId] = {};
+      allEntityInstances[entityId][newKey] = upsertResult.data;
+    }
+  } catch (error) {
+    console.error('Error saving entity data:', error);
+  }
+}
+
+// ============================================================================
+// Custom Data tab — unified list (attributes + entity types)
+// ============================================================================
+
+function renderCustomDataList() {
+  const container = document.getElementById('custom-data-list-container');
+  if (!container) return;
+
+  // Build ordered list
+  let order = allCustomDataOrder;
+  if (!order || order.length === 0) {
+    order = [
+      ...allAttributes.map(name => ({ type: 'attribute', name })),
+      ...allEntityTypes.map(e => ({ type: 'entity', id: e.id }))
+    ];
+  }
+
+  if (order.length === 0) {
+    container.innerHTML = '<p class="empty-state">No custom data defined. Click "+ New Attribute" or "+ New Entity" to create one.</p>';
+    return;
+  }
+
+  // Preserve collapsed state across re-renders
+  const collapsedEntities = new Set(
+    [...container.querySelectorAll('.item-entity.collapsed')].map(el => el.dataset.entityId)
+  );
+
+  const entityMap = Object.fromEntries(allEntityTypes.map(e => [e.id, e]));
+
+  let html = '<div class="custom-data-list" id="custom-data-list">';
+  for (const item of order) {
+    if (item.type === 'attribute' && allAttributes.includes(item.name)) {
+      html += `
+        <div class="custom-data-item item-attribute" draggable="true" data-type="attribute" data-name="${escapeHtml(item.name)}">
+          <span class="drag-handle" title="Drag to reorder">⠿</span>
+          <span class="item-label item-attribute-name">${escapeHtml(item.name)}</span>
+          <div class="item-actions">
+            <button class="btn-icon btn-danger-icon delete-attribute-btn" data-attribute="${escapeHtml(item.name)}" title="Delete attribute">✕</button>
+          </div>
+        </div>
+      `;
+    } else if (item.type === 'entity' && entityMap[item.id]) {
+      const et = entityMap[item.id];
+      const collapsed = collapsedEntities.has(item.id);
+      const attrRows = et.attributes.length === 0
+        ? '<div class="entity-attr-empty">No attributes. Click "+ Attribute" to add one.</div>'
+        : et.attributes.map((attrName, i) => `
+          <div class="entity-attr-item" draggable="true" data-attribute="${escapeHtml(attrName)}" data-entity-id="${escapeHtml(et.id)}">
+            <span class="drag-handle" title="Drag to reorder">⠿</span>
+            ${i === 0 ? '<span class="entity-key-star" title="Key attribute">★</span>' : '<span class="entity-key-placeholder"></span>'}
+            <span class="entity-attr-name">${escapeHtml(attrName)}</span>
+            <div class="item-actions">
+              <button class="btn-icon btn-danger-icon delete-entity-attr-btn" data-entity-id="${escapeHtml(et.id)}" data-attribute="${escapeHtml(attrName)}" title="Delete attribute">✕</button>
+            </div>
+          </div>
+        `).join('');
+
+      html += `
+        <div class="custom-data-item item-entity${collapsed ? ' collapsed' : ''}" draggable="true" data-type="entity" data-entity-id="${escapeHtml(et.id)}">
+          <div class="entity-item-header">
+            <span class="drag-handle" title="Drag to reorder">⠿</span>
+            <button class="entity-toggle-btn btn-icon" data-entity-id="${escapeHtml(et.id)}" title="${collapsed ? 'Expand' : 'Collapse'}">${collapsed ? '▸' : '▾'}</button>
+            <span class="item-label entity-type-name">${escapeHtml(et.name)}</span>
+            <div class="item-actions">
+              <button class="btn-secondary btn-small add-entity-attr-btn" data-entity-id="${escapeHtml(et.id)}">+ Attribute</button>
+              <button class="btn-icon btn-danger-icon delete-entity-btn" data-entity-id="${escapeHtml(et.id)}" title="Delete entity type">✕</button>
+            </div>
+          </div>
+          <div class="entity-attrs-sublist${collapsed ? ' hidden' : ''}" data-entity-id="${escapeHtml(et.id)}">
+            ${attrRows}
+          </div>
+        </div>
+      `;
+    }
+  }
+  html += '</div>';
+  container.innerHTML = html;
+
+  const list = container.querySelector('#custom-data-list');
+
+  container.querySelectorAll('.delete-attribute-btn').forEach(btn => {
+    btn.addEventListener('click', () => deleteAttribute(btn.dataset.attribute));
+  });
+  container.querySelectorAll('.delete-entity-btn').forEach(btn => {
+    btn.addEventListener('click', () => deleteEntityType(btn.dataset.entityId));
+  });
+  container.querySelectorAll('.entity-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', () => toggleEntityCollapse(btn.dataset.entityId, container));
+  });
+  container.querySelectorAll('.add-entity-attr-btn').forEach(btn => {
+    btn.addEventListener('click', () => promptNewEntityAttribute(btn.dataset.entityId));
+  });
+  container.querySelectorAll('.delete-entity-attr-btn').forEach(btn => {
+    btn.addEventListener('click', () => deleteEntityTypeAttribute(btn.dataset.entityId, btn.dataset.attribute));
+  });
+
+  initCustomDataDragAndDrop(list);
+  container.querySelectorAll('.entity-attrs-sublist').forEach(sublist => {
+    initEntityAttrsDragAndDrop(sublist);
+  });
+}
+
+function toggleEntityCollapse(entityId, container) {
+  const entityItem = container.querySelector(`.item-entity[data-entity-id="${entityId}"]`);
+  if (!entityItem) return;
+  const sublist = entityItem.querySelector('.entity-attrs-sublist');
+  const toggleBtn = entityItem.querySelector('.entity-toggle-btn');
+  const collapsed = entityItem.classList.contains('collapsed');
+  entityItem.classList.toggle('collapsed', !collapsed);
+  sublist.classList.toggle('hidden', !collapsed);
+  toggleBtn.textContent = collapsed ? '▾' : '▸';
+  toggleBtn.title = collapsed ? 'Collapse' : 'Expand';
+}
+
+// Outer drag-and-drop: reorders attributes and entity boxes
+function initCustomDataDragAndDrop(list) {
+  if (!list) return;
+  let dragSrc = null;
+
+  list.addEventListener('dragstart', e => {
+    if (e.target.closest('.entity-attrs-sublist')) { e.stopPropagation(); return; }
+    const item = e.target.closest('.custom-data-item');
+    if (!item) return;
+    dragSrc = item;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', '');
+    setTimeout(() => item.classList.add('dragging'), 0);
+  });
+
+  list.addEventListener('dragend', e => {
+    if (e.target.closest('.entity-attrs-sublist')) return;
+    const item = e.target.closest('.custom-data-item');
+    if (item) item.classList.remove('dragging');
+    list.querySelectorAll('.custom-data-item').forEach(r => r.classList.remove('drag-over'));
+    dragSrc = null;
+  });
+
+  list.addEventListener('dragover', e => {
+    if (e.target.closest('.entity-attrs-sublist')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const item = e.target.closest('.custom-data-item');
+    if (!item || item === dragSrc) return;
+    list.querySelectorAll('.custom-data-item').forEach(r => r.classList.remove('drag-over'));
+    item.classList.add('drag-over');
+  });
+
+  list.addEventListener('dragleave', e => {
+    if (e.target.closest('.entity-attrs-sublist')) return;
+    const item = e.target.closest('.custom-data-item');
+    if (item) item.classList.remove('drag-over');
+  });
+
+  list.addEventListener('drop', e => {
+    if (e.target.closest('.entity-attrs-sublist')) return;
+    e.preventDefault();
+    const target = e.target.closest('.custom-data-item');
+    if (!target || !dragSrc || target === dragSrc) return;
+    list.querySelectorAll('.custom-data-item').forEach(r => r.classList.remove('drag-over'));
+    const items = [...list.querySelectorAll(':scope > .custom-data-item')];
+    const srcIdx = items.indexOf(dragSrc);
+    const tgtIdx = items.indexOf(target);
+    if (srcIdx < tgtIdx) target.after(dragSrc); else target.before(dragSrc);
+    saveCustomDataOrder(list);
+  });
+}
+
+// Inner drag-and-drop: reorders attributes within an entity type
+function initEntityAttrsDragAndDrop(sublist) {
+  if (!sublist) return;
+  let dragSrc = null;
+  const entityId = sublist.dataset.entityId;
+
+  sublist.addEventListener('dragstart', e => {
+    e.stopPropagation();
+    const item = e.target.closest('.entity-attr-item');
+    if (!item) return;
+    dragSrc = item;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', '');
+    setTimeout(() => item.classList.add('dragging'), 0);
+  });
+
+  sublist.addEventListener('dragend', e => {
+    e.stopPropagation();
+    const item = e.target.closest('.entity-attr-item');
+    if (item) item.classList.remove('dragging');
+    sublist.querySelectorAll('.entity-attr-item').forEach(r => r.classList.remove('drag-over'));
+    dragSrc = null;
+  });
+
+  sublist.addEventListener('dragover', e => {
+    e.stopPropagation();
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const item = e.target.closest('.entity-attr-item');
+    if (!item || item === dragSrc) return;
+    sublist.querySelectorAll('.entity-attr-item').forEach(r => r.classList.remove('drag-over'));
+    item.classList.add('drag-over');
+  });
+
+  sublist.addEventListener('dragleave', e => {
+    e.stopPropagation();
+    const item = e.target.closest('.entity-attr-item');
+    if (item) item.classList.remove('drag-over');
+  });
+
+  sublist.addEventListener('drop', e => {
+    e.stopPropagation();
+    e.preventDefault();
+    const target = e.target.closest('.entity-attr-item');
+    if (!target || !dragSrc || target === dragSrc) return;
+    sublist.querySelectorAll('.entity-attr-item').forEach(r => r.classList.remove('drag-over'));
+    const items = [...sublist.querySelectorAll('.entity-attr-item')];
+    const srcIdx = items.indexOf(dragSrc);
+    const tgtIdx = items.indexOf(target);
+    if (srcIdx < tgtIdx) target.after(dragSrc); else target.before(dragSrc);
+
+    const newOrder = [...sublist.querySelectorAll('.entity-attr-item')].map(r => r.dataset.attribute);
+    // Update key star indicators
+    sublist.querySelectorAll('.entity-attr-item').forEach((item, i) => {
+      const star = item.querySelector('.entity-key-star, .entity-key-placeholder');
+      if (star) {
+        star.className = i === 0 ? 'entity-key-star' : 'entity-key-placeholder';
+        star.title = i === 0 ? 'Key attribute' : '';
+        star.textContent = i === 0 ? '★' : '';
+      }
+    });
+    const et = allEntityTypes.find(e => e.id === entityId);
+    if (et) et.attributes = newOrder;
+    saveEntityAttributeOrder(entityId, newOrder);
+  });
+}
+
+async function saveCustomDataOrder(list) {
+  const items = [...list.querySelectorAll(':scope > .custom-data-item')];
+  const order = items.map(item =>
+    item.dataset.type === 'attribute'
+      ? { type: 'attribute', name: item.dataset.name }
+      : { type: 'entity', id: item.dataset.entityId }
+  );
+  allCustomDataOrder = order;
+  allAttributes = order.filter(i => i.type === 'attribute').map(i => i.name);
+  const entityMap = Object.fromEntries(allEntityTypes.map(e => [e.id, e]));
+  allEntityTypes = order.filter(i => i.type === 'entity').map(i => entityMap[i.id]).filter(Boolean);
+  try {
+    await fetch(`${API_BASE}/entities/custom-data-order`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order })
+    });
+  } catch (error) {
+    console.error('Error saving custom data order:', error);
+  }
+}
+
+async function saveEntityAttributeOrder(entityId, newOrder) {
+  try {
+    await fetch(`${API_BASE}/entities/${encodeURIComponent(entityId)}/attributes/order`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order: newOrder })
+    });
+  } catch (error) {
+    console.error('Error saving entity attribute order:', error);
+  }
+}
+
+function initNewEntityButton() {
+  const btn = document.getElementById('new-entity-btn');
+  if (!btn || btn.dataset.entityInitialized) return;
+  btn.dataset.entityInitialized = '1';
+  btn.addEventListener('click', promptNewEntity);
+}
+
+async function promptNewEntity() {
+  const name = prompt('Enter entity type name (e.g. "Artist", "Location"):');
+  if (!name || !name.trim()) return;
+  try {
+    const response = await fetch(`${API_BASE}/entities`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim() })
+    });
+    const result = await response.json();
+    if (result.success) {
+      allEntityTypes = result.entityTypes;
+      allCustomDataOrder = result.customDataOrder;
+      renderCustomDataList();
+    } else {
+      alert(result.error || 'Failed to add entity type');
+    }
+  } catch (error) {
+    console.error('Error adding entity type:', error);
+    alert('Failed to add entity type');
+  }
+}
+
+async function promptNewEntityAttribute(entityId) {
+  const entityType = allEntityTypes.find(e => e.id === entityId);
+  const name = prompt(`Enter attribute name for "${entityType ? entityType.name : entityId}":`);
+  if (!name || !name.trim()) return;
+  try {
+    const response = await fetch(`${API_BASE}/entities/${encodeURIComponent(entityId)}/attributes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim() })
+    });
+    const result = await response.json();
+    if (result.success) {
+      const et = allEntityTypes.find(e => e.id === entityId);
+      if (et) et.attributes = result.entityType.attributes;
+      renderCustomDataList();
+    } else {
+      alert(result.error || 'Failed to add entity attribute');
+    }
+  } catch (error) {
+    console.error('Error adding entity attribute:', error);
+    alert('Failed to add entity attribute');
+  }
+}
+
+async function deleteEntityType(entityId) {
+  const entityType = allEntityTypes.find(e => e.id === entityId);
+  const entityName = entityType ? entityType.name : entityId;
+  const instances = allEntityInstances[entityId] || {};
+  const instanceCount = Object.keys(instances).length;
+  let confirmMsg = `Delete entity type "${entityName}"?`;
+  if (instanceCount > 0) {
+    const s = instanceCount === 1 ? 'instance' : 'instances';
+    confirmMsg += ` This will also delete ${instanceCount} saved ${s} and remove entity links from all images.`;
+  }
+  if (!confirm(confirmMsg)) return;
+
+  try {
+    const response = await fetch(`${API_BASE}/entities/${encodeURIComponent(entityId)}`, { method: 'DELETE' });
+    const result = await response.json();
+    if (result.success) {
+      allEntityTypes = result.entityTypes;
+      allCustomDataOrder = result.customDataOrder;
+      delete allEntityInstances[entityId];
+      for (const img of Object.values(allImages)) {
+        if (img.entityRefs) delete img.entityRefs[entityId];
+      }
+      renderCustomDataList();
+    } else {
+      alert(result.error || 'Failed to delete entity type');
+    }
+  } catch (error) {
+    console.error('Error deleting entity type:', error);
+    alert('Failed to delete entity type');
+  }
+}
+
+async function deleteEntityTypeAttribute(entityId, attrName) {
+  const entityType = allEntityTypes.find(e => e.id === entityId);
+  const isKeyAttr = entityType && entityType.attributes[0] === attrName;
+  const instances = allEntityInstances[entityId] || {};
+  const instanceCount = Object.keys(instances).length;
+
+  // Prevent deleting key attribute when existing instances depend on it
+  if (isKeyAttr && instanceCount > 0) {
+    alert(`"${attrName}" is the key attribute for "${entityType.name}" and cannot be deleted while there are ${instanceCount} existing instance(s). Delete the entity type instead, or delete its instances first.`);
+    return;
+  }
+
+  let confirmMsg = `Delete attribute "${attrName}" from "${entityType ? entityType.name : entityId}"?`;
+  if (instanceCount > 0) {
+    const s = instanceCount === 1 ? 'instance' : 'instances';
+    confirmMsg += ` This will remove this field from ${instanceCount} saved ${s}.`;
+  }
+  if (!confirm(confirmMsg)) return;
+
+  try {
+    const response = await fetch(
+      `${API_BASE}/entities/${encodeURIComponent(entityId)}/attributes/${encodeURIComponent(attrName)}`,
+      { method: 'DELETE' }
+    );
+    const result = await response.json();
+    if (result.success) {
+      const et = allEntityTypes.find(e => e.id === entityId);
+      if (et) et.attributes = result.entityType.attributes;
+      if (allEntityInstances[entityId]) {
+        for (const instance of Object.values(allEntityInstances[entityId])) {
+          delete instance[attrName];
+        }
+      }
+      renderCustomDataList();
+    } else {
+      alert(result.error || 'Failed to delete entity attribute');
+    }
+  } catch (error) {
+    console.error('Error deleting entity attribute:', error);
+    alert('Failed to delete entity attribute');
   }
 }
 

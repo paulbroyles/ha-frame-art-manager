@@ -185,6 +185,12 @@ class MetadataHelper {
       sanitizedUpdates.attributes = { ...existingAttributes, ...sanitizedUpdates.attributes };
     }
 
+    // Handle entityRefs update: merge into existing refs rather than replace
+    if (sanitizedUpdates.entityRefs && typeof sanitizedUpdates.entityRefs === 'object') {
+      const existingRefs = metadata.images[filename].entityRefs || {};
+      sanitizedUpdates.entityRefs = { ...existingRefs, ...sanitizedUpdates.entityRefs };
+    }
+
     metadata.images[filename] = {
       ...metadata.images[filename],
       ...sanitizedUpdates,
@@ -554,6 +560,231 @@ class MetadataHelper {
     metadata.attributes = newOrder;
     await this.writeMetadata(metadata);
     return metadata.attributes;
+  }
+
+  // ============================================================
+  // Entity Types
+  // ============================================================
+
+  /**
+   * Slugify a string for use as an entity instance key or entity type id
+   */
+  slugify(str) {
+    return String(str)
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      || 'entity';
+  }
+
+  _uniqueEntityTypeId(name, entityTypes) {
+    const base = this.slugify(name);
+    let candidate = base;
+    let counter = 2;
+    const existing = new Set(entityTypes.map(e => e.id));
+    while (existing.has(candidate)) {
+      candidate = `${base}-${counter++}`;
+    }
+    return candidate;
+  }
+
+  /**
+   * Build default customDataOrder from existing attributes and entityTypes
+   */
+  _buildDefaultCustomDataOrder(metadata) {
+    const order = [];
+    for (const a of (metadata.attributes || [])) {
+      order.push({ type: 'attribute', name: a });
+    }
+    for (const e of (metadata.entityTypes || [])) {
+      order.push({ type: 'entity', id: e.id });
+    }
+    return order;
+  }
+
+  /**
+   * Get all entity types
+   */
+  async getAllEntityTypes() {
+    const metadata = await this.readMetadata();
+    return metadata.entityTypes || [];
+  }
+
+  /**
+   * Get the unified custom data order (building default if not set)
+   */
+  async getCustomDataOrder() {
+    const metadata = await this.readMetadata();
+    return metadata.customDataOrder || this._buildDefaultCustomDataOrder(metadata);
+  }
+
+  /**
+   * Add a new entity type
+   */
+  async addEntityType(name) {
+    const metadata = await this.readMetadata();
+    if (!metadata.entityTypes) metadata.entityTypes = [];
+    const id = this._uniqueEntityTypeId(name, metadata.entityTypes);
+    const entityType = { id, name, attributes: [] };
+    metadata.entityTypes.push(entityType);
+    if (!metadata.customDataOrder) {
+      metadata.customDataOrder = this._buildDefaultCustomDataOrder(metadata);
+    } else {
+      metadata.customDataOrder.push({ type: 'entity', id });
+    }
+    await this.writeMetadata(metadata);
+    return { entityTypes: metadata.entityTypes, customDataOrder: metadata.customDataOrder };
+  }
+
+  /**
+   * Remove an entity type and all its instances
+   */
+  async removeEntityType(entityId) {
+    const metadata = await this.readMetadata();
+    metadata.entityTypes = (metadata.entityTypes || []).filter(e => e.id !== entityId);
+    if (metadata.entityInstances) delete metadata.entityInstances[entityId];
+    for (const img of Object.values(metadata.images || {})) {
+      if (img.entityRefs) delete img.entityRefs[entityId];
+    }
+    if (metadata.customDataOrder) {
+      metadata.customDataOrder = metadata.customDataOrder.filter(
+        item => !(item.type === 'entity' && item.id === entityId)
+      );
+    }
+    await this.writeMetadata(metadata);
+    return { entityTypes: metadata.entityTypes, customDataOrder: metadata.customDataOrder };
+  }
+
+  /**
+   * Add an attribute to an entity type
+   */
+  async addEntityTypeAttribute(entityId, attrName) {
+    const metadata = await this.readMetadata();
+    const entityType = (metadata.entityTypes || []).find(e => e.id === entityId);
+    if (!entityType) throw new Error(`Entity type ${entityId} not found`);
+    if (!entityType.attributes.includes(attrName)) {
+      entityType.attributes.push(attrName);
+      const instances = ((metadata.entityInstances || {})[entityId]) || {};
+      for (const instance of Object.values(instances)) {
+        if (!(attrName in instance)) instance[attrName] = '';
+      }
+    }
+    await this.writeMetadata(metadata);
+    return entityType;
+  }
+
+  /**
+   * Remove an attribute from an entity type
+   */
+  async removeEntityTypeAttribute(entityId, attrName) {
+    const metadata = await this.readMetadata();
+    const entityType = (metadata.entityTypes || []).find(e => e.id === entityId);
+    if (!entityType) throw new Error(`Entity type ${entityId} not found`);
+    entityType.attributes = entityType.attributes.filter(a => a !== attrName);
+    const instances = ((metadata.entityInstances || {})[entityId]) || {};
+    for (const instance of Object.values(instances)) {
+      delete instance[attrName];
+    }
+    await this.writeMetadata(metadata);
+    return entityType;
+  }
+
+  /**
+   * Reorder attributes within an entity type
+   */
+  async reorderEntityTypeAttributes(entityId, newOrder) {
+    const metadata = await this.readMetadata();
+    const entityType = (metadata.entityTypes || []).find(e => e.id === entityId);
+    if (!entityType) throw new Error(`Entity type ${entityId} not found`);
+    const existing = new Set(entityType.attributes);
+    if (newOrder.length !== existing.size || !newOrder.every(a => existing.has(a))) {
+      throw new Error('Invalid attribute order: must contain the same attributes');
+    }
+    entityType.attributes = newOrder;
+    await this.writeMetadata(metadata);
+    return entityType;
+  }
+
+  /**
+   * Reorder the unified custom data list (attributes + entity types interleaved)
+   * newOrder: array of {type: 'attribute'|'entity', name?: string, id?: string}
+   */
+  async reorderCustomData(newOrder) {
+    const metadata = await this.readMetadata();
+    metadata.customDataOrder = newOrder;
+    // Sync metadata.attributes order from customDataOrder
+    const attrOrder = newOrder.filter(i => i.type === 'attribute').map(i => i.name);
+    const existing = new Set(metadata.attributes || []);
+    if (attrOrder.length === existing.size && attrOrder.every(a => existing.has(a))) {
+      metadata.attributes = attrOrder;
+    }
+    // Sync entityTypes order from customDataOrder
+    const entityOrder = newOrder.filter(i => i.type === 'entity').map(i => i.id);
+    const existingEntityIds = new Set((metadata.entityTypes || []).map(e => e.id));
+    if (entityOrder.length === existingEntityIds.size && entityOrder.every(id => existingEntityIds.has(id))) {
+      metadata.entityTypes = entityOrder.map(id => metadata.entityTypes.find(e => e.id === id));
+    }
+    await this.writeMetadata(metadata);
+    return metadata.customDataOrder;
+  }
+
+  // ============================================================
+  // Entity Instances
+  // ============================================================
+
+  /**
+   * Get all instances of an entity type
+   */
+  async getAllEntityInstances(entityId) {
+    const metadata = await this.readMetadata();
+    return ((metadata.entityInstances || {})[entityId]) || {};
+  }
+
+  /**
+   * Create or update an entity instance.
+   * The key is derived by slugifying the key attribute value (first attribute).
+   * Returns { key, isNew, data }
+   */
+  async upsertEntityInstance(entityId, data) {
+    const metadata = await this.readMetadata();
+    const entityType = (metadata.entityTypes || []).find(e => e.id === entityId);
+    if (!entityType) throw new Error(`Entity type ${entityId} not found`);
+
+    const keyAttr = entityType.attributes[0];
+    if (!keyAttr) throw new Error(`Entity type "${entityType.name}" has no attributes`);
+
+    const keyValue = String(data[keyAttr] || '').trim();
+    if (!keyValue) throw new Error(`Key attribute "${keyAttr}" is required`);
+
+    const key = this.slugify(keyValue);
+
+    if (!metadata.entityInstances) metadata.entityInstances = {};
+    if (!metadata.entityInstances[entityId]) metadata.entityInstances[entityId] = {};
+
+    const isNew = !(key in metadata.entityInstances[entityId]);
+
+    // Build instance data (only attributes defined in entity type)
+    const instanceData = {};
+    for (const attr of entityType.attributes) {
+      instanceData[attr] = String(data[attr] ?? '');
+    }
+
+    metadata.entityInstances[entityId][key] = instanceData;
+    await this.writeMetadata(metadata);
+    return { key, isNew, data: instanceData };
+  }
+
+  /**
+   * Get filenames of images that reference a specific entity instance
+   */
+  async getEntityInstanceUsage(entityId, key) {
+    const metadata = await this.readMetadata();
+    return Object.keys(metadata.images || {}).filter(filename => {
+      const refs = metadata.images[filename].entityRefs || {};
+      return refs[entityId] === key;
+    });
   }
 
   /**
