@@ -10751,29 +10751,29 @@ body.dropdown-open .image-card:hover {
 }
 
 /* ============================================================
-   Custom Fields
+   Custom Attributes
    ============================================================ */
 
-.modal-fields-section {
+.modal-attributes-section {
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid var(--border-color, #e0e0e0);
 }
 
-.modal-fields-inputs {
+.modal-attributes-inputs {
   display: flex;
   flex-direction: column;
   gap: 8px;
   margin-top: 8px;
 }
 
-.modal-field-row {
+.modal-attribute-row {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.modal-field-label {
+.modal-attribute-label {
   flex: 0 0 auto;
   min-width: 80px;
   font-size: 13px;
@@ -10781,7 +10781,7 @@ body.dropdown-open .image-card:hover {
   text-align: right;
 }
 
-.modal-field-input {
+.modal-attribute-input {
   flex: 1 1 auto;
   padding: 4px 8px;
   font-size: 13px;
@@ -10792,13 +10792,13 @@ body.dropdown-open .image-card:hover {
   min-width: 0;
 }
 
-.modal-field-input:focus {
+.modal-attribute-input:focus {
   outline: none;
   border-color: var(--accent-color, #4a90d9);
   box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.15);
 }
 
-.delete-field-btn {
+.delete-attribute-btn {
   color: var(--danger-color, #c0392b);
   background: none;
   border: none;
@@ -10809,15 +10809,15 @@ body.dropdown-open .image-card:hover {
   line-height: 1;
 }
 
-.delete-field-btn:hover {
+.delete-attribute-btn:hover {
   background: var(--danger-bg, #fdecea);
 }
 
-.fields-table .th-drag {
+.attributes-table .th-drag {
   width: 24px;
 }
 
-.fields-table .td-drag {
+.attributes-table .td-drag {
   width: 24px;
   text-align: center;
 }
@@ -10835,10 +10835,10 @@ body.dropdown-open .image-card:hover {
   cursor: grabbing;
 }
 
-.fields-table tr.dragging {
+.attributes-table tr.dragging {
   opacity: 0.4;
 }
 
-.fields-table tr.drag-over td {
+.attributes-table tr.drag-over td {
   border-top: 2px solid var(--accent-color, #4a90d9);
 }

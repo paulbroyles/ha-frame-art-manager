@@ -86,7 +86,7 @@ let allImages = {};
 let allTags = [];
 let allTVs = [];
 let allGlobalTagsets = {}; // Global tagsets (name -> {tags, exclude_tags})
-let allFields = []; // Global custom field names
+let allAttributes = []; // Global custom attribute names
 let currentImage = null;
 let selectedImages = new Set();
 let lastClickedIndex = null;
@@ -882,7 +882,7 @@ function getSimilarBreakpointCounts() {
 }
 
 const ADVANCED_TAB_DEFAULT = 'tags';
-const VALID_ADVANCED_TABS = new Set(['tags', 'fields', 'recency', 'settings', 'metadata', 'sync']);
+const VALID_ADVANCED_TABS = new Set(['tags', 'custom-data', 'recency', 'settings', 'metadata', 'sync']);
 
 function normalizeEditingFilterName(name) {
   if (!name) return 'none';
@@ -994,8 +994,8 @@ function switchToAdvancedSubTab(tabName) {
     loadMetadata();
   } else if (targetTab === 'tags') {
     loadTagsTab();
-  } else if (targetTab === 'fields') {
-    loadFieldsTab();
+  } else if (targetTab === 'custom-data') {
+    loadCustomDataTab();
   } else if (targetTab === 'recency') {
     loadRecencyTab();
   }
@@ -1319,7 +1319,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load UI first so user can start working immediately
   loadGallery();
   loadTags();
-  loadFields();
+  loadAttributes();
   loadTVs();
   initUploadForm();
   initBatchUploadForm(); // Initialize batch upload
@@ -1904,7 +1904,7 @@ function switchToTab(tabName) {
     // Render suggested tags when entering upload tab
     renderUploadTvTagsHelper();
     renderUploadAppliedTags();
-    renderUploadFields();
+    renderUploadAttributes();
   }
 }
 
@@ -4395,11 +4395,11 @@ function initUploadForm() {
             form.reset();
             resetUploadProgressUI(submitButton, progressContainer, progressBar);
             
-            // Clear upload applied tags and fields
+            // Clear upload applied tags and attributes
             uploadAppliedTags = [];
             renderUploadAppliedTags();
             renderUploadTvTagsHelper();
-            renderUploadFields();
+            renderUploadAttributes();
             
             // Reload tags in case new ones were added
             await loadTags();
@@ -4455,47 +4455,47 @@ function initUploadForm() {
       resetUploadProgressUI(submitButton, progressContainer, progressBar);
     });
 
-    // Append custom field values as JSON
-    const fieldValues = collectUploadFields();
-    if (fieldValues) {
-      formData.append('fieldsJson', JSON.stringify(fieldValues));
+    // Append custom attribute values as JSON
+    const attributeValues = collectUploadAttributes();
+    if (attributeValues) {
+      formData.append('attributesJson', JSON.stringify(attributeValues));
     }
 
     // Send the request
     xhr.open('POST', `${API_BASE}/images/upload`);
     xhr.send(formData);
   });
-  
+
   // Initialize upload tags functionality
   initUploadTags();
 }
 
-// Render custom fields inputs in the upload form
-function renderUploadFields() {
-  const section = document.getElementById('upload-fields-section');
+// Render custom attribute inputs in the upload form
+function renderUploadAttributes() {
+  const section = document.getElementById('upload-attributes-section');
   if (!section) return;
 
-  if (!allFields || allFields.length === 0) {
+  if (!allAttributes || allAttributes.length === 0) {
     section.style.display = 'none';
     section.innerHTML = '';
     return;
   }
 
   section.style.display = '';
-  section.innerHTML = allFields.map(fieldName => `
-    <div class="modal-field-row">
-      <label class="modal-field-label">${escapeHtml(fieldName)}:</label>
-      <input type="text" class="modal-field-input upload-field-input" data-field="${escapeHtml(fieldName)}" value="" placeholder="" />
+  section.innerHTML = allAttributes.map(attrName => `
+    <div class="modal-attribute-row">
+      <label class="modal-attribute-label">${escapeHtml(attrName)}:</label>
+      <input type="text" class="modal-attribute-input upload-attribute-input" data-attribute="${escapeHtml(attrName)}" value="" placeholder="" />
     </div>
   `).join('');
 }
 
-// Collect current custom field values from the upload form
-function collectUploadFields() {
-  if (!allFields || allFields.length === 0) return null;
+// Collect current custom attribute values from the upload form
+function collectUploadAttributes() {
+  if (!allAttributes || allAttributes.length === 0) return null;
   const result = {};
-  document.querySelectorAll('#upload-fields-section .upload-field-input').forEach(input => {
-    result[input.dataset.field] = input.value;
+  document.querySelectorAll('#upload-attributes-section .upload-attribute-input').forEach(input => {
+    result[input.dataset.attribute] = input.value;
   });
   return result;
 }
@@ -5121,12 +5121,12 @@ async function loadTags() {
   }
 }
 
-async function loadFields() {
+async function loadAttributes() {
   try {
-    const response = await fetch(`${API_BASE}/fields`);
-    allFields = await response.json();
+    const response = await fetch(`${API_BASE}/attributes`);
+    allAttributes = await response.json();
   } catch (error) {
-    console.error('Error loading fields:', error);
+    console.error('Error loading attributes:', error);
   }
 }
 
@@ -8144,8 +8144,8 @@ function openImageModal(filename) {
   renderImageTagBadges(imageData.tags || []);
   renderTvTagsHelper();
 
-  // Render custom fields
-  renderModalFields(imageData.fields || {});
+  // Render custom attributes
+  renderModalAttributes(imageData.attributes || {});
 
   exitEditMode();
   const initialPreset = detectInitialCropPreset(imageData);
@@ -8251,47 +8251,47 @@ async function saveFilenameChange() {
   }
 }
 
-function renderModalFields(imageFields) {
-  const section = document.getElementById('modal-fields-section');
-  const container = document.getElementById('modal-fields-inputs');
+function renderModalAttributes(imageAttributes) {
+  const section = document.getElementById('modal-attributes-section');
+  const container = document.getElementById('modal-attributes-inputs');
   if (!section || !container) return;
 
-  if (!allFields || allFields.length === 0) {
+  if (!allAttributes || allAttributes.length === 0) {
     section.style.display = 'none';
     return;
   }
 
   section.style.display = '';
 
-  container.innerHTML = allFields.map(fieldName => {
-    const value = escapeHtml(String((imageFields && imageFields[fieldName]) || ''));
+  container.innerHTML = allAttributes.map(attrName => {
+    const value = escapeHtml(String((imageAttributes && imageAttributes[attrName]) || ''));
     return `
-      <div class="modal-field-row">
-        <label class="modal-field-label">${escapeHtml(fieldName)}:</label>
-        <input type="text" class="modal-field-input" data-field="${escapeHtml(fieldName)}" value="${value}" placeholder="" />
+      <div class="modal-attribute-row">
+        <label class="modal-attribute-label">${escapeHtml(attrName)}:</label>
+        <input type="text" class="modal-attribute-input" data-attribute="${escapeHtml(attrName)}" value="${value}" placeholder="" />
       </div>
     `;
   }).join('');
 
-  container.querySelectorAll('.modal-field-input').forEach(input => {
-    input.addEventListener('change', () => saveImageField(input.dataset.field, input.value));
+  container.querySelectorAll('.modal-attribute-input').forEach(input => {
+    input.addEventListener('change', () => saveImageAttribute(input.dataset.attribute, input.value));
   });
 }
 
-async function saveImageField(fieldName, value) {
+async function saveImageAttribute(attributeName, value) {
   if (!currentImage) return;
   try {
     const response = await fetch(`${API_BASE}/images/${encodeURIComponent(currentImage)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fields: { [fieldName]: value } })
+      body: JSON.stringify({ attributes: { [attributeName]: value } })
     });
     const result = await response.json();
     if (result.success && result.data) {
       allImages[currentImage] = result.data;
     }
   } catch (error) {
-    console.error('Error saving field:', error);
+    console.error('Error saving attribute:', error);
   }
 }
 
@@ -11429,40 +11429,40 @@ async function loadTagsTab() {
 // FIELDS TAB
 // ============================================================================
 
-async function loadFieldsTab() {
-  await loadFields();
-  renderFieldsTable();
-  initNewFieldButton();
+async function loadCustomDataTab() {
+  await loadAttributes();
+  renderAttributesTable();
+  initNewAttributeButton();
 }
 
-function renderFieldsTable() {
-  const container = document.getElementById('fields-table-container');
+function renderAttributesTable() {
+  const container = document.getElementById('attributes-table-container');
   if (!container) return;
 
-  if (!allFields || allFields.length === 0) {
-    container.innerHTML = '<p class="empty-state">No custom fields defined. Click "+ New Field" to create one.</p>';
+  if (!allAttributes || allAttributes.length === 0) {
+    container.innerHTML = '<p class="empty-state">No attributes defined. Click "+ New Attribute" to create one.</p>';
     return;
   }
 
   let html = `
-    <table class="tagsets-table fields-table">
+    <table class="tagsets-table attributes-table">
       <thead>
         <tr>
           <th class="th-drag"></th>
-          <th>Field Name</th>
+          <th>Attribute Name</th>
           <th class="th-actions"></th>
         </tr>
       </thead>
-      <tbody id="fields-tbody">
+      <tbody id="attributes-tbody">
   `;
 
-  for (const fieldName of allFields) {
+  for (const attrName of allAttributes) {
     html += `
-      <tr draggable="true" data-field="${escapeHtml(fieldName)}">
+      <tr draggable="true" data-attribute="${escapeHtml(attrName)}">
         <td class="td-drag"><span class="drag-handle" title="Drag to reorder">⠿</span></td>
-        <td>${escapeHtml(fieldName)}</td>
+        <td>${escapeHtml(attrName)}</td>
         <td class="td-actions">
-          <button class="btn-icon btn-danger-icon delete-field-btn" data-field="${escapeHtml(fieldName)}" title="Delete field">✕</button>
+          <button class="btn-icon btn-danger-icon delete-attribute-btn" data-attribute="${escapeHtml(attrName)}" title="Delete attribute">✕</button>
         </td>
       </tr>
     `;
@@ -11471,14 +11471,14 @@ function renderFieldsTable() {
   html += '</tbody></table>';
   container.innerHTML = html;
 
-  container.querySelectorAll('.delete-field-btn').forEach(btn => {
-    btn.addEventListener('click', () => deleteField(btn.dataset.field));
+  container.querySelectorAll('.delete-attribute-btn').forEach(btn => {
+    btn.addEventListener('click', () => deleteAttribute(btn.dataset.attribute));
   });
 
-  initFieldsDragAndDrop(container.querySelector('#fields-tbody'));
+  initAttributesDragAndDrop(container.querySelector('#attributes-tbody'));
 }
 
-function initFieldsDragAndDrop(tbody) {
+function initAttributesDragAndDrop(tbody) {
   if (!tbody) return;
   let dragSrc = null;
 
@@ -11487,7 +11487,7 @@ function initFieldsDragAndDrop(tbody) {
     if (!row) return;
     dragSrc = row;
     e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', row.dataset.field);
+    e.dataTransfer.setData('text/plain', row.dataset.attribute);
     row.classList.add('dragging');
   });
 
@@ -11528,92 +11528,92 @@ function initFieldsDragAndDrop(tbody) {
       target.before(dragSrc);
     }
 
-    // Sync allFields to new DOM order and persist
-    allFields = [...tbody.querySelectorAll('tr')].map(r => r.dataset.field);
-    saveFieldOrder();
+    // Sync allAttributes to new DOM order and persist
+    allAttributes = [...tbody.querySelectorAll('tr')].map(r => r.dataset.attribute);
+    saveAttributeOrder();
   });
 }
 
-async function saveFieldOrder() {
+async function saveAttributeOrder() {
   try {
-    await fetch(`${API_BASE}/fields/order`, {
+    await fetch(`${API_BASE}/attributes/order`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ order: allFields })
+      body: JSON.stringify({ order: allAttributes })
     });
   } catch (error) {
-    console.error('Error saving field order:', error);
+    console.error('Error saving attribute order:', error);
   }
 }
 
-function initNewFieldButton() {
-  const btn = document.getElementById('new-field-btn');
-  if (!btn || btn.dataset.fieldsInitialized) return;
-  btn.dataset.fieldsInitialized = '1';
-  btn.addEventListener('click', promptNewField);
+function initNewAttributeButton() {
+  const btn = document.getElementById('new-attribute-btn');
+  if (!btn || btn.dataset.attributesInitialized) return;
+  btn.dataset.attributesInitialized = '1';
+  btn.addEventListener('click', promptNewAttribute);
 }
 
-async function promptNewField() {
-  const name = prompt('Enter field name:');
+async function promptNewAttribute() {
+  const name = prompt('Enter attribute name:');
   if (!name || !name.trim()) return;
 
   const trimmed = name.trim();
 
-  if (allFields.includes(trimmed)) {
-    alert(`Field "${trimmed}" already exists.`);
+  if (allAttributes.includes(trimmed)) {
+    alert(`Attribute "${trimmed}" already exists.`);
     return;
   }
 
   try {
-    const response = await fetch(`${API_BASE}/fields`, {
+    const response = await fetch(`${API_BASE}/attributes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: trimmed })
     });
     const result = await response.json();
     if (result.success) {
-      allFields = result.fields;
-      renderFieldsTable();
+      allAttributes = result.attributes;
+      renderAttributesTable();
     } else {
-      alert(result.error || 'Failed to add field');
+      alert(result.error || 'Failed to add attribute');
     }
   } catch (error) {
-    console.error('Error adding field:', error);
-    alert('Failed to add field');
+    console.error('Error adding attribute:', error);
+    alert('Failed to add attribute');
   }
 }
 
-async function deleteField(fieldName) {
+async function deleteAttribute(attributeName) {
   try {
-    // Check if any images have a non-empty value for this field
-    const usageResponse = await fetch(`${API_BASE}/fields/${encodeURIComponent(fieldName)}/usage`);
+    // Check if any images have a non-empty value for this attribute
+    const usageResponse = await fetch(`${API_BASE}/attributes/${encodeURIComponent(attributeName)}/usage`);
     const usageData = await usageResponse.json();
     const imagesWithValue = usageData.imagesWithValue || [];
 
     if (imagesWithValue.length > 0) {
-      const confirmMsg = `${imagesWithValue.length} image(s) have a value for "${fieldName}". Deleting this field will remove those values. Continue?`;
+      const confirmMsg = `${imagesWithValue.length} image(s) have a value for "${attributeName}". Deleting this attribute will remove those values. Continue?`;
       if (!confirm(confirmMsg)) return;
     }
 
-    const response = await fetch(`${API_BASE}/fields/${encodeURIComponent(fieldName)}`, {
+    const response = await fetch(`${API_BASE}/attributes/${encodeURIComponent(attributeName)}`, {
       method: 'DELETE'
     });
     const result = await response.json();
     if (result.success) {
-      allFields = result.fields;
-      // Update local image cache to remove this field
+      allAttributes = result.attributes;
+      // Update local image cache to remove this attribute
       for (const imageData of Object.values(allImages)) {
-        if (imageData.fields) {
-          delete imageData.fields[fieldName];
+        if (imageData.attributes) {
+          delete imageData.attributes[attributeName];
         }
       }
-      renderFieldsTable();
+      renderAttributesTable();
     } else {
-      alert(result.error || 'Failed to delete field');
+      alert(result.error || 'Failed to delete attribute');
     }
   } catch (error) {
-    console.error('Error deleting field:', error);
-    alert('Failed to delete field');
+    console.error('Error deleting attribute:', error);
+    alert('Failed to delete attribute');
   }
 }
 

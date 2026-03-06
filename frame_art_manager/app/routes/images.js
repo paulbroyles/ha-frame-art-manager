@@ -446,19 +446,19 @@ router.post('/upload', upload.single('image'), async (req, res) => {
         imageData.sourceHash = sourceHash;
       }
 
-      // Apply custom fields if provided
-      if (req.body.fieldsJson) {
+      // Apply custom attributes if provided
+      if (req.body.attributesJson) {
         try {
-          const parsedFields = JSON.parse(req.body.fieldsJson);
-          if (parsedFields && typeof parsedFields === 'object' && !Array.isArray(parsedFields)) {
-            const sanitizedFields = Object.fromEntries(
-              Object.entries(parsedFields).map(([k, v]) => [k, String(v ?? '')])
+          const parsedAttributes = JSON.parse(req.body.attributesJson);
+          if (parsedAttributes && typeof parsedAttributes === 'object' && !Array.isArray(parsedAttributes)) {
+            const sanitizedAttributes = Object.fromEntries(
+              Object.entries(parsedAttributes).map(([k, v]) => [k, String(v ?? '')])
             );
-            await helper.updateImage(finalFilename, { fields: sanitizedFields });
-            imageData.fields = { ...(imageData.fields || {}), ...sanitizedFields };
+            await helper.updateImage(finalFilename, { attributes: sanitizedAttributes });
+            imageData.attributes = { ...(imageData.attributes || {}), ...sanitizedAttributes };
           }
         } catch (e) {
-          // ignore invalid JSON - fields remain as initialized by addImage
+          // ignore invalid JSON - attributes remain as initialized by addImage
         }
       }
     } catch (validationError) {
@@ -630,7 +630,7 @@ router.post('/:filename/rename', async (req, res) => {
 router.put('/:filename', async (req, res) => {
   try {
     const helper = new MetadataHelper(req.frameArtPath);
-    const { matte, filter, tags, fields } = req.body || {};
+    const { matte, filter, tags, attributes } = req.body || {};
 
     const updates = {};
     if (matte !== undefined) {
@@ -646,10 +646,10 @@ router.put('/:filename', async (req, res) => {
           ? tags.split(',').map(tag => tag.trim()).filter(Boolean)
           : [];
     }
-    if (fields !== undefined && typeof fields === 'object' && !Array.isArray(fields)) {
+    if (attributes !== undefined && typeof attributes === 'object' && !Array.isArray(attributes)) {
       // Only allow string values
-      updates.fields = Object.fromEntries(
-        Object.entries(fields).map(([k, v]) => [k, String(v ?? '')])
+      updates.attributes = Object.fromEntries(
+        Object.entries(attributes).map(([k, v]) => [k, String(v ?? '')])
       );
     }
 

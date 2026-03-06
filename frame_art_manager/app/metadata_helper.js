@@ -56,7 +56,20 @@ class MetadataHelper {
       if (parsed.tvs) {
         delete parsed.tvs;
       }
-      
+
+      // Migrate 'fields' → 'attributes' (one-time rename)
+      if (parsed.fields !== undefined && parsed.attributes === undefined) {
+        parsed.attributes = parsed.fields;
+        delete parsed.fields;
+        for (const img of Object.values(parsed.images || {})) {
+          if (img.fields !== undefined && img.attributes === undefined) {
+            img.attributes = img.fields;
+            delete img.fields;
+          }
+        }
+        await this.writeMetadata(parsed);
+      }
+
       return parsed;
     } catch (error) {
       console.error('Error reading metadata:', error);
@@ -114,11 +127,11 @@ class MetadataHelper {
       throw new Error(`Invalid image file: ${filename}`);
     }
     
-    // Initialize fields from global fields list
-    const initialFields = {};
-    if (metadata.fields && Array.isArray(metadata.fields)) {
-      metadata.fields.forEach(fieldName => {
-        initialFields[fieldName] = '';
+    // Initialize attributes from global attributes list
+    const initialAttributes = {};
+    if (metadata.attributes && Array.isArray(metadata.attributes)) {
+      metadata.attributes.forEach(attrName => {
+        initialAttributes[attrName] = '';
       });
     }
 
@@ -126,7 +139,7 @@ class MetadataHelper {
       matte: normalizedMatte,
       filter: normalizedFilter,
       tags,
-      fields: initialFields,
+      attributes: initialAttributes,
       dimensions,
       aspectRatio,
       added: new Date().toISOString()
@@ -166,10 +179,10 @@ class MetadataHelper {
       sanitizedUpdates.filter = normalizeFilterValue(sanitizedUpdates.filter);
     }
 
-    // Handle fields update: merge into existing fields rather than replace
-    if (sanitizedUpdates.fields && typeof sanitizedUpdates.fields === 'object') {
-      const existingFields = metadata.images[filename].fields || {};
-      sanitizedUpdates.fields = { ...existingFields, ...sanitizedUpdates.fields };
+    // Handle attributes update: merge into existing attributes rather than replace
+    if (sanitizedUpdates.attributes && typeof sanitizedUpdates.attributes === 'object') {
+      const existingAttributes = metadata.images[filename].attributes || {};
+      sanitizedUpdates.attributes = { ...existingAttributes, ...sanitizedUpdates.attributes };
     }
 
     metadata.images[filename] = {
@@ -477,80 +490,80 @@ class MetadataHelper {
   }
 
   /**
-   * Get all custom fields
+   * Get all custom attributes
    */
-  async getAllFields() {
+  async getAllAttributes() {
     const metadata = await this.readMetadata();
-    return metadata.fields || [];
+    return metadata.attributes || [];
   }
 
   /**
-   * Add a custom field to the library and initialize it (empty) on all images
+   * Add a custom attribute to the library and initialize it (empty) on all images
    */
-  async addField(fieldName) {
+  async addAttribute(attributeName) {
     const metadata = await this.readMetadata();
 
-    if (!metadata.fields) {
-      metadata.fields = [];
+    if (!metadata.attributes) {
+      metadata.attributes = [];
     }
 
-    if (!metadata.fields.includes(fieldName)) {
-      metadata.fields.push(fieldName);
+    if (!metadata.attributes.includes(attributeName)) {
+      metadata.attributes.push(attributeName);
       // Add empty value to all existing images
       for (const filename of Object.keys(metadata.images)) {
-        if (!metadata.images[filename].fields) {
-          metadata.images[filename].fields = {};
+        if (!metadata.images[filename].attributes) {
+          metadata.images[filename].attributes = {};
         }
-        if (!(fieldName in metadata.images[filename].fields)) {
-          metadata.images[filename].fields[fieldName] = '';
+        if (!(attributeName in metadata.images[filename].attributes)) {
+          metadata.images[filename].attributes[attributeName] = '';
         }
       }
       await this.writeMetadata(metadata);
     }
 
-    return metadata.fields;
+    return metadata.attributes;
   }
 
   /**
-   * Remove a custom field from the library and all images
+   * Remove a custom attribute from the library and all images
    */
-  async removeField(fieldName) {
+  async removeAttribute(attributeName) {
     const metadata = await this.readMetadata();
 
-    metadata.fields = (metadata.fields || []).filter(f => f !== fieldName);
+    metadata.attributes = (metadata.attributes || []).filter(a => a !== attributeName);
 
     for (const filename of Object.keys(metadata.images)) {
-      if (metadata.images[filename].fields) {
-        delete metadata.images[filename].fields[fieldName];
+      if (metadata.images[filename].attributes) {
+        delete metadata.images[filename].attributes[attributeName];
       }
     }
 
     await this.writeMetadata(metadata);
-    return metadata.fields;
+    return metadata.attributes;
   }
 
   /**
-   * Reorder fields to a new sequence
+   * Reorder attributes to a new sequence
    */
-  async reorderFields(newOrder) {
+  async reorderAttributes(newOrder) {
     const metadata = await this.readMetadata();
-    const existing = new Set(metadata.fields || []);
-    if (newOrder.length !== existing.size || !newOrder.every(f => existing.has(f))) {
-      throw new Error('Invalid field order: must contain the same fields');
+    const existing = new Set(metadata.attributes || []);
+    if (newOrder.length !== existing.size || !newOrder.every(a => existing.has(a))) {
+      throw new Error('Invalid attribute order: must contain the same attributes');
     }
-    metadata.fields = newOrder;
+    metadata.attributes = newOrder;
     await this.writeMetadata(metadata);
-    return metadata.fields;
+    return metadata.attributes;
   }
 
   /**
-   * Get list of images that have a non-empty value for a field
+   * Get list of images that have a non-empty value for an attribute
    */
-  async getImagesWithFieldValue(fieldName) {
+  async getImagesWithAttributeValue(attributeName) {
     const metadata = await this.readMetadata();
     return Object.keys(metadata.images).filter(filename => {
-      const fields = metadata.images[filename].fields || {};
-      return fields[fieldName] !== undefined && String(fields[fieldName]).trim() !== '';
+      const attributes = metadata.images[filename].attributes || {};
+      return attributes[attributeName] !== undefined && String(attributes[attributeName]).trim() !== '';
     });
   }
 
