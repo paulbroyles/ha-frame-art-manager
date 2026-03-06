@@ -1894,6 +1894,7 @@ function switchToTab(tabName) {
     // Render suggested tags when entering upload tab
     renderUploadTvTagsHelper();
     renderUploadAppliedTags();
+    renderUploadFields();
   }
 }
 
@@ -4384,10 +4385,11 @@ function initUploadForm() {
             form.reset();
             resetUploadProgressUI(submitButton, progressContainer, progressBar);
             
-            // Clear upload applied tags
+            // Clear upload applied tags and fields
             uploadAppliedTags = [];
             renderUploadAppliedTags();
             renderUploadTvTagsHelper();
+            renderUploadFields();
             
             // Reload tags in case new ones were added
             await loadTags();
@@ -4443,6 +4445,12 @@ function initUploadForm() {
       resetUploadProgressUI(submitButton, progressContainer, progressBar);
     });
 
+    // Append custom field values as JSON
+    const fieldValues = collectUploadFields();
+    if (fieldValues) {
+      formData.append('fieldsJson', JSON.stringify(fieldValues));
+    }
+
     // Send the request
     xhr.open('POST', `${API_BASE}/images/upload`);
     xhr.send(formData);
@@ -4450,6 +4458,36 @@ function initUploadForm() {
   
   // Initialize upload tags functionality
   initUploadTags();
+}
+
+// Render custom fields inputs in the upload form
+function renderUploadFields() {
+  const section = document.getElementById('upload-fields-section');
+  if (!section) return;
+
+  if (!allFields || allFields.length === 0) {
+    section.style.display = 'none';
+    section.innerHTML = '';
+    return;
+  }
+
+  section.style.display = '';
+  section.innerHTML = allFields.map(fieldName => `
+    <div class="modal-field-row">
+      <label class="modal-field-label">${escapeHtml(fieldName)}:</label>
+      <input type="text" class="modal-field-input upload-field-input" data-field="${escapeHtml(fieldName)}" value="" placeholder="" />
+    </div>
+  `).join('');
+}
+
+// Collect current custom field values from the upload form
+function collectUploadFields() {
+  if (!allFields || allFields.length === 0) return null;
+  const result = {};
+  document.querySelectorAll('#upload-fields-section .upload-field-input').forEach(input => {
+    result[input.dataset.field] = input.value;
+  });
+  return result;
 }
 
 // Helper to reset upload progress UI

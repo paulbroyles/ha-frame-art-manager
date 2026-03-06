@@ -445,6 +445,22 @@ router.post('/upload', upload.single('image'), async (req, res) => {
         await helper.updateImage(finalFilename, { sourceHash });
         imageData.sourceHash = sourceHash;
       }
+
+      // Apply custom fields if provided
+      if (req.body.fieldsJson) {
+        try {
+          const parsedFields = JSON.parse(req.body.fieldsJson);
+          if (parsedFields && typeof parsedFields === 'object' && !Array.isArray(parsedFields)) {
+            const sanitizedFields = Object.fromEntries(
+              Object.entries(parsedFields).map(([k, v]) => [k, String(v ?? '')])
+            );
+            await helper.updateImage(finalFilename, { fields: sanitizedFields });
+            imageData.fields = { ...(imageData.fields || {}), ...sanitizedFields };
+          }
+        } catch (e) {
+          // ignore invalid JSON - fields remain as initialized by addImage
+        }
+      }
     } catch (validationError) {
       await removeFileIfExists(finalFilePath);
       console.error('Error validating uploaded image:', validationError);
