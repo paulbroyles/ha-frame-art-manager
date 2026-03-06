@@ -4341,6 +4341,13 @@ function initUploadForm() {
     e.preventDefault();
 
     const formData = new FormData(form);
+    // Always use uploadAppliedTags as the authoritative source for tags.
+    // The tags-input text box has name="tags" in HTML, so its raw text would otherwise
+    // be submitted even if the user never clicked "Add" — causing unintended tags.
+    formData.delete('tags');
+    if (uploadAppliedTags.length > 0) {
+      formData.append('tags', uploadAppliedTags.join(', '));
+    }
     const statusDiv = document.getElementById('upload-status');
     const submitButton = form.querySelector('button[type="submit"]');
     const progressContainer = document.getElementById('upload-progress-container');
