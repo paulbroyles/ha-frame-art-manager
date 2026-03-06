@@ -1,0 +1,21 @@
+configuration:
+  github_sync_enabled:
+    name: GitHub Sync
+    description: >-
+      Enable syncing the art library with GitHub. When disabled, no SSH keys
+      are registered and no connections to GitHub are made at startup or during
+      use. Any sync settings you have entered remain saved but unused.
+  frame_art_path:
+    name: Frame Art Path
+    description: Path to the frame art library directory.
+  port:
+    name: Port
+    description: Port for the web interface.
+  git_remote_host_alias:
+    name: Git Remote Host Alias
+    description: SSH host alias used in the Git remote URL (e.g. github-billy).
+  ssh_private_key:
+    name: SSH Private Key
+    description: >-
+      Private SSH key for authenticating with GitHub. Enter each line of the
+      key as a separate entry.

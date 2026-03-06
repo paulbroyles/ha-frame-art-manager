@@ -1498,9 +1498,19 @@ async function updateSyncStatus() {
       updateSyncButtonState('error', 'Error', null, null, null);
       return;
     }
-    
+
+    if (data.syncDisabled) {
+      const controlSync = document.querySelector('.control-sync');
+      if (controlSync) controlSync.style.display = 'none';
+      return;
+    }
+
+    // Ensure the button is visible (in case sync was previously disabled)
+    const controlSync = document.querySelector('.control-sync');
+    if (controlSync) controlSync.style.display = '';
+
     const status = data.status;
-    
+
     // Determine state based on status
     if (status.hasChanges) {
       console.log('⚠️  Has changes - setting unsynced state');
@@ -8646,7 +8656,12 @@ async function loadSyncStatus() {
     if (!data.success) {
       throw new Error(data.error);
     }
-    
+
+    if (data.syncDisabled) {
+      container.innerHTML = '<div class="info-box" style="padding:16px;"><strong>GitHub sync is disabled.</strong> Enable <em>GitHub Sync</em> in the add-on Configuration to sync changes with GitHub.</div>';
+      return;
+    }
+
     const status = data.gitStatus;
     
     // Build status display

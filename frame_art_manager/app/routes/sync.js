@@ -7,6 +7,26 @@ const MetadataHelper = require('../metadata_helper');
 
 const LFS_POINTER_SIGNATURE = 'version https://git-lfs.github.com/spec/v1';
 
+const GITHUB_SYNC_ENABLED = process.env.GITHUB_SYNC_ENABLED === 'true';
+
+// Short-circuit network-dependent endpoints when sync is disabled.
+// Local-only endpoints (logs, git-status, conflicts, uncommitted-details) pass through.
+const NETWORK_PATHS = ['/status', '/full', '/check', '/verify'];
+
+router.use((req, res, next) => {
+  if (GITHUB_SYNC_ENABLED || !NETWORK_PATHS.includes(req.path)) {
+    return next();
+  }
+  if (req.path === '/check') {
+    // "already up to date" response — no pull, no error, triggers updateSyncStatus()
+    return res.json({ success: true, syncDisabled: true });
+  }
+  if (req.path === '/status') {
+    return res.json({ success: true, syncDisabled: true, status: { hasChanges: false } });
+  }
+  return res.json({ success: false, syncDisabled: true, error: 'GitHub sync is disabled' });
+});
+
 function isNewFileStatus(file) {
   const indexStatus = file.index || '';
   const workingStatus = file.working_dir || '';
@@ -657,6 +677,9 @@ router.delete('/logs', async (_req, res) => {
  * Get detailed git status for diagnostics
  */
 router.get('/git-status', async (req, res) => {
+  if (!GITHUB_SYNC_ENABLED) {
+    return res.json({ success: true, syncDisabled: true });
+  }
   try {
     const git = new GitHelper(req.frameArtPath);
     const status = await git.getStatus();

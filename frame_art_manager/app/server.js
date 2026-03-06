@@ -192,7 +192,11 @@ async function verifyGitConfiguration() {
 app.listen(PORT, async () => {
   console.log(`Frame Art Manager running on port ${PORT}`);
   console.log(`Frame art path: ${FRAME_ART_PATH}`);
-  await verifyGitConfiguration();
+  if (process.env.GITHUB_SYNC_ENABLED === 'true') {
+    await verifyGitConfiguration();
+  } else {
+    console.log('GitHub sync is disabled — skipping Git configuration check');
+  }
   await initializeDirectories();
   await backfillSourceHashes();
   console.log('\n✨ Server ready!\n');

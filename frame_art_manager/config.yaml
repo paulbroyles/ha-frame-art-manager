@@ -16,11 +16,13 @@ boot: auto
 options:
   frame_art_path: /config/www/frame_art
   port: 8099
+  github_sync_enabled: false
   git_remote_host_alias: "github-billy"
   ssh_private_key: []
 schema:
   frame_art_path: str
   port: int
+  github_sync_enabled: bool
   git_remote_host_alias: str?
   ssh_private_key:
     - str?
