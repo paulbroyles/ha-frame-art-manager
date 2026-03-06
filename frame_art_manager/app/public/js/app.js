@@ -4427,6 +4427,8 @@ function initUploadForm() {
 
             // Fetch fresh image data so the new image appears in gallery
             await loadGallery();
+            // Refresh entity instances so any newly created entity appears in the modal
+            await loadEntities();
 
             // Re-render gallery if special filter is active
             if (similarFilterActive) {
