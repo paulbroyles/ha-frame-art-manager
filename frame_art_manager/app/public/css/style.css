@@ -10812,3 +10812,33 @@ body.dropdown-open .image-card:hover {
 .delete-field-btn:hover {
   background: var(--danger-bg, #fdecea);
 }
+
+.fields-table .th-drag {
+  width: 24px;
+}
+
+.fields-table .td-drag {
+  width: 24px;
+  text-align: center;
+}
+
+.drag-handle {
+  cursor: grab;
+  color: var(--text-muted, #aaa);
+  font-size: 16px;
+  user-select: none;
+  display: inline-block;
+  line-height: 1;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.fields-table tr.dragging {
+  opacity: 0.4;
+}
+
+.fields-table tr.drag-over td {
+  border-top: 2px solid var(--accent-color, #4a90d9);
+}

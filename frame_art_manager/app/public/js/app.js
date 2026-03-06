@@ -8215,8 +8215,7 @@ function renderModalFields(imageFields) {
 
   section.style.display = '';
 
-  const sorted = [...allFields].sort((a, b) => a.localeCompare(b));
-  container.innerHTML = sorted.map(fieldName => {
+  container.innerHTML = allFields.map(fieldName => {
     const value = escapeHtml(String((imageFields && imageFields[fieldName]) || ''));
     return `
       <div class="modal-field-row">
@@ -11393,19 +11392,21 @@ function renderFieldsTable() {
   }
 
   let html = `
-    <table class="tagsets-table">
+    <table class="tagsets-table fields-table">
       <thead>
         <tr>
+          <th class="th-drag"></th>
           <th>Field Name</th>
           <th class="th-actions"></th>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="fields-tbody">
   `;
 
-  for (const fieldName of [...allFields].sort((a, b) => a.localeCompare(b))) {
+  for (const fieldName of allFields) {
     html += `
-      <tr>
+      <tr draggable="true" data-field="${escapeHtml(fieldName)}">
+        <td class="td-drag"><span class="drag-handle" title="Drag to reorder">⠿</span></td>
         <td>${escapeHtml(fieldName)}</td>
         <td class="td-actions">
           <button class="btn-icon btn-danger-icon delete-field-btn" data-field="${escapeHtml(fieldName)}" title="Delete field">✕</button>
@@ -11420,6 +11421,76 @@ function renderFieldsTable() {
   container.querySelectorAll('.delete-field-btn').forEach(btn => {
     btn.addEventListener('click', () => deleteField(btn.dataset.field));
   });
+
+  initFieldsDragAndDrop(container.querySelector('#fields-tbody'));
+}
+
+function initFieldsDragAndDrop(tbody) {
+  if (!tbody) return;
+  let dragSrc = null;
+
+  tbody.addEventListener('dragstart', e => {
+    const row = e.target.closest('tr');
+    if (!row) return;
+    dragSrc = row;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', row.dataset.field);
+    row.classList.add('dragging');
+  });
+
+  tbody.addEventListener('dragend', e => {
+    const row = e.target.closest('tr');
+    if (row) row.classList.remove('dragging');
+    tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over'));
+    dragSrc = null;
+  });
+
+  tbody.addEventListener('dragover', e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const row = e.target.closest('tr');
+    if (!row || row === dragSrc) return;
+    tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over'));
+    row.classList.add('drag-over');
+  });
+
+  tbody.addEventListener('dragleave', e => {
+    const row = e.target.closest('tr');
+    if (row) row.classList.remove('drag-over');
+  });
+
+  tbody.addEventListener('drop', e => {
+    e.preventDefault();
+    const target = e.target.closest('tr');
+    if (!target || !dragSrc || target === dragSrc) return;
+    tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over'));
+
+    // Reorder DOM
+    const rows = [...tbody.querySelectorAll('tr')];
+    const srcIdx = rows.indexOf(dragSrc);
+    const tgtIdx = rows.indexOf(target);
+    if (srcIdx < tgtIdx) {
+      target.after(dragSrc);
+    } else {
+      target.before(dragSrc);
+    }
+
+    // Sync allFields to new DOM order and persist
+    allFields = [...tbody.querySelectorAll('tr')].map(r => r.dataset.field);
+    saveFieldOrder();
+  });
+}
+
+async function saveFieldOrder() {
+  try {
+    await fetch(`${API_BASE}/fields/order`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order: allFields })
+    });
+  } catch (error) {
+    console.error('Error saving field order:', error);
+  }
 }
 
 function initNewFieldButton() {

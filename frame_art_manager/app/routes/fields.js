@@ -32,6 +32,22 @@ router.post('/', async (req, res) => {
   }
 });
 
+// PUT reorder fields
+router.put('/order', async (req, res) => {
+  try {
+    const { order } = req.body;
+    if (!Array.isArray(order)) {
+      return res.status(400).json({ error: 'order must be an array' });
+    }
+    const helper = new MetadataHelper(req.frameArtPath);
+    const fields = await helper.reorderFields(order);
+    res.json({ success: true, fields });
+  } catch (error) {
+    console.error('Error reordering fields:', error);
+    res.status(500).json({ error: 'Failed to reorder fields' });
+  }
+});
+
 // GET field usage (images with non-empty value) before delete
 router.get('/:fieldName/usage', async (req, res) => {
   try {

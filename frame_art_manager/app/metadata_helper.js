@@ -530,6 +530,20 @@ class MetadataHelper {
   }
 
   /**
+   * Reorder fields to a new sequence
+   */
+  async reorderFields(newOrder) {
+    const metadata = await this.readMetadata();
+    const existing = new Set(metadata.fields || []);
+    if (newOrder.length !== existing.size || !newOrder.every(f => existing.has(f))) {
+      throw new Error('Invalid field order: must contain the same fields');
+    }
+    metadata.fields = newOrder;
+    await this.writeMetadata(metadata);
+    return metadata.fields;
+  }
+
+  /**
    * Get list of images that have a non-empty value for a field
    */
   async getImagesWithFieldValue(fieldName) {
