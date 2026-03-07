@@ -5146,6 +5146,7 @@ async function loadAttributes() {
   try {
     const response = await fetch(`${API_BASE}/attributes`);
     allAttributes = await response.json();
+    renderUploadAttributes();
   } catch (error) {
     console.error('Error loading attributes:', error);
   }
@@ -5158,6 +5159,7 @@ async function loadEntities() {
     allEntityTypes = data.entityTypes || [];
     allEntityInstances = data.entityInstances || {};
     allCustomDataOrder = data.customDataOrder || [];
+    renderUploadEntities();
   } catch (error) {
     console.error('Error loading entities:', error);
   }
