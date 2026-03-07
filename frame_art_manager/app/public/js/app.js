@@ -1898,7 +1898,10 @@ function switchToTab(tabName) {
     if (!galleryHasLoadedAtLeastOnce) {
       loadGallery();
     } else {
-      // Just re-render with existing data (preserves filter state)
+      // Sync TV/tagset shortcut checkboxes with current tag filter state before rendering.
+      // This prevents stale checkbox state (e.g., a TV whose tagset changed while on the
+      // Advanced tab) from causing the gallery to display incorrect results.
+      updateTVShortcutStates();
       renderGallery();
     }
   }
@@ -5725,8 +5728,10 @@ async function loadTagsForFilter(options = {}) {
     // 1. Caller explicitly requested skipRender (e.g., periodic count updates)
     // 2. We're restoring saved state (filter hasn't actually changed)
     const shouldSkipRender = skipRender || hadSelections;
-    updateTagFilterDisplay(shouldSkipRender);
+    // Correct TV/tagset shortcut checkboxes BEFORE rendering, so the gallery
+    // reads consistent checkbox state (e.g., virtual-tag TVs/tagsets are unchecked).
     updateTVShortcutStates();
+    updateTagFilterDisplay(shouldSkipRender);
   } catch (error) {
     console.error('Error loading tags for filter:', error);
   }
@@ -6005,11 +6010,20 @@ function updateTVShortcutStates() {
       return;
     }
     
-    const tvIncludeTags = (tv.tags || []).map(tag => tag.toLowerCase()).filter(tag => availableTagsSet.has(tag));
+    const rawTvIncludeTags = (tv.tags || []).map(tag => tag.toLowerCase());
+    const tvIncludeTags = rawTvIncludeTags.filter(tag => availableTagsSet.has(tag));
     const tvExcludeTags = (tv.exclude_tags || []).map(tag => tag.toLowerCase()).filter(tag => availableTagsSet.has(tag));
-    
+
+    // If the TV's tagset has tags but none are real library tags (all virtual), it
+    // cannot match any real filter state — skip rather than false-matching empty filter.
+    if (rawTvIncludeTags.length > 0 && tvIncludeTags.length === 0) {
+      tvCheckbox.checked = false;
+      tvCheckbox.indeterminate = false;
+      return;
+    }
+
     // EXACT match: same size AND same contents (bidirectional)
-    const includeMatch = 
+    const includeMatch =
       tvIncludeTags.length === includedTagsSet.size &&
       tvIncludeTags.every(tag => includedTagsSet.has(tag)) &&
       includedTags.every(tag => tvIncludeTags.includes(tag));
@@ -6040,11 +6054,19 @@ function updateTVShortcutStates() {
       return;
     }
     
-    const tagsetIncludeTags = (tagset.tags || []).map(tag => tag.toLowerCase()).filter(tag => availableTagsSet.has(tag));
+    const rawTagsetIncludeTags = (tagset.tags || []).map(tag => tag.toLowerCase());
+    const tagsetIncludeTags = rawTagsetIncludeTags.filter(tag => availableTagsSet.has(tag));
     const tagsetExcludeTags = (tagset.exclude_tags || []).map(tag => tag.toLowerCase()).filter(tag => availableTagsSet.has(tag));
-    
+
+    // If the tagset has tags but none are real library tags (all virtual), it
+    // cannot match any real filter state — skip rather than false-matching empty filter.
+    if (rawTagsetIncludeTags.length > 0 && tagsetIncludeTags.length === 0) {
+      tagsetCheckbox.checked = false;
+      return;
+    }
+
     // EXACT match: same size AND same contents (bidirectional)
-    const includeMatch = 
+    const includeMatch =
       tagsetIncludeTags.length === includedTagsSet.size &&
       tagsetIncludeTags.every(tag => includedTagsSet.has(tag)) &&
       includedTags.every(tag => tagsetIncludeTags.includes(tag));
@@ -10935,16 +10957,20 @@ function getTagsWithActivityInRange() {
 // Case-insensitive matching to handle different tag casing between systems
 function imageMatchesTagset(imageData, tagset) {
   const imageTags = (imageData.tags || []).map(t => t.toLowerCase());
-  const includeTags = (tagset.tags || []).map(t => t.toLowerCase());
+  // Strip virtual tags — no library image carries them; if all include tags are virtual,
+  // treat it the same as having no include tags (all images eligible).
+  const includeTags = (tagset.tags || [])
+    .map(t => t.toLowerCase())
+    .filter(t => t !== WEB_SOURCES_VIRTUAL_TAG);
   const excludeTags = (tagset.exclude_tags || []).map(t => t.toLowerCase());
-  
-  // If no include tags specified, all images match (unless excluded)
-  const matchesInclude = includeTags.length === 0 || 
+
+  // If no library include tags specified, all images match (unless excluded)
+  const matchesInclude = includeTags.length === 0 ||
     imageTags.some(tag => includeTags.includes(tag));
-  
+
   // Check none of the image tags are in exclude list
   const matchesExclude = !imageTags.some(tag => excludeTags.includes(tag));
-  
+
   return matchesInclude && matchesExclude;
 }
 
@@ -13950,8 +13976,7 @@ function renderImageWeightedContent() {
     : 0;
   const totalEffective = includedImages.length + webEffective;
 
-  // Calculate percentage (all equal)
-  const pct = totalEffective > 0 ? (100 / totalEffective).toFixed(1) : '0.0';
+  // Per-slot percentage (library images share the non-web-sources portion)
   const libPct = includedImages.length > 0 ? (100 / totalEffective).toFixed(1) : '0.0';
   
   // Build included table
