@@ -17,6 +17,23 @@ const PAINTING_MEDIA = [
   'panel painting',
 ];
 
+// Subject/style/period modifiers appended to medium queries to diversify results.
+// Each combination yields a largely different pool (~90%+ unique artworks vs. the unmodified query),
+// so randomly picking a modifier greatly expands effective coverage beyond the fixed first page.
+const QUERY_MODIFIERS = [
+  // Subjects
+  'portrait', 'landscape', 'still life', 'figure', 'nude',
+  'mythology', 'religious', 'biblical', 'allegory', 'genre scene',
+  'cityscape', 'seascape', 'animal', 'flower', 'interior',
+  // Styles / movements
+  'renaissance', 'baroque', 'rococo', 'romanticism', 'impressionism',
+  'post-impressionism', 'expressionism', 'realism', 'symbolism', 'mannerism',
+  'neoclassicism', 'surrealism', 'abstract', 'modernism', 'pre-raphaelite',
+  // Regions / schools
+  'Italian', 'Dutch', 'Flemish', 'French', 'Spanish',
+  'English', 'German', 'American', 'Japanese', 'Chinese',
+];
+
 const BASE_URL = 'https://artsandculture.google.com';
 
 const HTTP_HEADERS = {
@@ -78,23 +95,25 @@ function extractArtworks(obj, depth = 0) {
  */
 async function fetchRandomArtwork() {
   const medium = PAINTING_MEDIA[Math.floor(Math.random() * PAINTING_MEDIA.length)];
+  const modifier = QUERY_MODIFIERS[Math.floor(Math.random() * QUERY_MODIFIERS.length)];
+  const query = `${medium} ${modifier}`;
 
   let parsed;
   try {
     const response = await axios.get(`${BASE_URL}/api/search`, {
-      params: { q: medium, hl: 'en' },
+      params: { q: query, hl: 'en' },
       headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
       timeout: 15000,
       responseType: 'text',
     });
     parsed = parseApiResponse(response.data);
   } catch (err) {
-    throw new Error(`Failed to search Google Arts & Culture for "${medium}": ${err.message}`);
+    throw new Error(`Failed to search Google Arts & Culture for "${query}": ${err.message}`);
   }
 
   const artworks = extractArtworks(parsed);
   if (artworks.length === 0) {
-    throw new Error(`No artworks found for medium "${medium}"`);
+    throw new Error(`No artworks found for "${query}"`);
   }
 
   const artwork = artworks[Math.floor(Math.random() * artworks.length)];
