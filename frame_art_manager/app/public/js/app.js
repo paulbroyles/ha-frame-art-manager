@@ -1327,6 +1327,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadAttributes();
   loadEntities();
   loadTVs();
+  loadWebSourcesConfig();
   initUploadForm();
   initBatchUploadForm(); // Initialize batch upload
   initModal();
@@ -13625,30 +13626,41 @@ function renderTagsetModeToggle() {
 function renderTagsetTagPool() {
   const container = document.getElementById('tagset-tag-pool');
   if (!container) return;
-  
+
   const allTagNames = allTags || [];
   const tagCounts = getImageCountPerTag();
-  
+
   // Filter out tags already in include or exclude
-  const availableTags = allTagNames.filter(tag => 
+  const availableTags = allTagNames.filter(tag =>
     !tagsetModalIncludeTags.includes(tag) && !tagsetModalExcludeTags.includes(tag)
   ).sort();
-  
-  if (allTagNames.length === 0) {
+
+  // Virtual "Web Sources" tag: available in include mode when at least one source is enabled
+  const showWebSourcesVirtual = tagsetModalMode === 'include'
+    && hasEnabledWebSources()
+    && !tagsetModalIncludeTags.includes(WEB_SOURCES_VIRTUAL_TAG);
+
+  if (allTagNames.length === 0 && !showWebSourcesVirtual) {
     container.innerHTML = '<span class="no-tags-message">No tags available</span>';
     return;
   }
-  
-  if (availableTags.length === 0) {
+
+  if (availableTags.length === 0 && !showWebSourcesVirtual) {
     container.innerHTML = '<span class="no-tags-message">All tags assigned</span>';
     return;
   }
-  
-  container.innerHTML = availableTags.map(tag => {
+
+  const regularPills = availableTags.map(tag => {
     const count = tagCounts[tag] || 0;
     return `<span class="tag-pill" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)} <span class="tag-count">(${count})</span></span>`;
   }).join('');
-  
+
+  const webSourcesPill = showWebSourcesVirtual
+    ? `<span class="tag-pill web-sources-virtual-tag" data-tag="${WEB_SOURCES_VIRTUAL_TAG}" title="Virtual tag: when selected during shuffle, displays a random image from your enabled web sources">Web Sources <span class="tag-count">(virtual)</span></span>`
+    : '';
+
+  container.innerHTML = webSourcesPill + regularPills;
+
   // Add click handlers
   container.querySelectorAll('.tag-pill').forEach(pill => {
     pill.addEventListener('click', () => {
@@ -13686,6 +13698,13 @@ function renderTagsetSelectedTags(type) {
   const percentages = type === 'include' ? calculateTagPercentages(tags, tagsetModalTagWeights) : {};
   
   container.innerHTML = tags.map(tag => {
+    if (tag === WEB_SOURCES_VIRTUAL_TAG) {
+      const percentStr = hasCustomWeights ? `<span class="tag-percent">${percentages[tag] || 0}%</span> ` : '';
+      return `<span class="tag-pill web-sources-virtual-tag" data-tag="${WEB_SOURCES_VIRTUAL_TAG}" title="Virtual tag: displays a random web source image when selected during shuffle">
+        Web Sources ${percentStr}<span class="tag-count">(virtual)</span>
+        <span class="tag-remove">×</span>
+      </span>`;
+    }
     const count = tagCounts[tag] || 0;
     const percentStr = hasCustomWeights ? `<span class="tag-percent">${percentages[tag] || 0}%</span> ` : '';
     return `<span class="tag-pill" data-tag="${escapeHtml(tag)}">
@@ -13899,21 +13918,23 @@ function renderTagsetWeightsTab() {
 function renderImageWeightedContent() {
   const includeTags = tagsetModalIncludeTags;
   const excludeTags = tagsetModalExcludeTags;
-  
+  const hasWebSources = includeTags.includes(WEB_SOURCES_VIRTUAL_TAG);
+  const libraryIncludeTags = includeTags.filter(t => t !== WEB_SOURCES_VIRTUAL_TAG);
+
   // Get all images from global allImages (populated on app load)
   const images = allImages || {};
-  
-  // Categorize images
+
+  // Categorize images (library tags only; web_sources is virtual)
   const includedImages = [];
   const excludedImages = [];
-  
+
   for (const [filename, imageData] of Object.entries(images)) {
     const imageTags = imageData.tags || [];
-    
-    // Check if image has any include tag
-    const hasIncludeTag = includeTags.some(t => imageTags.includes(t));
+
+    // Check if image has any library include tag
+    const hasIncludeTag = libraryIncludeTags.some(t => imageTags.includes(t));
     if (!hasIncludeTag) continue; // Not relevant to this tagset
-    
+
     // Check if image has any exclude tag
     const excludeTag = excludeTags.find(t => imageTags.includes(t));
     if (excludeTag) {
@@ -13922,16 +13943,23 @@ function renderImageWeightedContent() {
       includedImages.push({ filename, tags: imageTags });
     }
   }
-  
+
+  // Web sources effective count = avg images per library tag (approximates one tag's weight)
+  const webEffective = hasWebSources
+    ? Math.max(1, Math.floor(includedImages.length / Math.max(1, libraryIncludeTags.length)))
+    : 0;
+  const totalEffective = includedImages.length + webEffective;
+
   // Calculate percentage (all equal)
-  const pct = includedImages.length > 0 ? (100 / includedImages.length).toFixed(1) : '0.0';
+  const pct = totalEffective > 0 ? (100 / totalEffective).toFixed(1) : '0.0';
+  const libPct = includedImages.length > 0 ? (100 / totalEffective).toFixed(1) : '0.0';
   
   // Build included table
   let includedHtml = `
     <div class="image-weighted-section included-section">
       <div class="image-weighted-header">
         <span class="image-weighted-title">Included</span>
-        <span class="image-weighted-summary">${includedImages.length} images · ${pct}% each</span>
+        <span class="image-weighted-summary">${includedImages.length} images${hasWebSources ? ' + Web Sources' : ''} · ${libPct}% each</span>
       </div>
       <div class="image-weighted-table-wrapper">
         <table class="image-weighted-table">
@@ -13944,8 +13972,19 @@ function renderImageWeightedContent() {
           </thead>
           <tbody>
   `;
-  
-  if (includedImages.length === 0) {
+
+  if (hasWebSources) {
+    const webPct = totalEffective > 0 ? ((webEffective / totalEffective) * 100).toFixed(1) : '0.0';
+    includedHtml += `
+      <tr class="web-sources-virtual-row">
+        <td class="filename-cell web-sources-virtual-tag">Web Sources</td>
+        <td class="tags-cell web-sources-virtual-tag">virtual · ~${webEffective} effective images</td>
+        <td class="chance-cell">${webPct}%</td>
+      </tr>
+    `;
+  }
+
+  if (includedImages.length === 0 && !hasWebSources) {
     includedHtml += `<tr><td colspan="3" class="empty-row">No matching images</td></tr>`;
   } else {
     for (const img of includedImages) {
@@ -13953,12 +13992,12 @@ function renderImageWeightedContent() {
         <tr>
           <td class="filename-cell">${escapeHtml(img.filename)}</td>
           <td class="tags-cell">${img.tags.map(t => escapeHtml(t)).join(', ')}</td>
-          <td class="chance-cell">${pct}%</td>
+          <td class="chance-cell">${libPct}%</td>
         </tr>
       `;
     }
   }
-  
+
   includedHtml += `
           </tbody>
         </table>
@@ -14019,9 +14058,37 @@ function renderTagWeightedContent() {
   const sliders = tags.map(tag => {
     const weight = tagsetModalTagWeights[tag] || 1;
     const sliderPos = weightToSliderPosition(weight);
-    const count = tagCounts[tag] || 0;
     const pct = percentages[tag] || 0;
-    
+
+    if (tag === WEB_SOURCES_VIRTUAL_TAG) {
+      return `
+        <div class="weight-slider-row web-sources-slider-row" data-tag="${WEB_SOURCES_VIRTUAL_TAG}">
+          <div class="weight-slider-header">
+            <span class="weight-slider-tag web-sources-virtual-tag">Web Sources <span class="tag-count">(virtual)</span></span>
+          </div>
+          <div class="weight-slider-body">
+            <span class="weight-slider-percent">${pct}%</span>
+            <div class="weight-slider-track-wrapper">
+              <span class="weight-slider-value">${formatWeightDisplay(weight)}</span>
+              <input type="range"
+                     class="weight-slider"
+                     min="0"
+                     max="18"
+                     step="1"
+                     value="${sliderPos}"
+                     data-tag="${WEB_SOURCES_VIRTUAL_TAG}" />
+              <div class="weight-slider-ticks">
+                <span class="tick tick-start" style="left: 0"><span class="tick-label">0.1</span></span>
+                <span class="tick tick-center" style="left: 50%"><span class="tick-label">1</span></span>
+                <span class="tick tick-end" style="right: 0"><span class="tick-label">10</span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    const count = tagCounts[tag] || 0;
     return `
       <div class="weight-slider-row" data-tag="${escapeHtml(tag)}">
         <div class="weight-slider-header">
@@ -14031,11 +14098,11 @@ function renderTagWeightedContent() {
           <span class="weight-slider-percent">${pct}%</span>
           <div class="weight-slider-track-wrapper">
             <span class="weight-slider-value">${formatWeightDisplay(weight)}</span>
-            <input type="range" 
-                   class="weight-slider" 
-                   min="0" 
-                   max="18" 
-                   step="1" 
+            <input type="range"
+                   class="weight-slider"
+                   min="0"
+                   max="18"
+                   step="1"
                    value="${sliderPos}"
                    data-tag="${escapeHtml(tag)}" />
             <div class="weight-slider-ticks">
@@ -14532,6 +14599,8 @@ function initTagsetModalListeners() {
 // ============================================================================
 
 let webSourcesConfig = null; // Cached web sources config
+
+const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
 
 async function loadWebSourcesTab() {
   if (!allTVs || allTVs.length === 0) {

@@ -9264,6 +9264,49 @@ body.dropdown-open .image-card:hover {
   font-size: 12px;
 }
 
+/* Virtual "Web Sources" tag — distinct from regular tags */
+.tagset-tag-pool .tag-pill.web-sources-virtual-tag {
+  background: #ede7f6;
+  border-color: #9575cd;
+  color: #4527a0;
+}
+
+.tagset-tag-pool .tag-pill.web-sources-virtual-tag:hover {
+  background: #d1c4e9;
+  border-color: #7e57c2;
+  color: #4527a0;
+}
+
+.tagset-selected-tags .tag-pill.web-sources-virtual-tag {
+  background: #ede7f6;
+  border-color: #9575cd;
+  color: #4527a0;
+}
+
+.tagset-selected-tags .tag-pill.web-sources-virtual-tag:hover {
+  background: #d1c4e9;
+  border-color: #7e57c2;
+}
+
+.tagset-selected-tags .tag-pill.web-sources-virtual-tag .tag-remove {
+  color: #4527a0;
+}
+
+.weight-slider-tag.web-sources-virtual-tag {
+  color: #4527a0;
+}
+
+.web-sources-slider-row {
+  border-left: 3px solid #9575cd;
+  padding-left: 8px;
+}
+
+.image-weighted-table td.web-sources-virtual-tag {
+  color: #4527a0;
+  font-style: italic;
+}
+
+
 /* Warning banner when no sources are enabled */
 .web-sources-warning {
   background: #fff8e1;
