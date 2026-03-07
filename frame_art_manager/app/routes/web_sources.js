@@ -3,7 +3,10 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
 const axios = require('axios');
-const { fetchRandomArtwork } = require('../sources/google_arts');
+const SOURCE_FETCHERS = {
+  google_arts: require('../sources/google_arts').fetchRandomArtwork,
+  google_art_wallpaper: require('../sources/google_art_wallpaper').fetchRandomArtwork,
+};
 
 const SUPERVISOR_TOKEN = process.env.SUPERVISOR_TOKEN;
 const HA_API_BASE = process.env.HA_URL || 'http://supervisor/core/api';
@@ -15,6 +18,12 @@ const BUILTIN_SOURCES = {
     name: 'Google Arts & Culture',
     description: 'Random paintings from the Google Arts & Culture collection',
     type: 'google_arts',
+  },
+  google_art_wallpaper: {
+    id: 'google_art_wallpaper',
+    name: 'Google Art Wallpaper',
+    description: 'Curated widescreen artworks from the Google Art Wallpaper collection (~349 works), pre-formatted for large displays',
+    type: 'google_art_wallpaper',
   },
 };
 
@@ -224,12 +233,11 @@ router.post('/fetch-and-display', async (req, res) => {
     }
 
     // Fetch artwork from the chosen source
-    let fetchResult;
-    if (chosenSourceId === 'google_arts') {
-      fetchResult = await fetchRandomArtwork();
-    } else {
+    const fetcher = SOURCE_FETCHERS[chosenSourceId];
+    if (!fetcher) {
       return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
     }
+    const fetchResult = await fetcher();
 
     const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
