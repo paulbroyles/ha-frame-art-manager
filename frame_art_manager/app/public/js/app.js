@@ -14558,6 +14558,10 @@ async function loadWebSourcesConfig() {
   }
 }
 
+function hasEnabledWebSources() {
+  return Object.values(webSourcesConfig?.sources || {}).some(s => s.enabled);
+}
+
 function renderWebSourcesTVAssignments() {
   const container = document.getElementById('web-sources-tv-assignments');
   if (!container) return;
@@ -14567,23 +14571,31 @@ function renderWebSourcesTVAssignments() {
     return;
   }
 
+  const sourcesEnabled = hasEnabledWebSources();
   const assignments = webSourcesConfig?.tvAssignments || {};
   const sortedTVs = [...allTVs].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
-  let html = `<table class="tv-assignments-table"><thead><tr><th>TV</th><th>Web Sources Active</th><th></th></tr></thead><tbody>`;
+  let html = '';
+  if (!sourcesEnabled) {
+    html += `<div class="web-sources-warning">Enable at least one web source below before activating Web Sources for a TV.</div>`;
+  }
+
+  html += `<table class="tv-assignments-table"><thead><tr><th>TV</th><th>Web Sources Active</th><th></th></tr></thead><tbody>`;
 
   for (const tv of sortedTVs) {
     const assignment = assignments[tv.device_id] || {};
     const isEnabled = !!assignment.enabled;
     const deviceId = escapeHtml(tv.device_id);
     const tvName = escapeHtml(tv.name);
+    const disabledAttr = sourcesEnabled ? '' : 'disabled';
+    const toggleTitle = sourcesEnabled ? '' : 'title="Enable a web source first"';
 
     html += `
       <tr class="tv-assignment-row" data-device-id="${deviceId}">
         <td class="tv-col-name" data-label="TV"><span class="tv-name">${tvName}</span></td>
         <td class="tv-col-tagset" data-label="Web Sources Active">
           <label class="toggle-label">
-            <input type="checkbox" class="web-source-tv-toggle" data-device-id="${deviceId}" data-tv-name="${tvName}" ${isEnabled ? 'checked' : ''}>
+            <input type="checkbox" class="web-source-tv-toggle" data-device-id="${deviceId}" data-tv-name="${tvName}" ${isEnabled ? 'checked' : ''} ${disabledAttr} ${toggleTitle}>
             <span class="toggle-text">${isEnabled ? 'Active' : 'Inactive'}</span>
           </label>
         </td>

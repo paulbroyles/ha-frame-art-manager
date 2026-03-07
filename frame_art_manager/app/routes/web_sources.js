@@ -191,6 +191,14 @@ router.put('/tv-assignments/:deviceId', async (req, res) => {
     }
 
     const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
+
+    if (enabled) {
+      const enabledSources = Object.values(webSources.sources).filter(s => s.enabled);
+      if (enabledSources.length === 0) {
+        return res.status(400).json({ error: 'Enable at least one web source before activating Web Sources for a TV.' });
+      }
+    }
+
     if (!webSources.tvAssignments[deviceId]) {
       webSources.tvAssignments[deviceId] = { enabled: false };
     }

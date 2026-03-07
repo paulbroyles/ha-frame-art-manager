@@ -9264,6 +9264,17 @@ body.dropdown-open .image-card:hover {
   font-size: 12px;
 }
 
+/* Warning banner when no sources are enabled */
+.web-sources-warning {
+  background: #fff8e1;
+  border: 1px solid #ffe082;
+  border-radius: 6px;
+  color: #795548;
+  font-size: 13px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+}
+
 /* Tagset Selector Row */
 /* Tagsets Header */
 .tagsets-header {
