@@ -54,7 +54,6 @@ async function readWebSourcesConfig(frameArtPath) {
   if (!metadata.webSources) {
     metadata.webSources = {
       sources: { google_arts: { ...BUILTIN_SOURCES.google_arts, enabled: false } },
-      tvAssignments: {},
       metadataMapping: { title: null, creator: null, medium: null, attribution: null },
       perTvCache: {},
     };
@@ -177,37 +176,6 @@ router.put('/metadata-mapping', async (req, res) => {
   } catch (error) {
     console.error('Error updating metadata mapping:', error);
     res.status(500).json({ error: 'Failed to update metadata mapping' });
-  }
-});
-
-// PUT /api/web-sources/tv-assignments/:deviceId
-router.put('/tv-assignments/:deviceId', async (req, res) => {
-  try {
-    const { deviceId } = req.params;
-    const { enabled } = req.body;
-
-    if (typeof enabled !== 'boolean') {
-      return res.status(400).json({ error: 'enabled must be a boolean' });
-    }
-
-    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
-
-    if (enabled) {
-      const enabledSources = Object.values(webSources.sources).filter(s => s.enabled);
-      if (enabledSources.length === 0) {
-        return res.status(400).json({ error: 'Enable at least one web source before activating Web Sources for a TV.' });
-      }
-    }
-
-    if (!webSources.tvAssignments[deviceId]) {
-      webSources.tvAssignments[deviceId] = { enabled: false };
-    }
-    webSources.tvAssignments[deviceId].enabled = enabled;
-    await writeWebSourcesConfig(req.frameArtPath, metadata);
-    res.json({ success: true, assignment: webSources.tvAssignments[deviceId] });
-  } catch (error) {
-    console.error('Error updating TV assignment:', error);
-    res.status(500).json({ error: 'Failed to update TV assignment' });
   }
 });
 
