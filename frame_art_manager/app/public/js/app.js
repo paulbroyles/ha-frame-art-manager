@@ -885,7 +885,7 @@ function getSimilarBreakpointCounts() {
 }
 
 const ADVANCED_TAB_DEFAULT = 'tags';
-const VALID_ADVANCED_TABS = new Set(['tags', 'custom-data', 'recency', 'settings', 'metadata', 'sync']);
+const VALID_ADVANCED_TABS = new Set(['tags', 'custom-data', 'web-sources', 'recency', 'settings', 'metadata', 'sync']);
 
 function normalizeEditingFilterName(name) {
   if (!name) return 'none';
@@ -999,6 +999,8 @@ function switchToAdvancedSubTab(tabName) {
     loadTagsTab();
   } else if (targetTab === 'custom-data') {
     loadCustomDataTab();
+  } else if (targetTab === 'web-sources') {
+    loadWebSourcesTab();
   } else if (targetTab === 'recency') {
     loadRecencyTab();
   }
@@ -14523,3 +14525,289 @@ function initTagsetModalListeners() {
   // We'll handle this differently - through the individual TV sections
 }
 
+
+
+// ============================================================================
+// WEB SOURCES TAB
+// ============================================================================
+
+let webSourcesConfig = null; // Cached web sources config
+
+async function loadWebSourcesTab() {
+  if (!allTVs || allTVs.length === 0) {
+    await loadTVs();
+  }
+  if (!allAttributes || allAttributes.length === 0) {
+    await loadAttributes();
+  }
+  await loadWebSourcesConfig();
+  renderWebSourcesTVAssignments();
+  renderWebSourcesList();
+  renderWebSourcesMetadataMapping();
+}
+
+async function loadWebSourcesConfig() {
+  try {
+    const response = await fetch(`${API_BASE}/web-sources/config`);
+    const data = await response.json();
+    if (data.success) {
+      webSourcesConfig = data.webSources;
+    }
+  } catch (error) {
+    console.error('Error loading web sources config:', error);
+  }
+}
+
+function renderWebSourcesTVAssignments() {
+  const container = document.getElementById('web-sources-tv-assignments');
+  if (!container) return;
+
+  if (!allTVs || allTVs.length === 0) {
+    container.innerHTML = '<p class="empty-state">No TVs found. Make sure Frame Art Shuffler is connected to Home Assistant.</p>';
+    return;
+  }
+
+  const assignments = webSourcesConfig?.tvAssignments || {};
+  const sortedTVs = [...allTVs].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+  let html = `<table class="tv-assignments-table"><thead><tr><th>TV</th><th>Web Sources Active</th><th></th></tr></thead><tbody>`;
+
+  for (const tv of sortedTVs) {
+    const assignment = assignments[tv.device_id] || {};
+    const isEnabled = !!assignment.enabled;
+    const deviceId = escapeHtml(tv.device_id);
+    const tvName = escapeHtml(tv.name);
+
+    html += `
+      <tr class="tv-assignment-row" data-device-id="${deviceId}">
+        <td class="tv-col-name" data-label="TV"><span class="tv-name">${tvName}</span></td>
+        <td class="tv-col-tagset" data-label="Web Sources Active">
+          <label class="toggle-label">
+            <input type="checkbox" class="web-source-tv-toggle" data-device-id="${deviceId}" data-tv-name="${tvName}" ${isEnabled ? 'checked' : ''}>
+            <span class="toggle-text">${isEnabled ? 'Active' : 'Inactive'}</span>
+          </label>
+        </td>
+        <td class="tv-col-actions" data-label="">
+          <button class="btn btn-small btn-primary web-source-send-btn" data-device-id="${deviceId}" data-tv-name="${tvName}" title="Fetch and display a random painting from an enabled web source">
+            Send Painting
+          </button>
+        </td>
+      </tr>`;
+  }
+
+  html += `</tbody></table>`;
+  container.innerHTML = html;
+
+  // Enable/disable toggle handlers
+  container.querySelectorAll('.web-source-tv-toggle').forEach(checkbox => {
+    checkbox.addEventListener('change', async (e) => {
+      const deviceId = checkbox.dataset.deviceId;
+      const tvName = checkbox.dataset.tvName;
+      const enabled = checkbox.checked;
+      checkbox.nextElementSibling.textContent = enabled ? 'Active' : 'Inactive';
+
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/tv-assignments/${encodeURIComponent(deviceId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (!webSourcesConfig.tvAssignments) webSourcesConfig.tvAssignments = {};
+          webSourcesConfig.tvAssignments[deviceId] = data.assignment;
+          showToast(`${tvName}: Web Sources ${enabled ? 'activated' : 'deactivated'}`);
+        } else {
+          throw new Error(data.error || 'Failed to update');
+        }
+      } catch (error) {
+        console.error('Error updating TV web source assignment:', error);
+        checkbox.checked = !enabled;
+        checkbox.nextElementSibling.textContent = !enabled ? 'Active' : 'Inactive';
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    });
+  });
+
+  // "Send Painting" button handlers
+  container.querySelectorAll('.web-source-send-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const deviceId = btn.dataset.deviceId;
+      const tvName = btn.dataset.tvName;
+
+      const enabledSources = Object.values(webSourcesConfig?.sources || {}).filter(s => s.enabled);
+      if (enabledSources.length === 0) {
+        showToast('No web sources are enabled. Enable at least one source below.', 'error');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Fetching…';
+
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/fetch-and-display`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          const title = data.metadata?.title || 'Unknown title';
+          const creator = data.metadata?.creator || 'Unknown artist';
+          showToast(`Sent to ${tvName}: "${title}" by ${creator}`);
+          // Update cache record
+          if (!webSourcesConfig.perTvCache) webSourcesConfig.perTvCache = {};
+          webSourcesConfig.perTvCache[deviceId] = {
+            metadata: data.metadata,
+            sourceId: data.sourceId,
+            fetchedAt: new Date().toISOString(),
+          };
+        } else {
+          throw new Error(data.error || 'Failed to fetch and display');
+        }
+      } catch (error) {
+        console.error('Error sending web source image:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Send Painting';
+      }
+    });
+  });
+}
+
+function renderWebSourcesList() {
+  const container = document.getElementById('web-sources-list');
+  if (!container) return;
+
+  const sources = webSourcesConfig?.sources || {};
+
+  if (Object.keys(sources).length === 0) {
+    container.innerHTML = '<p class="empty-state">No web sources available.</p>';
+    return;
+  }
+
+  let html = '<div class="web-sources-cards">';
+  for (const [sourceId, source] of Object.entries(sources)) {
+    const isEnabled = !!source.enabled;
+    html += `
+      <div class="web-source-card${isEnabled ? ' enabled' : ''}">
+        <div class="web-source-card-header">
+          <div class="web-source-info">
+            <strong>${escapeHtml(source.name)}</strong>
+            <span class="web-source-description">${escapeHtml(source.description || '')}</span>
+          </div>
+          <label class="toggle-label">
+            <input type="checkbox" class="web-source-enable-toggle" data-source-id="${escapeHtml(sourceId)}" ${isEnabled ? 'checked' : ''}>
+            <span class="toggle-text">${isEnabled ? 'Enabled' : 'Disabled'}</span>
+          </label>
+        </div>
+      </div>`;
+  }
+  html += '</div>';
+  container.innerHTML = html;
+
+  container.querySelectorAll('.web-source-enable-toggle').forEach(checkbox => {
+    checkbox.addEventListener('change', async () => {
+      const sourceId = checkbox.dataset.sourceId;
+      const enabled = checkbox.checked;
+      checkbox.nextElementSibling.textContent = enabled ? 'Enabled' : 'Disabled';
+      const card = checkbox.closest('.web-source-card');
+      if (card) card.classList.toggle('enabled', enabled);
+
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/enable`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (!webSourcesConfig.sources) webSourcesConfig.sources = {};
+          webSourcesConfig.sources[sourceId] = { ...webSourcesConfig.sources[sourceId], ...data.source };
+          showToast(`${data.source.name} ${enabled ? 'enabled' : 'disabled'}`);
+        } else {
+          throw new Error(data.error || 'Failed to update source');
+        }
+      } catch (error) {
+        console.error('Error updating web source:', error);
+        checkbox.checked = !enabled;
+        checkbox.nextElementSibling.textContent = !enabled ? 'Enabled' : 'Disabled';
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    });
+  });
+}
+
+// Metadata fields provided by web sources and their display labels
+const WEB_SOURCE_METADATA_FIELDS = [
+  { key: 'title',   label: 'Title',   description: 'The title of the artwork' },
+  { key: 'creator', label: 'Creator', description: 'The artist or creator' },
+  { key: 'medium',  label: 'Medium',  description: 'The painting medium (e.g. oil paint, watercolor)' },
+];
+
+function renderWebSourcesMetadataMapping() {
+  const container = document.getElementById('web-sources-metadata-mapping');
+  if (!container) return;
+
+  const mapping = webSourcesConfig?.metadataMapping || {};
+  const attributes = allAttributes || [];
+
+  if (attributes.length === 0) {
+    container.innerHTML = '<p class="empty-state">No custom attributes defined. Add attributes in the Custom Data tab to enable metadata mapping.</p>';
+    return;
+  }
+
+  let html = '<table class="tv-assignments-table"><thead><tr><th>Web Source Field</th><th>Maps To Attribute</th></tr></thead><tbody>';
+
+  for (const field of WEB_SOURCE_METADATA_FIELDS) {
+    const currentValue = mapping[field.key] || '';
+    const options = `<option value="">— Not mapped —</option>` +
+      attributes.map(attr => `<option value="${escapeHtml(attr)}" ${currentValue === attr ? 'selected' : ''}>${escapeHtml(attr)}</option>`).join('');
+
+    html += `
+      <tr>
+        <td>
+          <strong>${escapeHtml(field.label)}</strong>
+          <div style="font-size:12px;color:#666;">${escapeHtml(field.description)}</div>
+        </td>
+        <td>
+          <select class="web-source-mapping-select" data-field-key="${escapeHtml(field.key)}">
+            ${options}
+          </select>
+        </td>
+      </tr>`;
+  }
+
+  html += '</tbody></table>';
+  html += '<div style="margin-top:12px;"><button type="button" id="save-metadata-mapping-btn" class="btn-primary btn-small">Save Mapping</button></div>';
+  container.innerHTML = html;
+
+  document.getElementById('save-metadata-mapping-btn')?.addEventListener('click', saveMetadataMapping);
+}
+
+async function saveMetadataMapping() {
+  const selects = document.querySelectorAll('.web-source-mapping-select');
+  const mapping = {};
+  selects.forEach(sel => {
+    mapping[sel.dataset.fieldKey] = sel.value || null;
+  });
+
+  try {
+    const response = await fetch(`${API_BASE}/web-sources/metadata-mapping`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mapping }),
+    });
+    const data = await response.json();
+    if (data.success) {
+      if (webSourcesConfig) webSourcesConfig.metadataMapping = data.metadataMapping;
+      showToast('Metadata mapping saved');
+    } else {
+      throw new Error(data.error || 'Failed to save');
+    }
+  } catch (error) {
+    console.error('Error saving metadata mapping:', error);
+    showToast(`Error: ${error.message}`, 'error');
+  }
+}

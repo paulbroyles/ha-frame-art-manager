@@ -362,6 +362,7 @@
         <div class="advanced-tabs">
           <button class="advanced-tab-btn active" data-tab="tags">Tags</button>
           <button class="advanced-tab-btn" data-tab="custom-data">Custom Data</button>
+          <button class="advanced-tab-btn" data-tab="web-sources">Web Sources</button>
           <button class="advanced-tab-btn" data-tab="recency">Recency</button>
           <button class="advanced-tab-btn" data-tab="settings">Settings</button>
           <button class="advanced-tab-btn" data-tab="metadata">Metadata</button>
@@ -414,6 +415,33 @@
             <p class="pool-health-description">Attributes store text metadata on each image. Entities group attributes under a shared key — link multiple images to the same entity instance.</p>
             <div id="custom-data-list-container">
               <div class="loading-indicator">Loading...</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Web Sources Sub-tab -->
+        <div id="advanced-web-sources-content" class="advanced-tab-content">
+          <!-- TV Assignments -->
+          <div class="subsection subsection-no-card">
+            <h3>TV Assignments</h3>
+            <p class="pool-health-description">When Web Sources is active for a TV, use the button below to send a random painting from an enabled web source to that TV.</p>
+            <div id="web-sources-tv-assignments" class="tv-tagset-assignments">
+              <div class="loading-indicator">Loading TVs...</div>
+            </div>
+          </div>
+          <!-- Source Management -->
+          <div class="subsection subsection-no-card">
+            <div class="tagsets-header">
+              <h3>Sources</h3>
+            </div>
+            <div id="web-sources-list" class="loading-indicator">Loading sources...</div>
+          </div>
+          <!-- Metadata Mapping -->
+          <div class="subsection subsection-no-card">
+            <h3>Metadata Mapping</h3>
+            <p class="pool-health-description">Map web source metadata fields to image attributes. When an image is sent, any mapped attribute will be set to the corresponding value from the source.</p>
+            <div id="web-sources-metadata-mapping">
+              <div class="loading-indicator">Loading attributes...</div>
             </div>
           </div>
         </div>

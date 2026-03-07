@@ -3,6 +3,7 @@ const router = express.Router();
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
+const { clearCacheForDevice } = require('./web_sources');
 
 /**
  * Parse JSONL (one JSON object per line) into an array.
@@ -313,6 +314,12 @@ router.post('/display', requireHA, async (req, res) => {
     }
 
     await haRequest('POST', `/services/frame_art_shuffler/display_image`, payload);
+
+    // Clear any web source cache for this TV since a library image is now displayed
+    const targetDeviceId = device_id || entity_id;
+    if (targetDeviceId) {
+      await clearCacheForDevice(req.frameArtPath, targetDeviceId).catch(() => {});
+    }
 
     res.json({ success: true, message: 'Command sent to TV' });
   } catch (error) {

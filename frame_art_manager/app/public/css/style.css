@@ -11081,3 +11081,61 @@ body.dropdown-open .image-card:hover {
   padding-top: 12px;
   border-top: 1px solid var(--border-color, #e0e0e0);
 }
+/* ── Web Sources Tab ──────────────────────────────────────────────────── */
+
+.web-sources-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.web-source-card {
+  border: 1px solid var(--border-color, #e0e0e0);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: var(--card-bg, #fafafa);
+  transition: border-color 0.2s;
+}
+
+.web-source-card.enabled {
+  border-color: var(--accent-color, #4a90d9);
+  background: var(--accent-bg-light, #f0f6ff);
+}
+
+.web-source-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.web-source-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.web-source-description {
+  font-size: 12px;
+  color: var(--text-muted, #888);
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.toggle-text {
+  min-width: 48px;
+  color: var(--text-muted, #888);
+}
+
+input[type="checkbox"]:checked + .toggle-text {
+  color: var(--accent-color, #4a90d9);
+  font-weight: 600;
+}

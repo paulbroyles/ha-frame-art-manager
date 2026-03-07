@@ -15,6 +15,7 @@ const syncRouter = require('./routes/sync');
 const haRouter = require('./routes/ha');
 const analyticsRouter = require('./routes/analytics');
 const entitiesRouter = require('./routes/entities');
+const webSourcesRouter = require('./routes/web_sources');
 
 const app = express();
 const PORT = process.env.PORT || 8099;
@@ -70,6 +71,7 @@ app.use('/api/sync', syncRouter);
 app.use('/api/ha', haRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/entities', entitiesRouter);
+app.use('/api/web-sources', webSourcesRouter);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -118,6 +120,7 @@ async function initializeDirectories() {
     await fs.mkdir(libraryPath, { recursive: true });
   await fs.mkdir(thumbsPath, { recursive: true });
   await fs.mkdir(originalsPath, { recursive: true });
+  await fs.mkdir(path.join(FRAME_ART_PATH, 'web_source_cache'), { recursive: true });
 
     // Create metadata.json if it doesn't exist
     try {
