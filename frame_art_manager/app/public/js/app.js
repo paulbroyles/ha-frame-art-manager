@@ -14741,9 +14741,10 @@ function renderWebSourcesList() {
 
 // Metadata fields provided by web sources and their display labels
 const WEB_SOURCE_METADATA_FIELDS = [
-  { key: 'title',   label: 'Title',   description: 'The title of the artwork' },
-  { key: 'creator', label: 'Creator', description: 'The artist or creator' },
-  { key: 'medium',  label: 'Medium',  description: 'The painting medium (e.g. oil paint, watercolor)' },
+  { key: 'title',       label: 'Title',       description: 'The title of the artwork' },
+  { key: 'creator',     label: 'Creator',     description: 'The artist or creator' },
+  { key: 'medium',      label: 'Medium',      description: 'The painting medium — Google Arts & Culture only' },
+  { key: 'attribution', label: 'Attribution', description: 'The museum or institution — Google Art Wallpaper only' },
 ];
 
 function renderWebSourcesMetadataMapping() {

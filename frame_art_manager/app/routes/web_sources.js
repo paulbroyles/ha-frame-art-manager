@@ -55,7 +55,7 @@ async function readWebSourcesConfig(frameArtPath) {
     metadata.webSources = {
       sources: { google_arts: { ...BUILTIN_SOURCES.google_arts, enabled: false } },
       tvAssignments: {},
-      metadataMapping: { title: null, creator: null, medium: null },
+      metadataMapping: { title: null, creator: null, medium: null, attribution: null },
       perTvCache: {},
     };
   }
@@ -166,7 +166,7 @@ router.put('/metadata-mapping', async (req, res) => {
 
     const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
     // Only allow known mapping keys
-    const allowed = ['title', 'creator', 'medium'];
+    const allowed = ['title', 'creator', 'medium', 'attribution'];
     const oldMapping = webSources.metadataMapping || {};
     webSources.metadataMapping = {};
     for (const key of allowed) {
