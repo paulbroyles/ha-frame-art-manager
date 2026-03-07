@@ -93,15 +93,16 @@ async function clearCacheForDevice(frameArtPath, deviceId) {
 /**
  * Call the HA display_image service to show an image on a TV.
  */
-async function displayImageOnTV(imagePath, deviceId) {
+async function displayImageOnTV(imagePath, deviceId, { screenOn = true } = {}) {
   if (!SUPERVISOR_TOKEN && process.env.NODE_ENV === 'development') {
-    console.log(`[DEV] Would display ${imagePath} on device ${deviceId}`);
+    console.log(`[DEV] Would display ${imagePath} on device ${deviceId} (screenOn=${screenOn})`);
     return;
   }
 
   const payload = {
     device_id: deviceId,
     image_path: imagePath,
+    screen_on: screenOn,
   };
 
   await axios({
@@ -182,7 +183,7 @@ router.put('/metadata-mapping', async (req, res) => {
 // POST /api/web-sources/fetch-and-display
 // Body: { deviceId, sourceId? }
 router.post('/fetch-and-display', async (req, res) => {
-  const { deviceId, sourceId } = req.body;
+  const { deviceId, sourceId, screenOn = true } = req.body;
 
   if (!deviceId) {
     return res.status(400).json({ error: 'deviceId is required' });
@@ -243,7 +244,7 @@ router.post('/fetch-and-display', async (req, res) => {
     await writeWebSourcesConfig(req.frameArtPath, metadata);
 
     // Display on TV
-    await displayImageOnTV(cacheFile, deviceId);
+    await displayImageOnTV(cacheFile, deviceId, { screenOn });
 
     res.json({
       success: true,
