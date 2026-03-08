@@ -14634,6 +14634,9 @@ async function loadWebSourcesTab() {
   if (!allAttributes || allAttributes.length === 0) {
     await loadAttributes();
   }
+  if (!allEntityTypes || allEntityTypes.length === 0) {
+    await loadEntities();
+  }
   await loadWebSourcesConfig();
   renderWebSourcesList();
   renderWebSourcesMetadataMapping();
@@ -14732,18 +14735,44 @@ function renderWebSourcesMetadataMapping() {
 
   const mapping = webSourcesConfig?.metadataMapping || {};
   const attributes = allAttributes || [];
+  const entityTypes = (allEntityTypes || []).filter(et => et.attributes && et.attributes.length > 0);
 
-  if (attributes.length === 0) {
-    container.innerHTML = '<p class="empty-state">No custom attributes defined. Add attributes in the Custom Data tab to enable metadata mapping.</p>';
+  if (attributes.length === 0 && entityTypes.length === 0) {
+    container.innerHTML = '<p class="empty-state">No custom attributes or entity types defined. Add them in the Custom Data tab to enable metadata mapping.</p>';
     return;
   }
 
-  let html = '<table class="tv-assignments-table"><thead><tr><th>Web Source Field</th><th>Maps To Attribute</th></tr></thead><tbody>';
+  // Serialize a mapping target (null | string | {entity,attribute}) to a select option value.
+  // Uses prefixes to distinguish: "attr:<name>" or "entity:<id>:<attr>"
+  function serializeTarget(target) {
+    if (!target) return '';
+    if (typeof target === 'string') return `attr:${target}`;
+    if (target.entity && target.attribute) return `entity:${target.entity}:${target.attribute}`;
+    return '';
+  }
+
+  let html = '<table class="tv-assignments-table"><thead><tr><th>Web Source Field</th><th>Maps To</th></tr></thead><tbody>';
 
   for (const field of WEB_SOURCE_METADATA_FIELDS) {
-    const currentValue = mapping[field.key] || '';
-    const options = `<option value="">— Not mapped —</option>` +
-      attributes.map(attr => `<option value="${escapeHtml(attr)}" ${currentValue === attr ? 'selected' : ''}>${escapeHtml(attr)}</option>`).join('');
+    const currentValue = serializeTarget(mapping[field.key] ?? null);
+
+    let optionsHtml = '<option value="">— Not mapped —</option>';
+    if (attributes.length > 0) {
+      optionsHtml += `<optgroup label="Attributes">` +
+        attributes.map(attr => {
+          const val = `attr:${attr}`;
+          return `<option value="${escapeHtml(val)}" ${currentValue === val ? 'selected' : ''}>${escapeHtml(attr)}</option>`;
+        }).join('') +
+        '</optgroup>';
+    }
+    for (const et of entityTypes) {
+      optionsHtml += `<optgroup label="${escapeHtml(et.name)}">` +
+        et.attributes.map(attr => {
+          const val = `entity:${et.id}:${attr}`;
+          return `<option value="${escapeHtml(val)}" ${currentValue === val ? 'selected' : ''}>${escapeHtml(attr)}</option>`;
+        }).join('') +
+        '</optgroup>';
+    }
 
     html += `
       <tr>
@@ -14753,7 +14782,7 @@ function renderWebSourcesMetadataMapping() {
         </td>
         <td>
           <select class="web-source-mapping-select" data-field-key="${escapeHtml(field.key)}">
-            ${options}
+            ${optionsHtml}
           </select>
         </td>
       </tr>`;
@@ -14770,7 +14799,15 @@ async function saveMetadataMapping() {
   const selects = document.querySelectorAll('.web-source-mapping-select');
   const mapping = {};
   selects.forEach(sel => {
-    mapping[sel.dataset.fieldKey] = sel.value || null;
+    const val = sel.value;
+    if (!val) {
+      mapping[sel.dataset.fieldKey] = null;
+    } else if (val.startsWith('attr:')) {
+      mapping[sel.dataset.fieldKey] = val.slice(5);
+    } else if (val.startsWith('entity:')) {
+      const parts = val.split(':');
+      mapping[sel.dataset.fieldKey] = { entity: parts[1], attribute: parts.slice(2).join(':') };
+    }
   });
 
   try {

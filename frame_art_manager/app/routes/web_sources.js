@@ -156,6 +156,52 @@ router.put('/sources/:sourceId/enable', async (req, res) => {
   }
 });
 
+/**
+ * Validate and normalize a single metadata mapping target value.
+ * Returns the normalized value, or throws an error string if invalid.
+ *
+ * Valid values:
+ *   null / ''           → null (disabled)
+ *   string              → plain attribute name
+ *   { entity, attribute } → entity type attribute reference (dummy snapshot only)
+ */
+function normalizeMapTarget(val) {
+  if (val == null || val === '') return null;
+  if (typeof val === 'string') return val;
+  if (typeof val === 'object' && typeof val.entity === 'string' && typeof val.attribute === 'string') {
+    return { entity: val.entity, attribute: val.attribute };
+  }
+  throw new Error('must be null, a string, or { entity, attribute }');
+}
+
+/**
+ * Apply metadataMapping to web source artwork metadata, producing static snapshots
+ * that mirror the library image attribute/entityRef structure without modifying any
+ * real library data.
+ *
+ * Returns:
+ *   attributeSnapshot — { attrName: value } for plain-attribute targets
+ *   entitySnapshot    — { entityId: { attrName: value } } for entity-attribute targets
+ */
+function buildWebSourceSnapshot(artMetadata, mapping) {
+  const attributeSnapshot = {};
+  const entitySnapshot = {};
+
+  for (const [sourceField, target] of Object.entries(mapping || {})) {
+    const value = artMetadata[sourceField];
+    if (value == null || target == null) continue;
+
+    if (typeof target === 'string') {
+      attributeSnapshot[target] = String(value);
+    } else if (target.entity && target.attribute) {
+      if (!entitySnapshot[target.entity]) entitySnapshot[target.entity] = {};
+      entitySnapshot[target.entity][target.attribute] = String(value);
+    }
+  }
+
+  return { attributeSnapshot, entitySnapshot };
+}
+
 // PUT /api/web-sources/metadata-mapping
 router.put('/metadata-mapping', async (req, res) => {
   try {
@@ -165,12 +211,16 @@ router.put('/metadata-mapping', async (req, res) => {
     }
 
     const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
-    // Only allow known mapping keys
     const allowed = ['title', 'creator', 'medium', 'attribution'];
     const oldMapping = webSources.metadataMapping || {};
     webSources.metadataMapping = {};
     for (const key of allowed) {
-      webSources.metadataMapping[key] = mapping[key] !== undefined ? (mapping[key] || null) : (oldMapping[key] || null);
+      const raw = mapping[key] !== undefined ? mapping[key] : (oldMapping[key] ?? null);
+      try {
+        webSources.metadataMapping[key] = normalizeMapTarget(raw);
+      } catch (err) {
+        return res.status(400).json({ error: `Invalid mapping value for "${key}": ${err.message}` });
+      }
     }
     await writeWebSourcesConfig(req.frameArtPath, metadata);
     res.json({ success: true, metadataMapping: webSources.metadataMapping });
@@ -232,6 +282,11 @@ router.post('/fetch-and-display', async (req, res) => {
     const cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
     await fs.writeFile(cacheFile, imageBuffer);
 
+    // Build static attribute/entity snapshots from metadata mapping
+    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(
+      artMetadata, webSources.metadataMapping
+    );
+
     // Update per-TV cache record in metadata.json
     webSources.perTvCache = webSources.perTvCache || {};
     webSources.perTvCache[deviceId] = {
@@ -239,6 +294,8 @@ router.post('/fetch-and-display', async (req, res) => {
       sourceId: chosenSourceId,
       artworkUrl: artMetadata.artworkUrl,
       metadata: artMetadata,
+      ...(Object.keys(attributeSnapshot).length > 0 && { attributeSnapshot }),
+      ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
       fetchedAt: new Date().toISOString(),
     };
     await writeWebSourcesConfig(req.frameArtPath, metadata);
