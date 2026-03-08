@@ -280,15 +280,32 @@ function getAccessibleCount(total) {
 }
 
 /**
+ * Fetch entity totals with a bounded concurrency limit to avoid rate limiting.
+ * Results are returned in the same order as `entities`.
+ */
+async function fetchAllEntityTotals(entities, concurrency = 8) {
+  const results = new Array(entities.length);
+  let next = 0;
+  async function worker() {
+    while (next < entities.length) {
+      const i = next++;
+      results[i] = await fetchEntityTotal(entities[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, entities.length) }, worker));
+  return results;
+}
+
+/**
  * Pick a random entity from an array, weighted by each entity's accessible artwork count.
- * Fetches totals from the API concurrently (cached after first call per process).
+ * Fetches totals from the API with bounded concurrency (cached after first call per process).
  * This gives approximately uniform distribution across individual artwork positions:
  * each position has probability 1/totalAccessible, regardless of which entity it belongs to.
  * Entities with getAccessibleCount() == 0 are effectively excluded (zero weight).
  * Returns { entity, total } for the selected entity.
  */
 async function weightedRandomEntity(entities) {
-  const totals = await Promise.all(entities.map(e => fetchEntityTotal(e)));
+  const totals = await fetchAllEntityTotals(entities);
   const weights = totals.map(t => getAccessibleCount(t));
   const totalWeight = weights.reduce((sum, w) => sum + w, 0);
   if (totalWeight === 0) {
