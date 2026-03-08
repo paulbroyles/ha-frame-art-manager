@@ -11193,3 +11193,10 @@ input[type="checkbox"]:checked + .toggle-text {
   color: var(--accent-color, #4a90d9);
   font-weight: 600;
 }
+
+.web-source-test-result {
+  border: 1px solid var(--border-color, #e0e0e0);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: var(--card-bg, #fafafa);
+}

@@ -91,6 +91,19 @@ async function clearCacheForDevice(frameArtPath, deviceId) {
 }
 
 /**
+ * Delete the test cache image file (all extensions).
+ */
+async function clearTestCacheFile(frameArtPath) {
+  for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
+    try {
+      await fs.unlink(path.join(cacheDirFor(frameArtPath), `_test.${ext}`));
+    } catch {
+      // File didn't exist – fine
+    }
+  }
+}
+
+/**
  * Call the HA display_image service to show an image on a TV.
  */
 async function displayImageOnTV(imagePath, deviceId, { screenOn = true } = {}) {
@@ -333,6 +346,98 @@ router.delete('/cache/:deviceId', async (req, res) => {
   } catch (error) {
     console.error('Error clearing web source cache:', error);
     res.status(500).json({ error: 'Failed to clear cache' });
+  }
+});
+
+// POST /api/web-sources/test-fetch
+// Fetch a test image from an enabled web source without sending it to any TV.
+// Stores the result in webSources.testCache (same structure as perTvCache entries)
+// so it can later be promoted to a queued or pending dispatch.
+router.post('/test-fetch', async (req, res) => {
+  try {
+    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
+
+    // Pick an enabled source
+    const enabledSources = Object.entries(webSources.sources)
+      .filter(([, s]) => s.enabled)
+      .map(([id]) => id);
+    if (enabledSources.length === 0) {
+      return res.status(400).json({ error: 'No web sources are enabled. Enable at least one source in Web Sources settings.' });
+    }
+    const chosenSourceId = enabledSources[Math.floor(Math.random() * enabledSources.length)];
+
+    const fetcher = SOURCE_FETCHERS[chosenSourceId];
+    if (!fetcher) {
+      return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
+    }
+    const { imageBuffer, contentType, metadata: artMetadata } = await fetcher();
+
+    const ext = contentType.includes('png') ? 'png' : 'jpg';
+    const cacheDir = cacheDirFor(req.frameArtPath);
+    await fs.mkdir(cacheDir, { recursive: true });
+
+    // Remove any previous test image and write the new one
+    await clearTestCacheFile(req.frameArtPath);
+    const testFilename = `_test.${ext}`;
+    const testFile = path.join(cacheDir, testFilename);
+    await fs.writeFile(testFile, imageBuffer);
+
+    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(
+      artMetadata, webSources.metadataMapping
+    );
+
+    webSources.testCache = {
+      filename: testFilename,
+      sourceId: chosenSourceId,
+      artworkUrl: artMetadata.artworkUrl,
+      metadata: artMetadata,
+      ...(Object.keys(attributeSnapshot).length > 0 && { attributeSnapshot }),
+      ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
+      fetchedAt: new Date().toISOString(),
+    };
+    await writeWebSourcesConfig(req.frameArtPath, metadata);
+
+    res.json({
+      success: true,
+      testCache: webSources.testCache,
+    });
+  } catch (error) {
+    console.error('Error in test-fetch:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch test image' });
+  }
+});
+
+// GET /api/web-sources/test-cache/image
+// Serve the current test image file.
+router.get('/test-cache/image', async (req, res) => {
+  try {
+    const { webSources } = await readWebSourcesConfig(req.frameArtPath);
+    if (!webSources.testCache?.filename) {
+      return res.status(404).json({ error: 'No test image available' });
+    }
+    const filePath = path.join(cacheDirFor(req.frameArtPath), webSources.testCache.filename);
+    const ext = path.extname(webSources.testCache.filename).slice(1);
+    const contentType = ext === 'png' ? 'image/png' : 'image/jpeg';
+    res.setHeader('Content-Type', contentType);
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error serving test cache image:', error);
+    res.status(500).json({ error: 'Failed to serve test image' });
+  }
+});
+
+// DELETE /api/web-sources/test-cache
+// Clear the test cache image and record.
+router.delete('/test-cache', async (req, res) => {
+  try {
+    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
+    await clearTestCacheFile(req.frameArtPath);
+    delete webSources.testCache;
+    await writeWebSourcesConfig(req.frameArtPath, metadata);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error clearing test cache:', error);
+    res.status(500).json({ error: 'Failed to clear test cache' });
   }
 });
 

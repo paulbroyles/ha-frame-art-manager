@@ -14640,6 +14640,7 @@ async function loadWebSourcesTab() {
   await loadWebSourcesConfig();
   renderWebSourcesList();
   renderWebSourcesMetadataMapping();
+  renderWebSourcesTestSection();
 }
 
 async function loadWebSourcesConfig() {
@@ -14826,5 +14827,86 @@ async function saveMetadataMapping() {
   } catch (error) {
     console.error('Error saving metadata mapping:', error);
     showToast(`Error: ${error.message}`, 'error');
+  }
+}
+
+function renderWebSourcesTestSection() {
+  const container = document.getElementById('web-sources-test-section');
+  if (!container) return;
+
+  const testCache = webSourcesConfig?.testCache || null;
+
+  let html = `<div style="margin-bottom:12px;">
+    <button type="button" id="web-source-test-fetch-btn" class="btn-secondary btn-small">Fetch Test Image</button>
+  </div>`;
+
+  if (testCache) {
+    const m = testCache.metadata || {};
+    const fetched = testCache.fetchedAt ? new Date(testCache.fetchedAt).toLocaleString() : '';
+
+    // Artwork metadata rows
+    const metaRows = [
+      ['Source', m.source],
+      ['Title', m.title],
+      ['Creator', m.creator],
+      ['Medium', m.medium],
+      ['Attribution', m.attribution],
+      ['Fetched', fetched],
+    ].filter(([, v]) => v).map(([k, v]) =>
+      `<tr><td style="font-weight:600;padding:3px 12px 3px 0;white-space:nowrap;">${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`
+    ).join('');
+
+    const artworkLinkRow = testCache.artworkUrl
+      ? `<tr><td style="font-weight:600;padding:3px 12px 3px 0;">Artwork</td><td><a href="${escapeHtml(testCache.artworkUrl)}" target="_blank" rel="noopener">${escapeHtml(testCache.artworkUrl)}</a></td></tr>`
+      : '';
+
+    // Mapped value rows
+    const attrRows = Object.entries(testCache.attributeSnapshot || {}).map(([k, v]) =>
+      `<tr><td style="font-weight:600;padding:3px 12px 3px 0;white-space:nowrap;">${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`
+    ).join('');
+
+    const entityRows = Object.entries(testCache.entitySnapshot || {}).flatMap(([entityId, attrs]) =>
+      Object.entries(attrs).map(([attrName, value]) =>
+        `<tr><td style="font-weight:600;padding:3px 12px 3px 0;white-space:nowrap;">${escapeHtml(entityId)}.${escapeHtml(attrName)}</td><td>${escapeHtml(value)}</td></tr>`
+      )
+    ).join('');
+
+    const mappedSection = (attrRows || entityRows) ? `
+      <div style="margin-top:12px;">
+        <div style="font-weight:600;margin-bottom:4px;font-size:13px;">Mapped Values</div>
+        <table style="border-collapse:collapse;font-size:13px;">${attrRows}${entityRows}</table>
+      </div>` : '';
+
+    html += `<div class="web-source-test-result">
+      <img src="${API_BASE}/web-sources/test-cache/image?t=${Date.now()}" alt="Test artwork"
+           style="max-width:100%;max-height:360px;display:block;border-radius:4px;margin-bottom:12px;"
+           onerror="this.style.display='none'">
+      <table style="border-collapse:collapse;font-size:13px;">${metaRows}${artworkLinkRow}</table>
+      ${mappedSection}
+    </div>`;
+  }
+
+  container.innerHTML = html;
+
+  document.getElementById('web-source-test-fetch-btn')?.addEventListener('click', fetchTestWebSource);
+}
+
+async function fetchTestWebSource() {
+  const btn = document.getElementById('web-source-test-fetch-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Fetching…'; }
+
+  try {
+    const response = await fetch(`${API_BASE}/web-sources/test-fetch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'Failed to fetch test image');
+    if (webSourcesConfig) webSourcesConfig.testCache = data.testCache;
+    renderWebSourcesTestSection();
+  } catch (error) {
+    console.error('Error fetching test image:', error);
+    showToast(`Error: ${error.message}`, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Fetch Test Image'; }
   }
 }
