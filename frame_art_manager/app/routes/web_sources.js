@@ -224,7 +224,7 @@ router.put('/metadata-mapping', async (req, res) => {
     }
 
     const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
-    const allowed = ['title', 'creator', 'medium', 'attribution'];
+    const allowed = ['title', 'creator', 'medium', 'attribution', 'repository', 'dateCreated'];
     const oldMapping = webSources.metadataMapping || {};
     webSources.metadataMapping = {};
     for (const key of allowed) {

@@ -374,6 +374,7 @@ function parseApiResponse(data) {
  * Recursively extract artwork objects from a parsed API response.
  * Cobjects: ['stella.common.cobject', title, creator, imageUrl, link, ...]
  * Only /asset/ links are kept (not /story/ or other types).
+ * cobject[10] is a metadata sub-object; [10][0] = assetId, [10][12] = repository.
  */
 function extractArtworks(obj, depth = 0) {
   const artworks = [];
@@ -386,11 +387,14 @@ function extractArtworks(obj, depth = 0) {
       typeof obj[3] === 'string'
     ) {
       const imageBase = obj[3].startsWith('//') ? `https:${obj[3]}` : obj[3];
+      const meta = Array.isArray(obj[10]) ? obj[10] : [];
       artworks.push({
         title: obj[1] || null,
         creator: obj[2] || null,
         imageBase,
         link: obj[4],
+        assetId: meta[0] || null,
+        repository: meta[12] || null,
       });
       return artworks;
     }
@@ -399,6 +403,73 @@ function extractArtworks(obj, depth = 0) {
     }
   }
   return artworks;
+}
+
+/**
+ * Fetch additional details for an artwork: date created and all media.
+ * Calls /api/entity?entityId=<assetId>&hl=en&rt=j
+ * Returns { media: string[], dateCreated: string|null }
+ *
+ * Searches the response recursively for:
+ *   - cobjects whose links match known medium entity IDs → collected as media names
+ *   - short strings matching year/date patterns → dateCreated
+ *
+ * Console-logs the raw response (truncated) for structural inspection.
+ */
+async function fetchArtworkDetails(assetId) {
+  if (!assetId) return { media: [], dateCreated: null };
+
+  let parsed;
+  try {
+    const response = await axios.get(`${BASE_URL}/api/entity`, {
+      params: { entityId: assetId, hl: 'en', rt: 'j' },
+      headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
+      timeout: 15000,
+      responseType: 'text',
+    });
+    parsed = parseApiResponse(response.data);
+  } catch (err) {
+    console.warn(`[google_arts] Failed to fetch details for asset "${assetId}": ${err.message}`);
+    return { media: [], dateCreated: null };
+  }
+
+  console.log('[google_arts] fetchArtworkDetails raw (truncated):', JSON.stringify(parsed).slice(0, 3000));
+
+  const mediumNameMap = new Map(MEDIUM_ENTITIES.map(e => [e.id, e.name]));
+  const foundMedia = new Set();
+  let dateCreated = null;
+
+  function search(obj, path, depth) {
+    if (depth > 25 || obj == null) return;
+    if (Array.isArray(obj)) {
+      // Cobjects with /entity/<mediumId> links are medium references
+      if (obj[0] === 'stella.common.cobject' && typeof obj[4] === 'string') {
+        const link = obj[4];
+        for (const [id, name] of mediumNameMap) {
+          if (link === `/entity${id}` || link.endsWith(id)) {
+            foundMedia.add(name);
+            console.log(`[google_arts] Found medium "${name}" at path ${path}`);
+          }
+        }
+        return;
+      }
+      obj.forEach((item, i) => search(item, `${path}[${i}]`, depth + 1));
+    } else if (typeof obj === 'string' && obj.length > 0 && obj.length < 60) {
+      // Match date-like strings: "1889", "c. 1889", "1889–1890", "c. 1889-90"
+      if (!dateCreated && /^\s*(?:c\.?\s*)?\d{3,4}(?:\s*[-–]\s*\d{2,4})?\s*$/.test(obj)) {
+        dateCreated = obj.trim();
+        console.log(`[google_arts] Found dateCreated candidate "${dateCreated}" at path ${path}`);
+      }
+    }
+  }
+
+  search(parsed, 'root', 0);
+  console.log('[google_arts] fetchArtworkDetails result:', { media: Array.from(foundMedia), dateCreated });
+
+  return {
+    media: Array.from(foundMedia),
+    dateCreated,
+  };
 }
 
 /**
@@ -454,17 +525,23 @@ async function fetchRandomArtwork(mediaFilter = null) {
   const imageUrl = `${artwork.imageBase}=w3840-h2160-c`;
   const artworkUrl = `${BASE_URL}${artwork.link}`;
 
-  let imageBuffer, contentType;
-  try {
-    const imageResponse = await axios.get(imageUrl, {
+  // Fetch additional details (date, all media) in parallel with image download
+  const [imageResponse, details] = await Promise.all([
+    axios.get(imageUrl, {
       responseType: 'arraybuffer',
       headers: HTTP_HEADERS,
       timeout: 30000,
-    });
-    imageBuffer = Buffer.from(imageResponse.data);
-    contentType = imageResponse.headers['content-type'] || 'image/jpeg';
-  } catch (err) {
-    throw new Error(`Failed to download artwork image: ${err.message}`);
+    }).catch(err => { throw new Error(`Failed to download artwork image: ${err.message}`); }),
+    fetchArtworkDetails(artwork.assetId),
+  ]);
+
+  const imageBuffer = Buffer.from(imageResponse.data);
+  const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
+
+  // Build the full media list: include queried entity name, then any additionally discovered media
+  const allMedia = [...details.media];
+  if (entity.name && !allMedia.includes(entity.name)) {
+    allMedia.unshift(entity.name);
   }
 
   return {
@@ -473,8 +550,10 @@ async function fetchRandomArtwork(mediaFilter = null) {
     metadata: {
       title: artwork.title,
       creator: artwork.creator,
+      repository: artwork.repository,
+      dateCreated: details.dateCreated,
+      medium: allMedia.join(', ') || entity.name,
       artworkUrl,
-      medium: entity.name,
       source: 'Google Arts & Culture',
     },
   };
