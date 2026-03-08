@@ -408,7 +408,7 @@ This `field 4` is **optional** — the server accepts tokens containing only `fi
 
 ## Known Medium Entity IDs
 
-All 203 unique art medium entities accessible on `artsandculture.google.com/category/medium`, identified by Google/Freebase Knowledge Graph IDs. Discovered via BFS through the "related mediums" links (`stella.ep[12]`) returned by `/api/entity` for each medium, seeded from the canvas entity. Item counts reflect the API's `stella.pr[4]` total at time of discovery (recorded 2026-03-07); actual counts change as institutions add or remove works. The integration fetches live totals at runtime via `fetchEntityTotal()` and caches them in-process.
+All 203 unique art medium entities accessible on `artsandculture.google.com/category/medium`, identified by Google/Freebase Knowledge Graph IDs. Discovered via BFS through the "related mediums" links (`stella.ep[12]`) returned by `/api/entity` for each medium, seeded from the canvas entity. Item counts reflect the API's `stella.pr[4]` total at time of discovery (recorded 2026-03-07); actual counts change as institutions add or remove works. Item counts are hardcoded in `MEDIUM_ENTITIES` (see below). **Why hardcoded:** fetching live totals for all 203 entities at startup triggers HTTP 429 rate limiting from Google's API. The counts grow slowly and slight staleness has negligible impact on distribution quality. To refresh them, run a one-time probe against the API for each entity and update `MEDIUM_ENTITIES` in `sources/google_arts.js`.
 
 ### Entity ID formats by endpoint
 
@@ -724,12 +724,11 @@ Given the above constraints, true uniform randomness is not achievable across an
 
 The implemented approach in `sources/google_arts.js`:
 
-1. Fetch live item totals for all candidate entities via `fetchEntityTotal()` (cached in-process; uses a page-size-1 probe request against `/api/entity/assets` to read `stella.pr[4]`)
-2. Pick a weighted-random entity from `MEDIUM_ENTITIES` (203 unique entities), weighted by accessible item count
-3. Compute `maxOffset = min(ENTITY_MAX_OFFSET, total - 18)` to avoid HTTP 500 on small collections
-4. Pick a random integer offset in `[0, maxOffset)`
-5. Construct a minimal `pt` token encoding that offset
-6. Call `/api/entity/assets` with `s=18` to get up to 18 artworks
-7. Pick a random artwork from the page
+1. Pick a weighted-random entity from `MEDIUM_ENTITIES` (203 unique entities), weighted by `entity.total` (hardcoded). **Why hardcoded totals:** fetching all 203 live totals at startup fires 203+ rapid API requests, triggering HTTP 429 rate limiting. The counts grow slowly enough that approximate values give acceptable distribution quality.
+2. Compute `maxOffset = min(ENTITY_MAX_OFFSET, entity.total - 18)` to avoid HTTP 500 on small collections
+3. Pick a random integer offset in `[0, maxOffset)`
+4. Construct a minimal `pt` token encoding that offset
+5. Call `/api/entity/assets` with `s=18` to get up to 18 artworks
+6. Pick a random artwork from the page
 
 This gives access to a large and diverse pool of artworks across all 203 medium categories. Mediums with fewer than 18 artworks (e.g., pavonazzo marble with 15, adobe with 15) get zero weight and are excluded from selection. The approach is a significant improvement over the original which always drew from the same fixed ~144-artwork pool returned by `/api/search`.
