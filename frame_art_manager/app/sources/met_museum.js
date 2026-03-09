@@ -63,38 +63,52 @@ const BROAD_QUERY = '*';
 /**
  * Fetch a random artwork from the Metropolitan Museum of Art Open Access collection.
  *
- * Uses the /search endpoint with `medium=` (classification filter) to build a
- * pool of object IDs, then picks one at random and fetches its details.
- * Retries up to MAX_ATTEMPTS if the selected object lacks a public-domain image.
- *
  * The free-text `medium` field (e.g. "Oil on canvas") is returned in metadata
  * regardless of how filtering was applied.
  *
  * @param {string[]} [mediaFilter] - Optional list of classification values to
  *   restrict selection (e.g. ['Paintings', 'Drawings']). If omitted or empty,
- *   all objects with images are eligible.
+ *   all objects with images are eligible. Each value is queried separately and
+ *   results are unioned — the Met API treats pipe-delimited medium values as
+ *   AND (intersection), not OR, so multi-classification queries must be split.
  *
  * @returns {{ imageBuffer, contentType, metadata: { title, creator, medium, dateCreated, artworkUrl, source } }}
  * @throws {Error} on network/API failure or if no suitable artwork is found.
  */
 async function fetchRandomArtwork(mediaFilter = null) {
-  const params = { q: BROAD_QUERY, hasImages: true };
-  if (mediaFilter && mediaFilter.length > 0) {
-    params.medium = mediaFilter.join('|');
-  }
-
   let objectIDs;
-  try {
-    const response = await axios.get(`${BASE_URL}/search`, {
-      params,
-      timeout: 15000,
-    });
-    objectIDs = response.data.objectIDs;
-  } catch (err) {
-    throw new Error(`Failed to search Met Museum collection: ${err.message}`);
+
+  if (!mediaFilter || mediaFilter.length === 0) {
+    // No filter: single search for all public-domain objects with images
+    try {
+      const response = await axios.get(`${BASE_URL}/search`, {
+        params: { q: BROAD_QUERY, hasImages: true },
+        timeout: 15000,
+      });
+      objectIDs = response.data.objectIDs || [];
+    } catch (err) {
+      throw new Error(`Failed to search Met Museum collection: ${err.message}`);
+    }
+  } else {
+    // Filtered: one search per classification value, union the results.
+    // The API's medium= parameter acts as AND for pipe-delimited values,
+    // so each classification must be queried separately.
+    const idSet = new Set();
+    for (const classification of mediaFilter) {
+      try {
+        const response = await axios.get(`${BASE_URL}/search`, {
+          params: { q: BROAD_QUERY, hasImages: true, medium: classification },
+          timeout: 15000,
+        });
+        (response.data.objectIDs || []).forEach(id => idSet.add(id));
+      } catch (err) {
+        console.warn(`[met_museum] Search failed for classification "${classification}": ${err.message}`);
+      }
+    }
+    objectIDs = Array.from(idSet);
   }
 
-  if (!objectIDs || objectIDs.length === 0) {
+  if (!objectIDs.length) {
     throw new Error('No objects found matching the selected categories');
   }
 
