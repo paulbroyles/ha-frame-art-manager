@@ -14630,6 +14630,7 @@ let webSourceSourceConstraints = {}; // Cached per-source constraints (e.g. aspe
 let webSourceMetadata = {};        // Cached per-source { fields, defaultMapping } from GET /config
 let webSourceSettingsSourceId = null; // Which source is currently open in the settings modal
 let webSourceImageProcessingSchema = {}; // Cached imageProcessingSchema from GET /config
+let webSourceTestOrientation = 'landscape'; // Simulated TV orientation for test fetches
 
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
 
@@ -15235,7 +15236,7 @@ function initWebSourceSettingsModal() {
   });
 }
 
-// ── Per-source metadata mapping ──────────────────────────────────────────────
+// ── Per-source metadata mapping ────────────���─────────────────────────────────
 
 /**
  * Serialize a mapping target (null | string | {entity,attribute}) to a select option value.
@@ -15361,8 +15362,17 @@ function renderWebSourcesTestSection() {
 
   const testCache = webSourcesConfig?.testCache || null;
 
-  let html = `<div style="margin-bottom:12px;">
+  let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
     <button type="button" id="web-source-test-fetch-btn" class="btn-secondary btn-small">Fetch Test Image</button>
+    <div style="display:flex;align-items:center;gap:8px;font-size:13px;">
+      <span style="font-weight:600;color:var(--text-muted,#666);">Simulate TV:</span>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+        <input type="radio" name="ws-test-orientation" value="landscape" ${webSourceTestOrientation === 'landscape' ? 'checked' : ''}> Landscape
+      </label>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+        <input type="radio" name="ws-test-orientation" value="portrait" ${webSourceTestOrientation === 'portrait' ? 'checked' : ''}> Portrait
+      </label>
+    </div>
   </div>`;
 
   if (testCache) {
@@ -15412,7 +15422,7 @@ function renderWebSourcesTestSection() {
          </div>`
       : '';
     const processedImg = `<div style="flex:1;min-width:0;">
-      <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">${rawImg ? 'Cropped for TV' : 'Cropped for TV'}</div>
+      <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Cropped for TV</div>
       <img src="${API_BASE}/web-sources/test-cache/image?t=${ts}" alt="Cropped artwork"
            style="max-width:100%;max-height:300px;display:block;border-radius:4px;"
            onerror="this.style.display='none'">
@@ -15430,6 +15440,11 @@ function renderWebSourcesTestSection() {
   container.innerHTML = html;
 
   document.getElementById('web-source-test-fetch-btn')?.addEventListener('click', fetchTestWebSource);
+  container.querySelectorAll('input[name="ws-test-orientation"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      if (radio.checked) webSourceTestOrientation = radio.value;
+    });
+  });
 }
 
 async function fetchTestWebSource() {
@@ -15440,6 +15455,7 @@ async function fetchTestWebSource() {
     const response = await fetch(`${API_BASE}/web-sources/test-fetch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tvOrientation: webSourceTestOrientation }),
     });
     const data = await response.json();
     if (!data.success) throw new Error(data.error || 'Failed to fetch test image');
