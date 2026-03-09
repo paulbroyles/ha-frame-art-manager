@@ -15453,6 +15453,14 @@ function renderWebSourcesTestSection() {
                 onerror="this.style.display='none'">
          </div>`
       : '';
+    const preprocessedImg = testCache.preprocessedFilename
+      ? `<div style="flex:1;min-width:0;">
+           <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Frame Removed</div>
+           <img src="${API_BASE}/web-sources/test-cache/preprocessed-image?t=${ts}" alt="After frame detection"
+                style="max-width:100%;max-height:300px;display:block;border-radius:4px;"
+                onerror="this.style.display='none'">
+         </div>`
+      : '';
     const processedImg = `<div style="flex:1;min-width:0;">
       <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Cropped for TV</div>
       <img src="${API_BASE}/web-sources/test-cache/image?t=${ts}" alt="Cropped artwork"
@@ -15462,7 +15470,7 @@ function renderWebSourcesTestSection() {
 
     html += `<div class="web-source-test-result">
       <div style="display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap;">
-        ${rawImg}${processedImg}
+        ${rawImg}${preprocessedImg}${processedImg}
       </div>
       <table style="border-collapse:collapse;font-size:13px;">${metaRows}${artworkLinkRow}</table>
       ${mappedSection}

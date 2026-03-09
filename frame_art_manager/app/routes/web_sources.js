@@ -3,7 +3,7 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
 const axios = require('axios');
-const { processWebSourceImage, IMAGE_PROCESSING_SCHEMA } = require('../utils/imageProcessor');
+const { processWebSourceImage, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA } = require('../utils/imageProcessor');
 
 // Source modules — each must export fetchRandomArtwork, metadataFields, and defaultMapping.
 // Optional: settingsSchema, buildFetcherOptions.
@@ -180,7 +180,7 @@ async function clearCacheForDevice(frameArtPath, deviceId) {
  */
 async function clearTestCacheFile(frameArtPath) {
   for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
-    for (const prefix of ['_test', '_test_raw']) {
+    for (const prefix of ['_test', '_test_raw', '_test_preprocessed']) {
       try {
         await fs.unlink(path.join(cacheDirFor(frameArtPath), `${prefix}.${ext}`));
       } catch {
@@ -663,10 +663,20 @@ router.post('/test-fetch', async (req, res) => {
 
     const orientation = tvOrientation || 'landscape';
     const { preProcessor, cropEngine, sharpStrategy } = webSources.imageProcessing;
-    const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
+    const alreadyProcessed = !!SOURCE_MODULES[chosenSourceId]?.alreadyProcessed;
+    const activePreProcessor = (!alreadyProcessed && preProcessor !== 'none') ? preProcessor : null;
+
+    // Run the pre-processor separately so its output can be saved for visual comparison.
+    let preprocessedBuffer = imageBuffer;
+    if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](imageBuffer);
+    }
+
+    // Run the crop engine on the pre-processed buffer (pre-process already applied).
+    const processedBuffer = alreadyProcessed
       ? imageBuffer
-      : await processWebSourceImage(imageBuffer, orientation, {
-          preProcess: preProcessor !== 'none' ? preProcessor : null,
+      : await processWebSourceImage(preprocessedBuffer, orientation, {
+          preProcess: null,
           cropEngine,
           cropEngineOptions: { strategy: sharpStrategy },
         });
@@ -676,8 +686,12 @@ router.post('/test-fetch', async (req, res) => {
     await fs.mkdir(cacheDir, { recursive: true });
     await clearTestCacheFile(req.frameArtPath);
     const rawFilename = `_test_raw.${ext}`;
+    const preprocessedFilename = activePreProcessor ? `_test_preprocessed.${ext}` : null;
     const testFilename = `_test.${ext}`;
     await fs.writeFile(path.join(cacheDir, rawFilename), imageBuffer);
+    if (preprocessedFilename) {
+      await fs.writeFile(path.join(cacheDir, preprocessedFilename), preprocessedBuffer);
+    }
     await fs.writeFile(path.join(cacheDir, testFilename), processedBuffer);
 
     const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
@@ -687,6 +701,7 @@ router.post('/test-fetch', async (req, res) => {
     webSources.testCache = {
       filename: testFilename,
       rawFilename,
+      ...(preprocessedFilename && { preprocessedFilename }),
       sourceId: chosenSourceId,
       artworkUrl: artMetadata.artworkUrl,
       metadata: artMetadata,
@@ -738,6 +753,25 @@ router.get('/test-cache/raw-image', async (req, res) => {
   } catch (error) {
     console.error('Error serving raw test cache image:', error);
     res.status(500).json({ error: 'Failed to serve raw test image' });
+  }
+});
+
+// GET /api/web-sources/test-cache/preprocessed-image
+// Serve the pre-processed test image (after frame detection, before crop engine).
+router.get('/test-cache/preprocessed-image', async (req, res) => {
+  try {
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+    if (!webSources.testCache?.preprocessedFilename) {
+      return res.status(404).json({ error: 'No preprocessed test image available' });
+    }
+    const filePath = path.join(cacheDirFor(req.frameArtPath), webSources.testCache.preprocessedFilename);
+    const ext = path.extname(webSources.testCache.preprocessedFilename).slice(1);
+    const contentType = ext === 'png' ? 'image/png' : 'image/jpeg';
+    res.setHeader('Content-Type', contentType);
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error serving preprocessed test cache image:', error);
+    res.status(500).json({ error: 'Failed to serve preprocessed test image' });
   }
 });
 

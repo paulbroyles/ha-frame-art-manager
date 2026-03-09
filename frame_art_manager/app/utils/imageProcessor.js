@@ -188,7 +188,7 @@ async function regionComparePreProcessor(buffer, {
   edgeFraction        = 0.10,
   interiorFraction    = 0.50,
   uniformityThreshold = 300,
-  contrastThreshold   = 25,
+  contrastThreshold   = 15,
   maxCropFraction     = 0.25,
 } = {}) {
   const { data, info } = await sharp(buffer)
