@@ -340,14 +340,17 @@ const HTTP_HEADERS = {
 /**
  * Axios client that maintains a persistent cookie jar for artsandculture.google.com.
  * Google rate-limits cookieless clients aggressively; session cookies obtained by
- * visiting the homepage dramatically reduce 429s.
+ * visiting the homepage can reduce 429s over time.
  *
- * If a 429 is received, the jar is cleared and _cookiesSeeded is reset so the
- * next fetchRandomArtwork call re-seeds fresh cookies before retrying.
+ * Note: if the IP is already rate-limited, cookies cannot be obtained (the seed
+ * request itself returns 429). In that case the client operates without cookies
+ * until the rate limit expires. A 429 on an API call (not a seed attempt) marks
+ * the cookies as potentially stale so the next fetch re-seeds.
  */
 const cookieJar = new CookieJar();
 const cookieClient = axios.create();
 let _cookiesSeeded = false;
+let _seedInProgress = false;
 
 cookieClient.interceptors.request.use(async config => {
   const cookies = await cookieJar.getCookies(config.url || '');
@@ -374,11 +377,12 @@ cookieClient.interceptors.response.use(
   async error => {
     if (error.config && error.response) {
       await storeCookies(error.config.url, error.response.headers['set-cookie']);
-      // 429: clear stale cookies so the next fetch re-seeds fresh ones
-      if (error.response.status === 429) {
+      // Only mark cookies stale on 429 from API calls, not from the seed request
+      // itself — otherwise we'd generate extra requests and compound the rate limit.
+      if (error.response.status === 429 && !_seedInProgress) {
         await cookieJar.removeAllCookies();
         _cookiesSeeded = false;
-        console.log('[google_arts] 429 received — cleared cookie jar for re-seeding');
+        console.log('[google_arts] 429 on API call — cookies cleared, will re-seed next fetch');
       }
     }
     return Promise.reject(error);
@@ -387,20 +391,29 @@ cookieClient.interceptors.response.use(
 
 /**
  * Make a single GET to the Google Arts homepage to seed session cookies.
- * Called once per process (or after a 429 clears the jar). Non-fatal if it fails.
+ * Called once per process (or after an API 429 clears the jar). Non-fatal if it
+ * fails (e.g. if the IP is already rate-limited — seeding is skipped gracefully).
  */
 async function seedCookies() {
-  if (_cookiesSeeded) return;
-  _cookiesSeeded = true; // set early to prevent concurrent seeding
+  if (_cookiesSeeded || _seedInProgress) return;
+  _seedInProgress = true;
   try {
     await cookieClient.get(BASE_URL, {
       headers: { ...HTTP_HEADERS, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
       timeout: 10000,
     });
+    _cookiesSeeded = true;
     console.log('[google_arts] Cookies seeded from artsandculture.google.com');
   } catch (err) {
-    _cookiesSeeded = false; // allow retry on next call
-    console.warn('[google_arts] Cookie seeding failed (non-fatal):', err.message);
+    // Don't retry on 429 — the IP is rate-limited, extra requests make it worse
+    const status = err.response?.status;
+    if (status === 429) {
+      console.warn('[google_arts] Cookie seeding skipped — IP is rate-limited (429)');
+    } else {
+      console.warn('[google_arts] Cookie seeding failed (non-fatal):', err.message);
+    }
+  } finally {
+    _seedInProgress = false;
   }
 }
 
