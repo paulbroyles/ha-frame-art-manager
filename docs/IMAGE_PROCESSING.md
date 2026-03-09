@@ -29,9 +29,44 @@ Skips frame detection entirely. Use this for sources that are known to provide c
 
 ---
 
-### Corner Consensus (`corner_consensus`) — **recommended**
+### Mean Profile (`mean_profile`)
 
-**Problem it solves**: Edge-strip sampling algorithms (like Region Compare) are diluted by painting content — a left/right strip that spans the full image height picks up the painting as well as the frame. The frame signal gets averaged away.
+**Problem it solves**: All variance-based algorithms (Corner Consensus, Region Compare, Variance Scan) test whether frame pixels are *internally uniform* — low variance within each row or region. Textured frames (wood grain, gold leaf, canvas) fail this test: each row has high internal variance due to texture, even though all rows look similar to each other. Mean Profile uses a fundamentally different metric.
+
+**Key insight**: A textured frame has high variance *within* each row but consistent *means* across rows — the texture averages out over the full width. Complex painting content has wildly varying row means. Testing the consistency of row means discriminates frame from painting better than testing per-pixel uniformity.
+
+**Algorithm**:
+
+1. Precompute full-width row means (`rowMeans[y]`) for every row. For left/right edges, compute corner-restricted column means (`cornerColMeans[x]`) using only the top and bottom `cornerFraction` rows — this avoids dilution by painting content in the middle of the image.
+2. Gate each edge independently:
+   - **Consistency**: Std dev of the edge-region means < `consistencyThreshold` (default 15). Tests whether all rows in the edge region have similar mean luminance.
+   - **Contrast**: |edge mean − interior mean| > `contrastThreshold` (default 20). Guards against uniform-colored paintings (sky, simple backgrounds) that might also have consistent row means.
+3. If the gate passes, scan inward while each row/col mean stays within `scanTolerance` (default 20) of the established frame mean. Stop at the first deviation.
+
+**Handles**:
+- Solid uniform borders (obvious)
+- Textured frames: wood grain, gold leaf, canvas — where row means are consistent even though each row is internally varied
+- Per-edge independent detection (can detect on some sides but not others)
+
+**Failure modes**:
+- Multi-layer frames: the frame mean is set from the edge region (e.g., outer black border). When the scan reaches the inner textured layer (e.g., gold), the scan threshold may reject it if the inner frame mean differs significantly from the outer frame mean. Each layer must be within `scanTolerance` of the outermost frame mean.
+- Paintings with consistent top/bottom rows (e.g., a plain sky band) whose mean differs from the overall interior — may trigger a false positive on the top/bottom.
+
+**Parameters**:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `cornerFraction` | 0.10 | Fraction of each dimension for edge sampling |
+| `consistencyThreshold` | 15 | Max std dev of edge row/col means |
+| `contrastThreshold` | 20 | Min luminance difference between frame mean and interior |
+| `scanTolerance` | 20 | Max deviation from frame mean during inward scan |
+| `maxCropFraction` | 0.25 | Hard cap per edge |
+
+---
+
+### Corner Consensus (`corner_consensus`)
+
+**Problem it solves**: Edge-strip sampling algorithms (like Region Compare) are diluted by painting content — a left/right strip spanning the full image height picks up the painting as well as the frame. The frame signal gets averaged away.
 
 **Key insight**: The four corners of a framed image contain only frame pixels — no painting content reaches into the corners. This makes corners a clean, reliable sample.
 

@@ -453,6 +453,163 @@ async function cornerConsensusPreProcessor(buffer, {
     .toBuffer();
 }
 
+/**
+ * Mean Profile pre-processor.
+ *
+ * Addresses the key failure mode of Corner Consensus and Region Compare: both
+ * algorithms test whether edge pixels are *internally uniform* (low per-row/col
+ * variance). Textured frames (wood grain, gold leaf, canvas) fail this test even
+ * though they are clearly frames — each row is textured, but all rows look similar.
+ *
+ * Key insight: A textured frame has high variance *within* each row, but the
+ * *row means* are consistent from row to row (the wood color averages out across
+ * the full width). Complex painting content, by contrast, has wildly varying row
+ * means. Testing the consistency of row means is a stronger discriminator than
+ * testing the internal uniformity of each row.
+ *
+ * Algorithm:
+ *   1. Precompute full-width row means (rowMeans[y]) and corner-restricted column
+ *      means (cornerColMeans[x]) for all rows and columns. Corner-restricted col
+ *      means use only the top-cH and bottom-cH rows to avoid painting dilution
+ *      on the left/right edges.
+ *   2. Gate each edge independently:
+ *        a. Edge mean consistency: std dev of the edge-region means < consistencyThreshold
+ *        b. Contrast: |edge mean − interior mean| > contrastThreshold
+ *   3. If gate passes for an edge, scan inward while the row/col mean stays within
+ *      scanTolerance of the established frame mean. Stop on the first row/col that
+ *      deviates.
+ *
+ * This handles solid, lightly-textured, and wood/gold-leaf frames better than
+ * variance-based algorithms. The per-edge gate allows asymmetric detection.
+ *
+ * options.cornerFraction (default 0.10): fraction of each dimension for edge sampling.
+ * options.consistencyThreshold (default 15): max std dev of edge means to be "consistent".
+ * options.contrastThreshold (default 20): min luminance diff between frame and interior.
+ * options.scanTolerance (default 20): max deviation from frame mean during inward scan.
+ * options.maxCropFraction (default 0.25): hard cap per edge (safety guard).
+ */
+async function meanProfilePreProcessor(buffer, {
+  cornerFraction       = 0.10,
+  consistencyThreshold = 15,
+  contrastThreshold    = 20,
+  scanTolerance        = 20,
+  maxCropFraction      = 0.25,
+} = {}) {
+  const { data, info } = await sharp(buffer)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const { width, height, channels } = info;
+
+  function pixelLum(b) {
+    return 0.299 * data[b] + 0.587 * data[b + 1] + 0.114 * data[b + 2];
+  }
+
+  // Mean luminance for a full-width row.
+  function rowMean(y) {
+    let sum = 0;
+    for (let x = 0; x < width; x++) sum += pixelLum((y * width + x) * channels);
+    return sum / width;
+  }
+
+  // Mean luminance for a column, restricted to specific [y0, y1) bands.
+  function colMeanInBands(x, bands) {
+    let sum = 0, n = 0;
+    for (const [y0, y1] of bands) {
+      for (let y = y0; y < y1; y++) {
+        sum += pixelLum((y * width + x) * channels);
+        n++;
+      }
+    }
+    return n > 0 ? sum / n : 0;
+  }
+
+  // Mean and std dev of a numeric array.
+  function arrayStats(arr) {
+    const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+    const stdDev = Math.sqrt(arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length);
+    return { mean, stdDev };
+  }
+
+  const cH = Math.round(height * cornerFraction);
+  const cW = Math.round(width  * cornerFraction);
+  const maxRows = Math.floor(height * maxCropFraction);
+  const maxCols = Math.floor(width  * maxCropFraction);
+
+  // Precompute all row means (full width).
+  const rowMeans = Array.from({ length: height }, (_, y) => rowMean(y));
+
+  // Precompute corner-restricted column means: columns sampled only in the top + bottom
+  // cH rows. These are guaranteed to be frame pixels (no painting dilution) if the
+  // image has a top+bottom frame. Used for left/right edge detection.
+  const cornerBands = [[0, cH], [height - cH, height]];
+  const cornerColMeans = Array.from({ length: width }, (_, x) => colMeanInBands(x, cornerBands));
+
+  // Interior reference: center 50% block.
+  let iSum = 0, iN = 0;
+  const iy0 = Math.round(height * 0.25), iy1 = Math.round(height * 0.75);
+  const ix0 = Math.round(width  * 0.25), ix1 = Math.round(width  * 0.75);
+  for (let y = iy0; y < iy1; y++) {
+    for (let x = ix0; x < ix1; x++) { iSum += pixelLum((y * width + x) * channels); iN++; }
+  }
+  const interiorMean = iSum / iN;
+
+  // Gate: edge means must be consistent and visually distinct from interior.
+  function edgePasses(edgeMeans, frameMean) {
+    const { stdDev } = arrayStats(edgeMeans);
+    return stdDev < consistencyThreshold &&
+           Math.abs(frameMean - interiorMean) > contrastThreshold;
+  }
+
+  let cropTop = 0, cropBottom = 0, cropLeft = 0, cropRight = 0;
+
+  const topMeans  = rowMeans.slice(0, cH);
+  const { mean: topFrameMean } = arrayStats(topMeans);
+  if (edgePasses(topMeans, topFrameMean)) {
+    for (let y = 0; y < maxRows; y++) {
+      if (Math.abs(rowMeans[y] - topFrameMean) <= scanTolerance) cropTop = y + 1; else break;
+    }
+  }
+
+  const botMeans  = rowMeans.slice(height - cH);
+  const { mean: botFrameMean } = arrayStats(botMeans);
+  if (edgePasses(botMeans, botFrameMean)) {
+    for (let y = height - 1; y >= height - maxRows; y--) {
+      if (Math.abs(rowMeans[y] - botFrameMean) <= scanTolerance) cropBottom = height - y; else break;
+    }
+  }
+
+  const leftMeans = cornerColMeans.slice(0, cW);
+  const { mean: leftFrameMean } = arrayStats(leftMeans);
+  if (edgePasses(leftMeans, leftFrameMean)) {
+    for (let x = 0; x < maxCols; x++) {
+      if (Math.abs(cornerColMeans[x] - leftFrameMean) <= scanTolerance) cropLeft = x + 1; else break;
+    }
+  }
+
+  const rightMeans = cornerColMeans.slice(width - cW);
+  const { mean: rightFrameMean } = arrayStats(rightMeans);
+  if (edgePasses(rightMeans, rightFrameMean)) {
+    for (let x = width - 1; x >= width - maxCols; x--) {
+      if (Math.abs(cornerColMeans[x] - rightFrameMean) <= scanTolerance) cropRight = width - x; else break;
+    }
+  }
+
+  if (cropTop === 0 && cropBottom === 0 && cropLeft === 0 && cropRight === 0) {
+    return buffer;
+  }
+
+  const extractLeft   = cropLeft;
+  const extractTop    = cropTop;
+  const extractWidth  = width  - cropLeft - cropRight;
+  const extractHeight = height - cropTop  - cropBottom;
+
+  console.log(`[imageProcessor] mean_profile: removing top=${cropTop}px, bottom=${cropBottom}px, left=${cropLeft}px, right=${cropRight}px`);
+  return sharp(buffer)
+    .extract({ left: extractLeft, top: extractTop, width: extractWidth, height: extractHeight })
+    .toBuffer();
+}
+
 // TODO (Option 3): ML-based frame segmentation
 // Use a pre-trained ONNX model (e.g., fine-tuned SAM or SegFormer) to identify
 // painting region vs. decorative frame — handles irregular and ornate frames.
@@ -464,6 +621,7 @@ const PRE_PROCESSORS = {
   variance_scan:     varianceScanPreProcessor,
   region_compare:    regionComparePreProcessor,
   corner_consensus:  cornerConsensusPreProcessor,
+  mean_profile:      meanProfilePreProcessor,
 };
 
 // ── Dimension computation ─────────────────────────────────────────────────────
@@ -519,7 +677,7 @@ function computeTargetDimensions(inputW, inputH, orientation) {
  * @param {Buffer} buffer
  * @param {'landscape'|'portrait'} orientation
  * @param {object}  [options]
- * @param {string}  [options.preProcess]                       Pre-processor key ('corner_consensus'|'region_compare'|'variance_scan'|'trim'|null)
+ * @param {string}  [options.preProcess]                       Pre-processor key ('mean_profile'|'corner_consensus'|'region_compare'|'variance_scan'|'trim'|null)
  * @param {object}  [options.preProcessOptions]                Passed through to the pre-processor
  * @param {string}  [options.cropEngine='sharp']               Crop engine key
  * @param {object}  [options.cropEngineOptions]                Passed through to the crop engine
@@ -552,7 +710,8 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
 const IMAGE_PROCESSING_SCHEMA = {
   preProcessors: [
     { value: 'none',             label: 'None — skip frame detection' },
-    { value: 'corner_consensus', label: 'Corner Consensus — detect frames using four-corner sampling; handles multi-layer frames (recommended)' },
+    { value: 'mean_profile',     label: 'Mean Profile — detect frames using row/column mean consistency; handles textured and wood frames' },
+    { value: 'corner_consensus', label: 'Corner Consensus — detect frames using four-corner sampling; handles multi-layer frames' },
     { value: 'region_compare',   label: 'Region Compare — detect frames by comparing edge strip to painting interior' },
     { value: 'variance_scan',    label: 'Variance Scan — detect frames by local edge variance (legacy)' },
     { value: 'trim',             label: 'Sharp Trim — remove solid uniform borders only' },
