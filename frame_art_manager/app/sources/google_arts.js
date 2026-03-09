@@ -352,8 +352,8 @@ function parseApiResponse(data) {
  * Recursively extract artwork objects from a parsed API response.
  * Cobjects: ['stella.common.cobject', title, creator, imageUrl, link, ...]
  * Only /asset/ links are kept (not /story/ or other types).
- * cobject[10] is a metadata sub-object; [10][0] = assetId, [10][1] = aspectRatio,
- * [10][12] = repository.
+ * cobject[8]  = dominant color hex string (e.g. "#17120c").
+ * cobject[10] = image metadata sub-array: [0]=assetId, [1]=aspectRatio, [12]=repository.
  */
 function extractArtworks(obj, depth = 0) {
   const artworks = [];
@@ -375,6 +375,7 @@ function extractArtworks(obj, depth = 0) {
         assetId: meta[0] || null,
         aspectRatio: typeof meta[1] === 'number' ? meta[1] : null,  // width / height
         repository: meta[12] || null,
+        color: typeof obj[8] === 'string' ? obj[8] : null,           // dominant color hex
       });
       return artworks;
     }
@@ -386,69 +387,85 @@ function extractArtworks(obj, depth = 0) {
 }
 
 /**
- * Fetch additional details for an artwork: date created and all media.
- * Calls /api/entity?entityId=<assetId>&hl=en&rt=j
- * Returns { media: string[], dateCreated: string|null }
+ * Parse the structured metadata fields from a stella.av[12] array (from /api/asset).
+ * Each entry is [label, values, ...] where values is an array of [displayText, ...].
+ * Returns a flat object mapping label strings to joined value strings.
  *
- * Searches the response recursively for:
- *   - cobjects whose links match known medium entity IDs → collected as media names
- *   - short strings matching year/date patterns → dateCreated
- *
- * Console-logs the raw response (truncated) for structural inspection.
+ * Known labels (not exhaustive — vary by artwork and institution):
+ *   "Title", "Creator", "Creator Lifespan", "Creator Nationality", "Creator Gender",
+ *   "Date Created", "Type" (medium/technique), "Physical Dimensions",
+ *   "tag / style", "Rights", "Artist biographical information",
+ *   "Additional artwork information"
  */
-async function fetchArtworkDetails(assetId) {
-  if (!assetId) return { media: [], dateCreated: null };
+function parseStructuredFields(av12) {
+  const fields = {};
+  if (!Array.isArray(av12)) return fields;
+  for (const entry of av12) {
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string') continue;
+    const label = entry[0];
+    const values = Array.isArray(entry[1]) ? entry[1] : [];
+    const textValues = values
+      .filter(v => Array.isArray(v) && typeof v[0] === 'string')
+      .map(v => v[0].trim())
+      .filter(Boolean);
+    if (textValues.length > 0) fields[label] = textValues.join('; ');
+  }
+  return fields;
+}
+
+/**
+ * Fetch extended metadata for an artwork via the /api/asset endpoint.
+ *
+ * Returns a subset of the stella.av structured fields:
+ *   dateCreated       — from av[3] or structured "Date Created"
+ *   medium            — from structured "Type" (e.g. "Oil on canvas"), more specific
+ *                       than the entity-based medium used as fallback
+ *   creatorNationality — from structured "Creator Nationality"
+ *   dimensions        — from structured "Physical Dimensions"
+ *   description       — from av[5][1] with HTML tags stripped
+ *
+ * Returns {} on network failure or unexpected response structure.
+ */
+async function fetchAssetDetails(assetId) {
+  if (!assetId) return {};
 
   let parsed;
   try {
-    const response = await axios.get(`${BASE_URL}/api/entity`, {
-      params: { entityId: assetId, hl: 'en', rt: 'j' },
+    const response = await axios.get(`${BASE_URL}/api/asset`, {
+      params: { assetId, hl: 'en', rt: 'j' },
       headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
       timeout: 15000,
       responseType: 'text',
     });
     parsed = parseApiResponse(response.data);
   } catch (err) {
-    console.warn(`[google_arts] Failed to fetch details for asset "${assetId}": ${err.message}`);
-    return { media: [], dateCreated: null };
+    console.warn(`[google_arts] Failed to fetch asset details for "${assetId}": ${err.message}`);
+    return {};
   }
 
-  console.log('[google_arts] fetchArtworkDetails raw (truncated):', JSON.stringify(parsed).slice(0, 3000));
-
-  const mediumNameMap = new Map(MEDIUM_ENTITIES.map(e => [e.id, e.name]));
-  const foundMedia = new Set();
-  let dateCreated = null;
-
-  function search(obj, path, depth) {
-    if (depth > 25 || obj == null) return;
-    if (Array.isArray(obj)) {
-      // Cobjects with /entity/<mediumId> links are medium references
-      if (obj[0] === 'stella.common.cobject' && typeof obj[4] === 'string') {
-        const link = obj[4];
-        for (const [id, name] of mediumNameMap) {
-          if (link === `/entity${id}` || link.endsWith(id)) {
-            foundMedia.add(name);
-            console.log(`[google_arts] Found medium "${name}" at path ${path}`);
-          }
-        }
-        return;
-      }
-      obj.forEach((item, i) => search(item, `${path}[${i}]`, depth + 1));
-    } else if (typeof obj === 'string' && obj.length > 0 && obj.length < 60) {
-      // Match date-like strings: "1889", "c. 1889", "1889–1890", "c. 1889-90"
-      if (!dateCreated && /^\s*(?:c\.?\s*)?\d{3,4}(?:\s*[-–]\s*\d{2,4})?\s*$/.test(obj)) {
-        dateCreated = obj.trim();
-        console.log(`[google_arts] Found dateCreated candidate "${dateCreated}" at path ${path}`);
-      }
-    }
+  const ap = parsed?.[0]?.[0];
+  if (!Array.isArray(ap) || ap[0] !== 'stella.ap') {
+    console.warn(`[google_arts] Unexpected response type for asset "${assetId}": ${ap?.[0]}`);
+    return {};
   }
 
-  search(parsed, 'root', 0);
-  console.log('[google_arts] fetchArtworkDetails result:', { media: Array.from(foundMedia), dateCreated });
+  const av = ap[2]; // stella.av
+  if (!Array.isArray(av) || av[0] !== 'stella.av') return {};
+
+  const structured = parseStructuredFields(av[12]);
+
+  // Strip HTML tags from av[5][1] (description block)
+  const rawDesc = Array.isArray(av[5]) ? av[5][1] : null;
+  const description = typeof rawDesc === 'string'
+    ? rawDesc.replace(/<[^>]+>/g, '').trim() || null
+    : null;
 
   return {
-    media: Array.from(foundMedia),
-    dateCreated,
+    dateCreated:        av[3] || structured['Date Created'] || null,
+    medium:             structured['Type'] || null,
+    creatorNationality: structured['Creator Nationality'] || null,
+    dimensions:         structured['Physical Dimensions'] || null,
+    description,
   };
 }
 
@@ -474,7 +491,7 @@ async function fetchArtworkDetails(assetId) {
  *   'landscape' = width > height (ratio > 1). 'portrait' = height > width (ratio < 1).
  *   Artworks with no ratio metadata are excluded when filtering is active.
  *
- * @returns {{ imageBuffer, contentType, metadata: { title, creator, artworkUrl, medium, source } }}
+ * @returns {{ imageBuffer, contentType, metadata: { title, creator, medium, creatorNationality, repository, dateCreated, dimensions, description, color, artworkUrl, source } }}
  * @throws {Error} If the filter matches no known media, or on network/API failure.
  */
 async function fetchRandomArtwork(mediaFilter = null, options = {}) {
@@ -535,24 +552,18 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
     const imageUrl = `${artwork.imageBase}=w3840-h2160-c`;
     const artworkUrl = `${BASE_URL}${artwork.link}`;
 
-    // Fetch additional details (date, all media) in parallel with image download
+    // Fetch extended asset details in parallel with image download
     const [imageResponse, details] = await Promise.all([
       axios.get(imageUrl, {
         responseType: 'arraybuffer',
         headers: HTTP_HEADERS,
         timeout: 30000,
       }).catch(err => { throw new Error(`Failed to download artwork image: ${err.message}`); }),
-      fetchArtworkDetails(artwork.assetId),
+      fetchAssetDetails(artwork.assetId),
     ]);
 
     const imageBuffer = Buffer.from(imageResponse.data);
     const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
-
-    // Build the full media list: include queried entity name, then any additionally discovered media
-    const allMedia = [...details.media];
-    if (entity.name && !allMedia.includes(entity.name)) {
-      allMedia.unshift(entity.name);
-    }
 
     return {
       imageBuffer,
@@ -561,8 +572,12 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
         title: artwork.title,
         creator: artwork.creator,
         repository: artwork.repository,
-        dateCreated: details.dateCreated,
-        medium: allMedia.join(', ') || entity.name,
+        dateCreated: details.dateCreated || null,
+        medium: details.medium || entity.name,   // prefer specific type, fall back to category
+        creatorNationality: details.creatorNationality || null,
+        dimensions: details.dimensions || null,
+        description: details.description || null,
+        color: artwork.color || null,
         artworkUrl,
         source: 'Google Arts & Culture',
       },

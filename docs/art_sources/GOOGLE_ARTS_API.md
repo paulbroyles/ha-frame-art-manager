@@ -44,9 +44,85 @@ Full-text search. Returns a fixed first page of results (~50–150 artworks) wit
 
 ---
 
+### `GET /api/asset`
+
+Returns rich structured metadata for a single artwork. **This is the primary detail endpoint.** Note: `/api/entity?entityId=<assetId>` does NOT work for artwork asset IDs (returns HTTP 400); use `/api/asset` instead.
+
+**Parameters:**
+| Param | Value | Notes |
+|-------|-------|-------|
+| `assetId` | `eAHC0d0WiemXSA` | Asset ID from `cobject[10][0]` in listing response |
+| `hl` | `en` | Language |
+| `rt` | `j` | Response type |
+
+**Response structure:**
+
+```
+parsed[0][0] = stella.ap = [
+  [0]  "stella.ap"                           // type tag
+  [1]  "Asset:<uuid>"                        // server-assigned instance ID
+  [2]  <stella.av>                           // asset view (main data block)
+  [5]  [<status>]
+]
+```
+
+**Asset view (`stella.av = stella.ap[2]`):**
+
+```
+[
+  [0]  "stella.av"
+  [1]  "<assetId>"
+  [2]  "<title>"                             // artwork title
+  [3]  "<dateCreated>"                       // e.g. "1537/1547" or "1889"
+  [4]  "//lh3.googleusercontent.com/..."    // primary image URL (protocol-relative)
+  [5]  [null, "<description HTML>"]          // [1] = HTML description string
+  [6]  ["<creatorDisplayName>", [...]]       // [0] = creator name; [1] = cobject array
+  [7]  <stella.common.cobject>               // institution/repository cobject
+  [10] <aspectRatio>                         // float: width / height
+  [12] [<structured metadata fields>]        // see below
+  [21] [<artist cobject>]                    // artist entity cobject
+  [25] "<colorHex>"                          // dominant color WITHOUT "#" (e.g. "17120c")
+                                             //   (also available from cobject[8] in listing)
+]
+```
+
+**Structured metadata fields (`stella.av[12]`):**
+
+A list of `[label, values, ...]` entries where each value entry is `[displayText, ?, linkedContent?]`. Labels vary by artwork and institution. Known labels:
+
+| Label | Notes |
+|-------|-------|
+| `Title` | Artwork title (redundant with `av[2]`) |
+| `Creator` | Creator name (redundant with `av[6][0]`) |
+| `Creator Lifespan` | e.g. `"1497/8"` |
+| `Creator Nationality` | e.g. `"German"` |
+| `Creator Gender` | Often `"Unknown"` |
+| `Date Created` | Redundant with `av[3]` |
+| `Type` | Specific medium/technique, e.g. `"Oil on canvas"` — more precise than entity-based medium |
+| `Physical Dimensions` | e.g. `"w1345 x h2390 cm (without frame)"` |
+| `tag / style` | Semicolon-separated AI-generated tags (long, noisy) |
+| `Rights` | Provenance/acquisition info |
+| `Artist biographical information` | Long museum-specific text |
+| `Additional artwork information` | Long museum-specific text |
+
+Implemented as `parseStructuredFields(av[12])` in `sources/google_arts.js` — returns `{ label: joinedValues }`.
+
+**Fields extracted in this project** (`fetchAssetDetails`):
+- `dateCreated` ← `av[3]` or structured `"Date Created"`
+- `medium` ← structured `"Type"` (falls back to entity name if absent)
+- `creatorNationality` ← structured `"Creator Nationality"`
+- `dimensions` ← structured `"Physical Dimensions"`
+- `description` ← `av[5][1]` with HTML stripped
+
+**Dominant color** is in `cobject[8]` of the listing response (with `#` prefix) — no separate call needed.
+
+---
+
 ### `GET /api/entity`
 
 Returns the entity page for a medium category — metadata plus the first ~15–30 artworks.
+
+> **Important**: This endpoint accepts Freebase entity IDs (e.g. `/m/0jmpt`), not artwork asset IDs. Calling `/api/entity?entityId=<assetId>` for an artwork returns HTTP 400. Use `/api/asset` for artwork details.
 
 **Parameters:**
 | Param | Value | Notes |
@@ -259,7 +335,8 @@ The universal content object used for artworks, artists, exhibits, collections, 
                                             //   (other values observed but not fully mapped)
   [6]  null
   [7]  null
-  [8]  "#rrggbb"                            // dominant color hex string — artworks only; null otherwise
+  [8]  "#rrggbb"                            // dominant color hex string WITH "#" prefix — artworks only; null otherwise
+                                            //   e.g. "#17120c". Available in listing response without a separate API call.
   [9]  null
   [10] <image metadata>                     // sub-array for artworks (type 8); null for other types
   [11] null
