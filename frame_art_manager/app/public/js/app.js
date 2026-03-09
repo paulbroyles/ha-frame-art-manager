@@ -15062,6 +15062,28 @@ function initWebSourceSettingsInteractions() {
       cb.indeterminate = false;
     });
   });
+
+  body.querySelector('#ws-clear-cookies-btn')?.addEventListener('click', async function () {
+    const sourceId = this.dataset.sourceId;
+    this.disabled = true;
+    this.textContent = 'Clearing…';
+    try {
+      const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/clear-cookies`, {
+        method: 'POST',
+      });
+      const data = await response.json();
+      if (data.success) {
+        showToast('Cookie jar cleared — will re-seed on next fetch');
+      } else {
+        throw new Error(data.error || 'Failed to clear cookies');
+      }
+    } catch (error) {
+      showToast(`Error: ${error.message}`, 'error');
+    } finally {
+      this.disabled = false;
+      this.textContent = 'Clear Cookie Jar';
+    }
+  });
 }
 
 // ── Source-specific settings renderers ───────────────────────────────────────
@@ -15110,6 +15132,11 @@ function renderGoogleArtsSettings(schema, currentSettings) {
   }
 
   html += `</div></div>`;
+  html += `<div class="ws-mapping-section">
+    <h4>Session Cookies</h4>
+    <p class="pool-health-description">Google Arts &amp; Culture uses session cookies to reduce rate limiting. Cookies are seeded automatically on the first fetch. If fetches are failing with 429 errors, clearing the cookie jar forces a fresh session.</p>
+    <button type="button" id="ws-clear-cookies-btn" class="btn-secondary btn-small" data-source-id="google_arts">Clear Cookie Jar</button>
+  </div>`;
   return html;
 }
 

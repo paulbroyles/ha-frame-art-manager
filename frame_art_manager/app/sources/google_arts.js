@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { CookieJar } = require('tough-cookie');
 
 // All art medium entities listed on artsandculture.google.com/category/medium,
 // identified by Google/Freebase Knowledge Graph IDs. Discovered via BFS through the
@@ -337,6 +338,73 @@ const HTTP_HEADERS = {
 };
 
 /**
+ * Axios client that maintains a persistent cookie jar for artsandculture.google.com.
+ * Google rate-limits cookieless clients aggressively; session cookies obtained by
+ * visiting the homepage dramatically reduce 429s.
+ *
+ * If a 429 is received, the jar is cleared and _cookiesSeeded is reset so the
+ * next fetchRandomArtwork call re-seeds fresh cookies before retrying.
+ */
+const cookieJar = new CookieJar();
+const cookieClient = axios.create();
+let _cookiesSeeded = false;
+
+cookieClient.interceptors.request.use(async config => {
+  const cookies = await cookieJar.getCookies(config.url || '');
+  if (cookies.length > 0) {
+    config.headers = config.headers || {};
+    config.headers.Cookie = cookies.map(c => c.cookieString()).join('; ');
+  }
+  return config;
+});
+
+async function storeCookies(url, setCookieHeader) {
+  if (!url || !setCookieHeader) return;
+  const headers = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
+  for (const header of headers) {
+    try { await cookieJar.setCookie(header, url); } catch { /* ignore malformed */ }
+  }
+}
+
+cookieClient.interceptors.response.use(
+  async response => {
+    await storeCookies(response.config.url, response.headers['set-cookie']);
+    return response;
+  },
+  async error => {
+    if (error.config && error.response) {
+      await storeCookies(error.config.url, error.response.headers['set-cookie']);
+      // 429: clear stale cookies so the next fetch re-seeds fresh ones
+      if (error.response.status === 429) {
+        await cookieJar.removeAllCookies();
+        _cookiesSeeded = false;
+        console.log('[google_arts] 429 received — cleared cookie jar for re-seeding');
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
+/**
+ * Make a single GET to the Google Arts homepage to seed session cookies.
+ * Called once per process (or after a 429 clears the jar). Non-fatal if it fails.
+ */
+async function seedCookies() {
+  if (_cookiesSeeded) return;
+  _cookiesSeeded = true; // set early to prevent concurrent seeding
+  try {
+    await cookieClient.get(BASE_URL, {
+      headers: { ...HTTP_HEADERS, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+      timeout: 10000,
+    });
+    console.log('[google_arts] Cookies seeded from artsandculture.google.com');
+  } catch (err) {
+    _cookiesSeeded = false; // allow retry on next call
+    console.warn('[google_arts] Cookie seeding failed (non-fatal):', err.message);
+  }
+}
+
+/**
  * Parse the Google Arts & Culture API response.
  * Responses start with )]}'\n (XSSI protection prefix).
  */
@@ -431,7 +499,7 @@ async function fetchAssetDetails(assetId) {
 
   let parsed;
   try {
-    const response = await axios.get(`${BASE_URL}/api/asset`, {
+    const response = await cookieClient.get(`${BASE_URL}/api/asset`, {
       params: { assetId, hl: 'en', rt: 'j' },
       headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
       timeout: 15000,
@@ -495,6 +563,7 @@ async function fetchAssetDetails(assetId) {
  * @throws {Error} If the filter matches no known media, or on network/API failure.
  */
 async function fetchRandomArtwork(mediaFilter = null, options = {}) {
+  await seedCookies();
   const { aspectRatio = 'all' } = options;
 
   let candidates = MEDIUM_ENTITIES;
@@ -515,7 +584,7 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
 
     let parsed;
     try {
-      const response = await axios.get(`${BASE_URL}/api/entity/assets`, {
+      const response = await cookieClient.get(`${BASE_URL}/api/entity/assets`, {
         params: { entityId: entity.id, categoryId: 'medium', s: 18, pt, hl: 'en', rt: 'j' },
         headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
         timeout: 15000,
@@ -639,4 +708,14 @@ function buildFetcherOptions(settings) {
   return enabledMedia.length > 0 ? { mediaFilter: enabledMedia } : {};
 }
 
-module.exports = { fetchRandomArtwork, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };
+/**
+ * Clear the cookie jar and allow re-seeding on the next fetch.
+ * Exposed for manual use (e.g. via a UI button) when cookies appear stale.
+ */
+async function clearCookies() {
+  await cookieJar.removeAllCookies();
+  _cookiesSeeded = false;
+  console.log('[google_arts] Cookie jar cleared manually');
+}
+
+module.exports = { fetchRandomArtwork, clearCookies, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };

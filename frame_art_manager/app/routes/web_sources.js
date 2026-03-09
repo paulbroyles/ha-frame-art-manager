@@ -460,6 +460,27 @@ router.delete('/sources/:sourceId/metadata-mapping', async (req, res) => {
   }
 });
 
+// POST /api/web-sources/sources/:sourceId/clear-cookies
+// Clears the source's cookie jar and allows re-seeding on the next fetch.
+// Only available for sources that export a clearCookies() function.
+router.post('/sources/:sourceId/clear-cookies', async (req, res) => {
+  try {
+    const { sourceId } = req.params;
+    const mod = SOURCE_MODULES[sourceId];
+    if (!mod) {
+      return res.status(404).json({ error: `Unknown source: ${sourceId}` });
+    }
+    if (typeof mod.clearCookies !== 'function') {
+      return res.status(400).json({ error: `Source "${sourceId}" does not use cookies` });
+    }
+    await mod.clearCookies();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error clearing source cookies:', error);
+    res.status(500).json({ error: 'Failed to clear cookies' });
+  }
+});
+
 // POST /api/web-sources/fetch-and-display
 // Body: { deviceId, sourceId?, screenOn?, tvOrientation? }
 // tvOrientation ('landscape'|'portrait') is used when aspectRatioFilter is 'match_tv'.
