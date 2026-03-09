@@ -1339,6 +1339,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initTvModal();
   initGalleryInfiniteScroll(); // Initialize infinite scroll for gallery
   initTagsetModalListeners(); // Initialize tagset modal event listeners
+  initWebSourceSettingsModal(); // Initialize web source settings modal
   
   // Pre-fetch similar groups for filter counts
   fetchSimilarGroups();
@@ -14623,7 +14624,9 @@ function initTagsetModalListeners() {
 // WEB SOURCES TAB
 // ============================================================================
 
-let webSourcesConfig = null; // Cached web sources config
+let webSourcesConfig = null;       // Cached web sources config
+let webSourceSettingsSchemas = {}; // Cached settings schemas from GET /config
+let webSourceSettingsSourceId = null; // Which source is currently open in the settings modal
 
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
 
@@ -14649,6 +14652,7 @@ async function loadWebSourcesConfig() {
     const data = await response.json();
     if (data.success) {
       webSourcesConfig = data.webSources;
+      webSourceSettingsSchemas = data.settingsSchemas || {};
     }
   } catch (error) {
     console.error('Error loading web sources config:', error);
@@ -14673,6 +14677,7 @@ function renderWebSourcesList() {
   let html = '<div class="web-sources-cards">';
   for (const [sourceId, source] of Object.entries(sources)) {
     const isEnabled = !!source.enabled;
+    const hasSettings = !!webSourceSettingsSchemas[sourceId];
     html += `
       <div class="web-source-card${isEnabled ? ' enabled' : ''}">
         <div class="web-source-card-header">
@@ -14680,10 +14685,13 @@ function renderWebSourcesList() {
             <strong>${escapeHtml(source.name)}</strong>
             <span class="web-source-description">${escapeHtml(source.description || '')}</span>
           </div>
-          <label class="toggle-label">
-            <input type="checkbox" class="web-source-enable-toggle" data-source-id="${escapeHtml(sourceId)}" ${isEnabled ? 'checked' : ''}>
-            <span class="toggle-text">${isEnabled ? 'Enabled' : 'Disabled'}</span>
-          </label>
+          <div class="web-source-card-actions">
+            ${hasSettings ? `<button type="button" class="btn-secondary btn-small web-source-settings-btn" data-source-id="${escapeHtml(sourceId)}" title="Settings">Settings</button>` : ''}
+            <label class="toggle-label">
+              <input type="checkbox" class="web-source-enable-toggle" data-source-id="${escapeHtml(sourceId)}" ${isEnabled ? 'checked' : ''}>
+              <span class="toggle-text">${isEnabled ? 'Enabled' : 'Disabled'}</span>
+            </label>
+          </div>
         </div>
       </div>`;
   }
@@ -14719,6 +14727,226 @@ function renderWebSourcesList() {
         showToast(`Error: ${error.message}`, 'error');
       }
     });
+  });
+
+  container.querySelectorAll('.web-source-settings-btn').forEach(btn => {
+    btn.addEventListener('click', () => openWebSourceSettings(btn.dataset.sourceId));
+  });
+}
+
+// ── Web Source Settings Modal ─────────────────────────────────────────────────
+
+/**
+ * Renderers for source-specific settings UI.
+ * Each function receives (schema, currentSettings) and returns an HTML string.
+ * Add an entry here when adding a new source that needs a settings dialog.
+ */
+const WEB_SOURCE_SETTINGS_RENDERERS = {
+  google_arts: renderGoogleArtsSettings,
+};
+
+function openWebSourceSettings(sourceId) {
+  const schema = webSourceSettingsSchemas[sourceId];
+  const renderer = WEB_SOURCE_SETTINGS_RENDERERS[sourceId];
+  if (!schema || !renderer) return;
+
+  const source = webSourcesConfig?.sources?.[sourceId] || {};
+  const currentSettings = source.settings || {};
+
+  document.getElementById('web-source-settings-title').textContent =
+    `${source.name || sourceId} — Settings`;
+  const body = document.getElementById('web-source-settings-body');
+  body.innerHTML = renderer(schema, currentSettings);
+
+  // Apply indeterminate state (can't be set via HTML attribute)
+  body.querySelectorAll('.ws-category-checkbox[data-indeterminate="true"]').forEach(cb => {
+    cb.indeterminate = true;
+  });
+
+  webSourceSettingsSourceId = sourceId;
+
+  // Attach expand/collapse and checkbox cascade logic
+  initWebSourceSettingsInteractions();
+
+  document.getElementById('web-source-settings-modal').classList.add('active');
+}
+
+function closeWebSourceSettings() {
+  document.getElementById('web-source-settings-modal').classList.remove('active');
+  webSourceSettingsSourceId = null;
+}
+
+async function saveWebSourceSettings() {
+  const sourceId = webSourceSettingsSourceId;
+  if (!sourceId) return;
+
+  const settings = readWebSourceSettingsFromUI(sourceId);
+  if (settings === null) return;
+
+  const saveBtn = document.getElementById('web-source-settings-save');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+
+  try {
+    const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings }),
+    });
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'Failed to save settings');
+    if (webSourcesConfig?.sources?.[sourceId]) {
+      webSourcesConfig.sources[sourceId].settings = settings;
+    }
+    closeWebSourceSettings();
+    showToast('Settings saved');
+  } catch (error) {
+    console.error('Error saving web source settings:', error);
+    showToast(`Error: ${error.message}`, 'error');
+  } finally {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Settings'; }
+  }
+}
+
+/**
+ * Read the current UI state for a source's settings dialog.
+ * Returns the settings object to POST, or null on error.
+ */
+function readWebSourceSettingsFromUI(sourceId) {
+  if (sourceId === 'google_arts') {
+    const disabledMedia = [];
+    document.querySelectorAll('#web-source-settings-body .ws-media-checkbox').forEach(cb => {
+      if (!cb.checked) disabledMedia.push(cb.dataset.medium);
+    });
+    return { disabledMedia };
+  }
+  return {};
+}
+
+/**
+ * Attach expand/collapse toggles and checkbox cascade behavior after rendering
+ * the settings modal body.
+ */
+function initWebSourceSettingsInteractions() {
+  const body = document.getElementById('web-source-settings-body');
+
+  // Expand/collapse category items
+  body.querySelectorAll('.ws-media-category-header').forEach(header => {
+    header.addEventListener('click', e => {
+      // Don't toggle expand when clicking directly on the category checkbox
+      if (e.target.type === 'checkbox') return;
+      const category = header.closest('.ws-media-category');
+      const items = category.querySelector('.ws-media-category-items');
+      const btn = header.querySelector('.ws-category-toggle-btn');
+      const expanded = items.style.display !== 'none';
+      items.style.display = expanded ? 'none' : '';
+      btn.textContent = expanded ? '▶' : '▼';
+    });
+  });
+
+  // Category checkbox → check/uncheck all media in that category
+  body.querySelectorAll('.ws-category-checkbox').forEach(catCb => {
+    catCb.addEventListener('change', () => {
+      const category = catCb.closest('.ws-media-category');
+      category.querySelectorAll('.ws-media-checkbox').forEach(cb => {
+        cb.checked = catCb.checked;
+      });
+      catCb.indeterminate = false;
+    });
+  });
+
+  // Individual media checkbox → update category checkbox state
+  body.querySelectorAll('.ws-media-checkbox').forEach(mediaCb => {
+    mediaCb.addEventListener('change', () => {
+      const category = mediaCb.closest('.ws-media-category');
+      const catCb = category.querySelector('.ws-category-checkbox');
+      const all = Array.from(category.querySelectorAll('.ws-media-checkbox'));
+      const checkedCount = all.filter(c => c.checked).length;
+      if (checkedCount === 0) {
+        catCb.checked = false;
+        catCb.indeterminate = false;
+      } else if (checkedCount === all.length) {
+        catCb.checked = true;
+        catCb.indeterminate = false;
+      } else {
+        catCb.checked = false;
+        catCb.indeterminate = true;
+      }
+    });
+  });
+
+  // Select All / Select None buttons
+  body.querySelector('#ws-select-all')?.addEventListener('click', () => {
+    body.querySelectorAll('.ws-media-checkbox').forEach(cb => { cb.checked = true; });
+    body.querySelectorAll('.ws-category-checkbox').forEach(cb => {
+      cb.checked = true;
+      cb.indeterminate = false;
+    });
+  });
+  body.querySelector('#ws-select-none')?.addEventListener('click', () => {
+    body.querySelectorAll('.ws-media-checkbox').forEach(cb => { cb.checked = false; });
+    body.querySelectorAll('.ws-category-checkbox').forEach(cb => {
+      cb.checked = false;
+      cb.indeterminate = false;
+    });
+  });
+}
+
+// ── Source-specific settings renderers ───────────────────────────────────────
+
+function renderGoogleArtsSettings(schema, currentSettings) {
+  const disabledSet = new Set((currentSettings.disabledMedia || []).map(m => m.toLowerCase()));
+  const categories = schema.mediaCategories || [];
+
+  let html = `<div style="padding:14px 16px;">
+    <p style="margin:0 0 12px;font-size:13px;color:#555;">
+      Select which media types to include when fetching random artwork. Only enabled media will be chosen.
+    </p>
+    <div class="ws-media-toolbar">
+      <button type="button" id="ws-select-all" class="btn-secondary btn-small">Select All</button>
+      <button type="button" id="ws-select-none" class="btn-secondary btn-small">Select None</button>
+    </div>
+    <div class="ws-media-categories">`;
+
+  for (const cat of categories) {
+    const mediaInCat = cat.media || [];
+    const checkedCount = mediaInCat.filter(m => !disabledSet.has(m.toLowerCase())).length;
+    const allChecked = checkedCount === mediaInCat.length;
+    const noneChecked = checkedCount === 0;
+    const catChecked = allChecked ? 'checked' : '';
+    const catIndeterminate = (!allChecked && !noneChecked) ? 'data-indeterminate="true"' : '';
+
+    html += `<div class="ws-media-category">
+      <div class="ws-media-category-header">
+        <label class="ws-category-label" onclick="event.stopPropagation()">
+          <input type="checkbox" class="ws-category-checkbox" ${catChecked} ${catIndeterminate}>
+          ${escapeHtml(cat.name)}
+        </label>
+        <button type="button" class="ws-category-toggle-btn" title="Expand/collapse">▼</button>
+      </div>
+      <div class="ws-media-category-items">`;
+
+    for (const medium of mediaInCat) {
+      const isEnabled = !disabledSet.has(medium.toLowerCase());
+      html += `<label class="ws-media-item">
+        <input type="checkbox" class="ws-media-checkbox" data-medium="${escapeHtml(medium)}" ${isEnabled ? 'checked' : ''}>
+        ${escapeHtml(medium)}
+      </label>`;
+    }
+
+    html += `</div></div>`;
+  }
+
+  html += `</div></div>`;
+  return html;
+}
+
+// Wire up the settings modal close/save buttons (called once at startup)
+function initWebSourceSettingsModal() {
+  document.getElementById('web-source-settings-close')?.addEventListener('click', closeWebSourceSettings);
+  document.getElementById('web-source-settings-cancel')?.addEventListener('click', closeWebSourceSettings);
+  document.getElementById('web-source-settings-save')?.addEventListener('click', saveWebSourceSettings);
+  document.getElementById('web-source-settings-modal')?.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeWebSourceSettings();
   });
 }
 

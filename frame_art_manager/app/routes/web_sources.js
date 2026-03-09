@@ -3,10 +3,23 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
 const axios = require('axios');
-const SOURCE_FETCHERS = {
-  google_arts: require('../sources/google_arts').fetchRandomArtwork,
-  google_art_wallpaper: require('../sources/google_art_wallpaper').fetchRandomArtwork,
+// Source modules — each may optionally export settingsSchema and buildFetcherOptions.
+// web_sources.js delegates source-specific logic to these modules generically.
+const SOURCE_MODULES = {
+  google_arts: require('../sources/google_arts'),
+  google_art_wallpaper: require('../sources/google_art_wallpaper'),
 };
+
+const SOURCE_FETCHERS = Object.fromEntries(
+  Object.entries(SOURCE_MODULES).map(([id, mod]) => [id, mod.fetchRandomArtwork])
+);
+
+// Settings schemas collected from source modules (only sources that define one are included).
+const SOURCE_SETTINGS_SCHEMAS = Object.fromEntries(
+  Object.entries(SOURCE_MODULES)
+    .filter(([, mod]) => mod.settingsSchema)
+    .map(([id, mod]) => [id, mod.settingsSchema])
+);
 
 const SUPERVISOR_TOKEN = process.env.SUPERVISOR_TOKEN;
 const HA_API_BASE = process.env.HA_URL || 'http://supervisor/core/api';
@@ -130,16 +143,52 @@ async function displayImageOnTV(imagePath, deviceId, { screenOn = true } = {}) {
   });
 }
 
+/**
+ * Convert stored source settings to options for the source fetcher.
+ * Delegates to the source module's own buildFetcherOptions if present.
+ */
+function buildFetcherOptions(sourceId, settings) {
+  const mod = SOURCE_MODULES[sourceId];
+  if (mod?.buildFetcherOptions) return mod.buildFetcherOptions(settings);
+  return {};
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 // GET /api/web-sources/config
 router.get('/config', async (req, res) => {
   try {
     const { webSources } = await readWebSourcesConfig(req.frameArtPath);
-    res.json({ success: true, webSources });
+    res.json({ success: true, webSources, settingsSchemas: SOURCE_SETTINGS_SCHEMAS });
   } catch (error) {
     console.error('Error reading web sources config:', error);
     res.status(500).json({ error: 'Failed to read web sources config' });
+  }
+});
+
+// PUT /api/web-sources/sources/:sourceId/settings
+router.put('/sources/:sourceId/settings', async (req, res) => {
+  try {
+    const { sourceId } = req.params;
+    const { settings } = req.body;
+
+    if (!BUILTIN_SOURCES[sourceId]) {
+      return res.status(404).json({ error: `Unknown source: ${sourceId}` });
+    }
+    if (settings == null || typeof settings !== 'object' || Array.isArray(settings)) {
+      return res.status(400).json({ error: 'settings must be an object' });
+    }
+
+    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
+    webSources.sources[sourceId] = {
+      ...(webSources.sources[sourceId] || BUILTIN_SOURCES[sourceId]),
+      settings,
+    };
+    await writeWebSourcesConfig(req.frameArtPath, metadata);
+    res.json({ success: true, source: webSources.sources[sourceId] });
+  } catch (error) {
+    console.error('Error updating web source settings:', error);
+    res.status(500).json({ error: 'Failed to update web source settings' });
   }
 });
 
@@ -277,7 +326,8 @@ router.post('/fetch-and-display', async (req, res) => {
     if (!fetcher) {
       return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
     }
-    const fetchResult = await fetcher();
+    const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
+    const fetchResult = await fetcher(fetcherOpts.mediaFilter);
 
     const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
@@ -370,7 +420,8 @@ router.post('/test-fetch', async (req, res) => {
     if (!fetcher) {
       return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
     }
-    const { imageBuffer, contentType, metadata: artMetadata } = await fetcher();
+    const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
+    const { imageBuffer, contentType, metadata: artMetadata } = await fetcher(fetcherOpts.mediaFilter);
 
     const ext = contentType.includes('png') ? 'png' : 'jpg';
     const cacheDir = cacheDirFor(req.frameArtPath);

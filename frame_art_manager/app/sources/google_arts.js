@@ -236,6 +236,29 @@ const MEDIUM_ENTITIES = [
   { name: 'adobe',                id: '/m/0h_4',     total: 15     },
 ];
 
+// Categories grouping MEDIUM_ENTITIES for display and filtering.
+// Used by the web source settings dialog to present a categorized checkbox list.
+// Category names and membership mirror the section comments in MEDIUM_ENTITIES above.
+//
+// IMPORTANT: If you add or remove entries in MEDIUM_ENTITIES, update MEDIUM_CATEGORIES
+// accordingly to keep them in sync.
+const MEDIUM_CATEGORIES = [
+  { name: 'Paints & Pigments',    media: ['oil paint', 'watercolor painting', 'acrylic paint', 'tempera', 'gouache', 'vitreous enamel', 'distemper', 'spray painting', 'oil pastel', 'encaustic painting', 'pigment', 'dye', 'cinnabar', 'azurite', 'cochineal', 'varnish', 'lacquer'] },
+  { name: 'Drawing Media',        media: ['ink', 'india ink', 'graphite', 'pencil', 'pen', 'drawing', 'charcoal', 'chalk', 'colored pencil', 'crayon', 'sanguine', 'conté'] },
+  { name: 'Printmaking',          media: ['engraving', 'etching'] },
+  { name: 'Paper & Supports',     media: ['canvas', 'photographic paper', 'photograph', 'paper negative', 'calotype', 'laid paper', 'vellum', 'tracing paper', 'rice paper', 'cardboard', 'masonite', 'book'] },
+  { name: 'Metals',               media: ['metal', 'gold', 'gold leaf', 'silver', 'bronze', 'iron', 'copper', 'brass', 'steel', 'lead', 'tin', 'platinum', 'aluminium', 'wire', 'sterling silver', 'cast iron', 'wrought iron', 'pewter', 'stainless steel', 'sheet metal', 'neon', 'cobalt', 'zinc', 'nickel', 'foil', 'chromium', 'manganese', 'mercury', 'titanium'] },
+  { name: 'Stone',                media: ['rock', 'marble', 'granite', 'limestone', 'sandstone', 'slate', 'pebble', 'diorite', 'basalt', 'obsidian', 'quartzite', 'andesite', 'schist', 'flint', 'soapstone', 'alabaster', 'travertine', 'carrara marble', 'parian marble', 'pavonazzo marble'] },
+  { name: 'Ceramics & Clay',      media: ['clay', 'ceramic', 'porcelain', 'stoneware', 'terracotta', 'pottery', 'biscuit porcelain', 'faience', 'lustreware', 'brick', 'stucco', 'concrete', 'plaster'] },
+  { name: 'Glass',                media: ['glass', 'stained glass', 'crystal', 'milk glass', 'murano glass', 'lead glass', 'fiberglass', 'resin'] },
+  { name: 'Textiles',             media: ['textile', 'silk', 'cotton', 'wool', 'linen', 'lace', 'velvet', 'yarn', 'cord', 'satin', 'brocade', 'felt', 'hessian fabric', 'muslin', 'mohair', 'twill', 'damask', 'taffeta', 'chiffon', 'gauze', 'chintz', 'jute', 'rope'] },
+  { name: 'Wood',                 media: ['wood', 'oak', 'walnut', 'maple', 'teak', 'mahogany', 'ebony', 'pine', 'cherry', 'eucalyptus', 'beech', 'birch', 'willow', 'spruce', 'fir', 'olive', 'tulipwood'] },
+  { name: 'Plastic & Synthetic',  media: ['plastic', 'polyester', 'nylon', 'polyurethane', 'polypropylene', 'epoxy', 'polycarbonate', 'polystyrene', 'bakelite', 'celluloid', 'acrylic resin', 'formica', 'polyethylene', 'natural rubber'] },
+  { name: 'Gemstones & Minerals', media: ['gemstone', 'jade', 'quartz', 'amber', 'diamond', 'turquoise', 'garnet', 'feldspar', 'hematite', 'malachite', 'jet', 'sapphire', 'emerald', 'topaz', 'lapis lazuli', 'nephrite', 'jadeite', 'onyx', 'jasper', 'amethyst', 'agate', 'pearl', 'nacre'] },
+  { name: 'Other Natural Materials', media: ['ivory', 'bone', 'leather', 'wax', 'beeswax', 'bark', 'leaf', 'root', 'tooth', 'tusk', 'cork'] },
+  { name: 'Other Media',          media: ['sculpture', 'adhesive', 'rhinestone', 'adobe'] },
+];
+
 // The /api/entity/assets endpoint returns HTTP 500 for offsets ≥ ~5000,
 // regardless of an entity's actual total. This constant caps the usable range.
 // To lift the cap once full pagination is available, remove the Math.min() call
@@ -514,4 +537,25 @@ async function fetchRandomArtwork(mediaFilter = null) {
   };
 }
 
-module.exports = { fetchRandomArtwork, MEDIUM_ENTITIES };
+// Settings schema for the web source settings dialog.
+// Returned via GET /api/web-sources/config and consumed by the UI to render controls.
+const settingsSchema = {
+  mediaCategories: MEDIUM_CATEGORIES,
+};
+
+/**
+ * Convert stored source settings to fetcher call options.
+ * Called by web_sources.js before invoking fetchRandomArtwork.
+ *
+ * settings.disabledMedia: string[] — names of media to exclude from selection.
+ * Returns { mediaFilter: string[] } (enabled media only), or {} if no restriction.
+ */
+function buildFetcherOptions(settings) {
+  const disabledMedia = settings?.disabledMedia;
+  if (!disabledMedia || disabledMedia.length === 0) return {};
+  const disabledSet = new Set(disabledMedia.map(m => m.toLowerCase()));
+  const enabledMedia = MEDIUM_ENTITIES.map(e => e.name).filter(n => !disabledSet.has(n.toLowerCase()));
+  return enabledMedia.length > 0 ? { mediaFilter: enabledMedia } : {};
+}
+
+module.exports = { fetchRandomArtwork, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, settingsSchema, buildFetcherOptions };
