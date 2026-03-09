@@ -11157,6 +11157,53 @@ body.dropdown-open .image-card:hover {
   background: var(--accent-bg-light, #f0f6ff);
 }
 
+.web-source-card.ws-source-incompatible {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.ws-incompatible-note {
+  font-size: 11px;
+  color: var(--text-muted, #888);
+  font-style: italic;
+}
+
+.toggle-label-disabled {
+  cursor: not-allowed;
+}
+
+/* Global settings — aspect ratio filter */
+.ws-global-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ws-global-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.ws-aspect-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.ws-aspect-radio-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.ws-aspect-desc {
+  color: var(--text-muted, #888);
+  font-weight: normal;
+}
+
 .web-source-card-header {
   display: flex;
   align-items: flex-start;

@@ -352,7 +352,8 @@ function parseApiResponse(data) {
  * Recursively extract artwork objects from a parsed API response.
  * Cobjects: ['stella.common.cobject', title, creator, imageUrl, link, ...]
  * Only /asset/ links are kept (not /story/ or other types).
- * cobject[10] is a metadata sub-object; [10][0] = assetId, [10][12] = repository.
+ * cobject[10] is a metadata sub-object; [10][0] = assetId, [10][1] = aspectRatio,
+ * [10][12] = repository.
  */
 function extractArtworks(obj, depth = 0) {
   const artworks = [];
@@ -372,6 +373,7 @@ function extractArtworks(obj, depth = 0) {
         imageBase,
         link: obj[4],
         assetId: meta[0] || null,
+        aspectRatio: typeof meta[1] === 'number' ? meta[1] : null,  // width / height
         repository: meta[12] || null,
       });
       return artworks;
@@ -458,15 +460,26 @@ async function fetchArtworkDetails(assetId) {
  * artwork positions. Entities are weighted by accessible item count so larger
  * collections are proportionally more likely to be selected.
  *
+ * Aspect ratio filtering is applied before downloading using cobject[10][1] — the
+ * original image aspect ratio (width/height) returned by the API. This avoids
+ * discarding already-downloaded images. If no artwork on a fetched page matches the
+ * filter, a new entity and offset are tried on the next attempt.
+ *
  * @param {string[]} [mediaFilter] - Optional list of medium names to restrict selection.
  *   Names are matched case-insensitively against MEDIUM_ENTITIES. If omitted or empty,
  *   all 203 media are eligible. Pass e.g. ['oil paint', 'watercolor painting'] to
  *   restrict to specific media.
+ * @param {object} [options]
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all'] - Filter by aspect ratio.
+ *   'landscape' = width > height (ratio > 1). 'portrait' = height > width (ratio < 1).
+ *   Artworks with no ratio metadata are excluded when filtering is active.
  *
  * @returns {{ imageBuffer, contentType, metadata: { title, creator, artworkUrl, medium, source } }}
  * @throws {Error} If the filter matches no known media, or on network/API failure.
  */
-async function fetchRandomArtwork(mediaFilter = null) {
+async function fetchRandomArtwork(mediaFilter = null, options = {}) {
+  const { aspectRatio = 'all' } = options;
+
   let candidates = MEDIUM_ENTITIES;
   if (mediaFilter && mediaFilter.length > 0) {
     const filterSet = new Set(mediaFilter.map(m => m.toLowerCase()));
@@ -476,65 +489,87 @@ async function fetchRandomArtwork(mediaFilter = null) {
     }
   }
 
-  const entity = weightedRandomEntity(candidates);
-  const maxOffset = getAccessibleCount(entity);
-  const offset = maxOffset > 0 ? Math.floor(Math.random() * maxOffset) : 0;
-  const pt = buildPtToken(offset);
+  const MAX_ATTEMPTS = 5;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const entity = weightedRandomEntity(candidates);
+    const maxOffset = getAccessibleCount(entity);
+    const offset = maxOffset > 0 ? Math.floor(Math.random() * maxOffset) : 0;
+    const pt = buildPtToken(offset);
 
-  let parsed;
-  try {
-    const response = await axios.get(`${BASE_URL}/api/entity/assets`, {
-      params: { entityId: entity.id, categoryId: 'medium', s: 18, pt, hl: 'en', rt: 'j' },
-      headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
-      timeout: 15000,
-      responseType: 'text',
-    });
-    parsed = parseApiResponse(response.data);
-  } catch (err) {
-    throw new Error(`Failed to fetch artworks for "${entity.name}": ${err.message}`);
+    let parsed;
+    try {
+      const response = await axios.get(`${BASE_URL}/api/entity/assets`, {
+        params: { entityId: entity.id, categoryId: 'medium', s: 18, pt, hl: 'en', rt: 'j' },
+        headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
+        timeout: 15000,
+        responseType: 'text',
+      });
+      parsed = parseApiResponse(response.data);
+    } catch (err) {
+      console.warn(`[google_arts] Attempt ${attempt + 1}: failed to fetch page for "${entity.name}": ${err.message}`);
+      continue;
+    }
+
+    let artworks = extractArtworks(parsed);
+    if (artworks.length === 0) {
+      console.warn(`[google_arts] Attempt ${attempt + 1}: no artworks for "${entity.name}" at offset ${offset}`);
+      continue;
+    }
+
+    // Filter by aspect ratio using the pre-download ratio from cobject metadata.
+    // Artworks without ratio metadata are excluded when a filter is active.
+    if (aspectRatio !== 'all') {
+      artworks = artworks.filter(a => {
+        if (a.aspectRatio === null) return false;
+        if (aspectRatio === 'landscape') return a.aspectRatio > 1;
+        if (aspectRatio === 'portrait') return a.aspectRatio < 1;
+        return true;
+      });
+      if (artworks.length === 0) {
+        console.warn(`[google_arts] Attempt ${attempt + 1}: no ${aspectRatio} artworks on page for "${entity.name}" at offset ${offset}`);
+        continue;
+      }
+    }
+
+    const artwork = artworks[Math.floor(Math.random() * artworks.length)];
+    const imageUrl = `${artwork.imageBase}=w3840-h2160-c`;
+    const artworkUrl = `${BASE_URL}${artwork.link}`;
+
+    // Fetch additional details (date, all media) in parallel with image download
+    const [imageResponse, details] = await Promise.all([
+      axios.get(imageUrl, {
+        responseType: 'arraybuffer',
+        headers: HTTP_HEADERS,
+        timeout: 30000,
+      }).catch(err => { throw new Error(`Failed to download artwork image: ${err.message}`); }),
+      fetchArtworkDetails(artwork.assetId),
+    ]);
+
+    const imageBuffer = Buffer.from(imageResponse.data);
+    const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
+
+    // Build the full media list: include queried entity name, then any additionally discovered media
+    const allMedia = [...details.media];
+    if (entity.name && !allMedia.includes(entity.name)) {
+      allMedia.unshift(entity.name);
+    }
+
+    return {
+      imageBuffer,
+      contentType,
+      metadata: {
+        title: artwork.title,
+        creator: artwork.creator,
+        repository: artwork.repository,
+        dateCreated: details.dateCreated,
+        medium: allMedia.join(', ') || entity.name,
+        artworkUrl,
+        source: 'Google Arts & Culture',
+      },
+    };
   }
 
-  const artworks = extractArtworks(parsed);
-  if (artworks.length === 0) {
-    throw new Error(`No artworks found for "${entity.name}" at offset ${offset}`);
-  }
-
-  const artwork = artworks[Math.floor(Math.random() * artworks.length)];
-  const imageUrl = `${artwork.imageBase}=w3840-h2160-c`;
-  const artworkUrl = `${BASE_URL}${artwork.link}`;
-
-  // Fetch additional details (date, all media) in parallel with image download
-  const [imageResponse, details] = await Promise.all([
-    axios.get(imageUrl, {
-      responseType: 'arraybuffer',
-      headers: HTTP_HEADERS,
-      timeout: 30000,
-    }).catch(err => { throw new Error(`Failed to download artwork image: ${err.message}`); }),
-    fetchArtworkDetails(artwork.assetId),
-  ]);
-
-  const imageBuffer = Buffer.from(imageResponse.data);
-  const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
-
-  // Build the full media list: include queried entity name, then any additionally discovered media
-  const allMedia = [...details.media];
-  if (entity.name && !allMedia.includes(entity.name)) {
-    allMedia.unshift(entity.name);
-  }
-
-  return {
-    imageBuffer,
-    contentType,
-    metadata: {
-      title: artwork.title,
-      creator: artwork.creator,
-      repository: artwork.repository,
-      dateCreated: details.dateCreated,
-      medium: allMedia.join(', ') || entity.name,
-      artworkUrl,
-      source: 'Google Arts & Culture',
-    },
-  };
+  throw new Error(`Could not find a${aspectRatio !== 'all' ? ` ${aspectRatio}` : 'n'} artwork after ${MAX_ATTEMPTS} attempts`);
 }
 
 // Settings schema for the web source settings dialog.

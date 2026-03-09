@@ -1,4 +1,5 @@
 const axios = require('axios');
+const sharp = require('sharp');
 
 // Base URL for the Metropolitan Museum of Art Open Access API.
 // No API key required. Rate limit: 80 requests/second.
@@ -71,11 +72,16 @@ const BROAD_QUERY = '*';
  *   all objects with images are eligible. Each value is queried separately and
  *   results are unioned — the Met API treats pipe-delimited medium values as
  *   AND (intersection), not OR, so multi-classification queries must be split.
+ * @param {object} [options]
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all'] - Filter by aspect ratio.
+ *   Checked against the actual downloaded image dimensions via sharp.
+ *   'landscape' = width > height. 'portrait' = height > width.
  *
  * @returns {{ imageBuffer, contentType, metadata: { title, creator, medium, dateCreated, artworkUrl, source } }}
  * @throws {Error} on network/API failure or if no suitable artwork is found.
  */
-async function fetchRandomArtwork(mediaFilter = null) {
+async function fetchRandomArtwork(mediaFilter = null, options = {}) {
+  const { aspectRatio = 'all' } = options;
   let objectIDs;
 
   if (!mediaFilter || mediaFilter.length === 0) {
@@ -145,6 +151,26 @@ async function fetchRandomArtwork(mediaFilter = null) {
       continue;
     }
 
+    // Check aspect ratio from actual image dimensions (Met images are direct URLs
+    // without a crop suffix, so the downloaded pixels reflect the original ratio).
+    if (aspectRatio !== 'all') {
+      try {
+        const { width, height } = await sharp(imageBuffer).metadata();
+        const isLandscape = width > height;
+        if (aspectRatio === 'landscape' && !isLandscape) {
+          console.warn(`[met_museum] Object ${objectId} skipped: not landscape (${width}x${height})`);
+          continue;
+        }
+        if (aspectRatio === 'portrait' && isLandscape) {
+          console.warn(`[met_museum] Object ${objectId} skipped: not portrait (${width}x${height})`);
+          continue;
+        }
+      } catch (err) {
+        console.warn(`[met_museum] Could not read dimensions for object ${objectId}: ${err.message}`);
+        continue;
+      }
+    }
+
     return {
       imageBuffer,
       contentType,
@@ -159,7 +185,7 @@ async function fetchRandomArtwork(mediaFilter = null) {
     };
   }
 
-  throw new Error(`Could not find a suitable public-domain artwork after ${MAX_ATTEMPTS} attempts`);
+  throw new Error(`Could not find a suitable${aspectRatio !== 'all' ? ` ${aspectRatio}` : ''} public-domain artwork after ${MAX_ATTEMPTS} attempts`);
 }
 
 // Settings schema for the web source settings dialog.

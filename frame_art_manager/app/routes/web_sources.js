@@ -38,6 +38,9 @@ const BUILTIN_SOURCES = {
     name: 'Google Art Wallpaper',
     description: 'Curated widescreen artworks from the Google Art Wallpaper collection (~349 works), pre-formatted for large displays',
     type: 'google_art_wallpaper',
+    // All entries are center-cropped to 3840×2160 — landscape only.
+    // This source is automatically skipped when the aspect ratio filter is 'portrait'.
+    aspectRatioConstraint: 'landscape',
   },
   met_museum: {
     id: 'met_museum',
@@ -75,8 +78,13 @@ async function readWebSourcesConfig(frameArtPath) {
     metadata.webSources = {
       sources: { google_arts: { ...BUILTIN_SOURCES.google_arts, enabled: false } },
       metadataMapping: { title: null, creator: null, medium: null, attribution: null },
+      aspectRatioFilter: 'all',
       perTvCache: {},
     };
+  }
+
+  if (!metadata.webSources.aspectRatioFilter) {
+    metadata.webSources.aspectRatioFilter = 'all';
   }
 
   // Ensure all builtin sources are present (add any missing ones)
@@ -160,16 +168,72 @@ function buildFetcherOptions(sourceId, settings) {
   return {};
 }
 
+/**
+ * Resolve the effective aspect ratio filter for a fetch operation.
+ *
+ * 'match_tv' requires the caller to pass tvOrientation ('landscape' or 'portrait').
+ * When tvOrientation is not provided (e.g. the integration doesn't yet support
+ * orientation detection), falls back to 'all'.
+ */
+function resolveAspectRatioFilter(webSources, tvOrientation) {
+  const setting = webSources.aspectRatioFilter || 'all';
+  if (setting === 'match_tv') {
+    if (tvOrientation === 'landscape' || tvOrientation === 'portrait') return tvOrientation;
+    console.warn('[web_sources] match_tv selected but tvOrientation not provided; falling back to "all"');
+    return 'all';
+  }
+  return setting;
+}
+
+/**
+ * Returns true if a source is compatible with the given aspect ratio filter.
+ * A source with an aspectRatioConstraint is incompatible with the opposite filter:
+ *   'landscape' constraint → incompatible with 'portrait' filter
+ *   'portrait'  constraint → incompatible with 'landscape' filter
+ */
+function isSourceCompatible(sourceId, aspectRatio) {
+  const constraint = BUILTIN_SOURCES[sourceId]?.aspectRatioConstraint;
+  if (!constraint) return true;
+  if (constraint === 'landscape' && aspectRatio === 'portrait') return false;
+  if (constraint === 'portrait'  && aspectRatio === 'landscape') return false;
+  return true;
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 // GET /api/web-sources/config
 router.get('/config', async (req, res) => {
   try {
     const { webSources } = await readWebSourcesConfig(req.frameArtPath);
-    res.json({ success: true, webSources, settingsSchemas: SOURCE_SETTINGS_SCHEMAS });
+    // Expose per-source constraints so the UI can react (e.g. disable landscape-only
+    // sources when portrait filter is active).
+    const sourceConstraints = Object.fromEntries(
+      Object.entries(BUILTIN_SOURCES)
+        .filter(([, s]) => s.aspectRatioConstraint)
+        .map(([id, s]) => [id, { aspectRatioConstraint: s.aspectRatioConstraint }])
+    );
+    res.json({ success: true, webSources, settingsSchemas: SOURCE_SETTINGS_SCHEMAS, sourceConstraints });
   } catch (error) {
     console.error('Error reading web sources config:', error);
     res.status(500).json({ error: 'Failed to read web sources config' });
+  }
+});
+
+// PUT /api/web-sources/aspect-ratio-filter
+router.put('/aspect-ratio-filter', async (req, res) => {
+  try {
+    const { aspectRatioFilter } = req.body;
+    const valid = ['all', 'landscape', 'portrait', 'match_tv'];
+    if (!valid.includes(aspectRatioFilter)) {
+      return res.status(400).json({ error: `aspectRatioFilter must be one of: ${valid.join(', ')}` });
+    }
+    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
+    webSources.aspectRatioFilter = aspectRatioFilter;
+    await writeWebSourcesConfig(req.frameArtPath, metadata);
+    res.json({ success: true, aspectRatioFilter });
+  } catch (error) {
+    console.error('Error updating aspect ratio filter:', error);
+    res.status(500).json({ error: 'Failed to update aspect ratio filter' });
   }
 });
 
@@ -300,9 +364,10 @@ router.put('/metadata-mapping', async (req, res) => {
 });
 
 // POST /api/web-sources/fetch-and-display
-// Body: { deviceId, sourceId? }
+// Body: { deviceId, sourceId?, screenOn?, tvOrientation? }
+// tvOrientation ('landscape'|'portrait') is used when aspectRatioFilter is 'match_tv'.
 router.post('/fetch-and-display', async (req, res) => {
-  const { deviceId, sourceId, screenOn = true } = req.body;
+  const { deviceId, sourceId, screenOn = true, tvOrientation } = req.body;
 
   if (!deviceId) {
     return res.status(400).json({ error: 'deviceId is required' });
@@ -311,17 +376,21 @@ router.post('/fetch-and-display', async (req, res) => {
   try {
     const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
 
+    const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
+
     // Determine which source to use
     let chosenSourceId = sourceId;
     if (!chosenSourceId) {
-      // Pick an enabled source
+      // Pick an enabled source compatible with the current aspect ratio filter
       const enabledSources = Object.entries(webSources.sources)
-        .filter(([, s]) => s.enabled)
+        .filter(([id, s]) => s.enabled && isSourceCompatible(id, aspectRatio))
         .map(([id]) => id);
       if (enabledSources.length === 0) {
-        return res.status(400).json({ error: 'No web sources are enabled. Enable at least one source in Web Sources settings.' });
+        return res.status(400).json({ error: 'No web sources are enabled and compatible with the current orientation filter. Enable at least one compatible source in Web Sources settings.' });
       }
       chosenSourceId = enabledSources[Math.floor(Math.random() * enabledSources.length)];
+    } else if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
+      return res.status(400).json({ error: `Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})` });
     }
 
     if (!BUILTIN_SOURCES[chosenSourceId]) {
@@ -334,7 +403,7 @@ router.post('/fetch-and-display', async (req, res) => {
       return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
     }
     const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
-    const fetchResult = await fetcher(fetcherOpts.mediaFilter);
+    const fetchResult = await fetcher(fetcherOpts.mediaFilter, { aspectRatio });
 
     const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
@@ -410,16 +479,27 @@ router.delete('/cache/:deviceId', async (req, res) => {
 // Fetch a test image from an enabled web source without sending it to any TV.
 // Stores the result in webSources.testCache (same structure as perTvCache entries)
 // so it can later be promoted to a queued or pending dispatch.
+//
+// Body: { tvOrientation?: 'landscape'|'portrait' }
+// tvOrientation is used when aspectRatioFilter is 'match_tv'. Pass the orientation
+// of the TV being simulated (e.g. based on the user's TV selection in the test UI).
+// If omitted and filter is 'match_tv', falls back to 'all'.
+//
+// TODO (docs/ROADMAP.md): Consider adding "virtual TV" support so users can test
+// portrait artwork without a portrait-mounted physical TV.
 router.post('/test-fetch', async (req, res) => {
   try {
+    const { tvOrientation } = req.body || {};
     const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
 
-    // Pick an enabled source
+    const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
+
+    // Pick an enabled source compatible with the current aspect ratio filter
     const enabledSources = Object.entries(webSources.sources)
-      .filter(([, s]) => s.enabled)
+      .filter(([id, s]) => s.enabled && isSourceCompatible(id, aspectRatio))
       .map(([id]) => id);
     if (enabledSources.length === 0) {
-      return res.status(400).json({ error: 'No web sources are enabled. Enable at least one source in Web Sources settings.' });
+      return res.status(400).json({ error: 'No web sources are enabled and compatible with the current orientation filter. Enable at least one compatible source in Web Sources settings.' });
     }
     const chosenSourceId = enabledSources[Math.floor(Math.random() * enabledSources.length)];
 
@@ -428,7 +508,7 @@ router.post('/test-fetch', async (req, res) => {
       return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
     }
     const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
-    const { imageBuffer, contentType, metadata: artMetadata } = await fetcher(fetcherOpts.mediaFilter);
+    const { imageBuffer, contentType, metadata: artMetadata } = await fetcher(fetcherOpts.mediaFilter, { aspectRatio });
 
     const ext = contentType.includes('png') ? 'png' : 'jpg';
     const cacheDir = cacheDirFor(req.frameArtPath);

@@ -12,12 +12,28 @@ const HTTP_HEADERS = {
  * Fetch a random artwork from the Google Art Wallpaper list (imax_2_2.json).
  * This is a curated list of ~349 widescreen artworks formatted for large displays.
  *
+ * All images are center-cropped to 3840×2160 (landscape) via the URL suffix.
+ * This source is incompatible with portrait filtering and is automatically skipped
+ * when the aspect ratio filter is set to 'portrait' (enforced in web_sources.js via
+ * aspectRatioConstraint: 'landscape' on the BUILTIN_SOURCES entry). This function
+ * still rejects portrait explicitly as a defensive guard.
+ *
+ * @param {string[]} [_mediaFilter] - Ignored; no media filtering for this source.
+ * @param {object} [options]
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all']
+ *
  * Returns:
  *   { imageBuffer, contentType, metadata: { title, creator, attribution, artworkUrl, source } }
  *
- * Throws on network errors or if the list is empty.
+ * Throws on network errors, if the list is empty, or if aspectRatio is 'portrait'.
  */
-async function fetchRandomArtwork() {
+async function fetchRandomArtwork(_mediaFilter = null, options = {}) {
+  const { aspectRatio = 'all' } = options;
+  if (aspectRatio === 'portrait') {
+    throw new Error(
+      'Google Art Wallpaper only provides landscape artworks (all images are cropped to 3840×2160); portrait filter cannot be satisfied'
+    );
+  }
   let wallpaperList;
   try {
     const response = await axios.get(WALLPAPER_LIST_URL, {

@@ -14626,6 +14626,7 @@ function initTagsetModalListeners() {
 
 let webSourcesConfig = null;       // Cached web sources config
 let webSourceSettingsSchemas = {}; // Cached settings schemas from GET /config
+let webSourceSourceConstraints = {}; // Cached per-source constraints (e.g. aspectRatioConstraint)
 let webSourceSettingsSourceId = null; // Which source is currently open in the settings modal
 
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
@@ -14641,6 +14642,7 @@ async function loadWebSourcesTab() {
     await loadEntities();
   }
   await loadWebSourcesConfig();
+  renderWebSourcesGlobalSettings();
   renderWebSourcesList();
   renderWebSourcesMetadataMapping();
   renderWebSourcesTestSection();
@@ -14653,10 +14655,64 @@ async function loadWebSourcesConfig() {
     if (data.success) {
       webSourcesConfig = data.webSources;
       webSourceSettingsSchemas = data.settingsSchemas || {};
+      webSourceSourceConstraints = data.sourceConstraints || {};
     }
   } catch (error) {
     console.error('Error loading web sources config:', error);
   }
+}
+
+function renderWebSourcesGlobalSettings() {
+  const container = document.getElementById('web-sources-global-settings');
+  if (!container) return;
+
+  const current = webSourcesConfig?.aspectRatioFilter || 'all';
+  const options = [
+    { value: 'all',       label: 'All',       desc: 'fetch images of any orientation' },
+    { value: 'landscape', label: 'Landscape',  desc: 'wider than tall' },
+    { value: 'portrait',  label: 'Portrait',   desc: 'taller than wide' },
+    { value: 'match_tv',  label: 'Match TV',   desc: 'use the orientation of the destination TV' },
+  ];
+
+  container.innerHTML = `
+    <div class="ws-global-setting">
+      <label class="ws-global-label">Image Orientation</label>
+      <p class="pool-health-description">Filter fetched images by aspect ratio. Sources incompatible with the selected orientation are automatically skipped.</p>
+      <div class="ws-aspect-radio-group">
+        ${options.map(opt => `
+          <label class="ws-aspect-radio-label">
+            <input type="radio" name="ws-aspect-ratio" value="${opt.value}" ${current === opt.value ? 'checked' : ''}>
+            <span><strong>${opt.label}</strong> <span class="ws-aspect-desc">${opt.desc}</span></span>
+          </label>
+        `).join('')}
+      </div>
+    </div>`;
+
+  container.querySelectorAll('input[name="ws-aspect-ratio"]').forEach(radio => {
+    radio.addEventListener('change', async () => {
+      if (!radio.checked) return;
+      const aspectRatioFilter = radio.value;
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/aspect-ratio-filter`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ aspectRatioFilter }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.aspectRatioFilter = aspectRatioFilter;
+          // Re-render the source list so incompatible sources are shown as disabled
+          renderWebSourcesList();
+          showToast(`Image orientation set to: ${aspectRatioFilter.replace('_', ' ')}`);
+        } else {
+          throw new Error(data.error || 'Failed to update setting');
+        }
+      } catch (error) {
+        console.error('Error updating aspect ratio filter:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    });
+  });
 }
 
 function hasEnabledWebSources() {
@@ -14674,21 +14730,32 @@ function renderWebSourcesList() {
     return;
   }
 
+  const currentAspectRatio = webSourcesConfig?.aspectRatioFilter || 'all';
+
   let html = '<div class="web-sources-cards">';
   for (const [sourceId, source] of Object.entries(sources)) {
     const isEnabled = !!source.enabled;
     const hasSettings = !!webSourceSettingsSchemas[sourceId];
+    const constraint = webSourceSourceConstraints[sourceId]?.aspectRatioConstraint;
+    const isIncompatible =
+      (constraint === 'landscape' && currentAspectRatio === 'portrait') ||
+      (constraint === 'portrait'  && currentAspectRatio === 'landscape');
+    const constraintLabel = constraint === 'landscape' ? 'landscape-only' : constraint === 'portrait' ? 'portrait-only' : '';
+    const incompatibleNote = isIncompatible
+      ? `<span class="ws-incompatible-note">Unavailable: ${constraintLabel} source, incompatible with ${currentAspectRatio} filter</span>`
+      : '';
     html += `
-      <div class="web-source-card${isEnabled ? ' enabled' : ''}">
+      <div class="web-source-card${isEnabled ? ' enabled' : ''}${isIncompatible ? ' ws-source-incompatible' : ''}">
         <div class="web-source-card-header">
           <div class="web-source-info">
             <strong>${escapeHtml(source.name)}</strong>
             <span class="web-source-description">${escapeHtml(source.description || '')}</span>
+            ${incompatibleNote}
           </div>
           <div class="web-source-card-actions">
             ${hasSettings ? `<button type="button" class="btn-secondary btn-small web-source-settings-btn" data-source-id="${escapeHtml(sourceId)}" title="Settings">Settings</button>` : ''}
-            <label class="toggle-label">
-              <input type="checkbox" class="web-source-enable-toggle" data-source-id="${escapeHtml(sourceId)}" ${isEnabled ? 'checked' : ''}>
+            <label class="toggle-label${isIncompatible ? ' toggle-label-disabled' : ''}" ${isIncompatible ? 'title="This source cannot be used with the current orientation filter"' : ''}>
+              <input type="checkbox" class="web-source-enable-toggle" data-source-id="${escapeHtml(sourceId)}" ${isEnabled ? 'checked' : ''} ${isIncompatible ? 'disabled' : ''}>
               <span class="toggle-text">${isEnabled ? 'Enabled' : 'Disabled'}</span>
             </label>
           </div>
