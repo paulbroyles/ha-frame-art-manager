@@ -139,8 +139,8 @@ async function readWebSourcesConfig(frameArtPath) {
   if (!config.aspectRatioFilter) config.aspectRatioFilter = 'all';
   if (!config.sources) config.sources = {};
   if (!config.perTvCache) config.perTvCache = {};
-  if (!config.imageProcessing) config.imageProcessing = { preProcessor: 'variance_scan', cropEngine: 'sharp', sharpStrategy: 'attention' };
-  if (!config.imageProcessing.preProcessor) config.imageProcessing.preProcessor = 'variance_scan';
+  if (!config.imageProcessing) config.imageProcessing = { preProcessor: 'region_compare', cropEngine: 'sharp', sharpStrategy: 'attention' };
+  if (!config.imageProcessing.preProcessor) config.imageProcessing.preProcessor = 'region_compare';
 
   // Ensure all builtin sources are present (add any missing ones with defaults)
   for (const [id, def] of Object.entries(BUILTIN_SOURCES)) {
