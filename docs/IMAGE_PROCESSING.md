@@ -43,7 +43,7 @@ Skips frame detection (Phase 2) entirely. The automatic solid-border strip (Phas
 1. Compute full-width row means (`rowMeans[y]`).
 2. **Top/bottom — incremental scan**: Starting from the outermost row, accumulate a running mean and std dev of row means. Extend the "frame band" as long as including the next row keeps the running std dev below `consistencyThreshold`. Stop on the first row that would break consistency. No fixed pre-gate window — works for any border thickness.
 3. **Post-scan contrast check**: The detected band mean must differ from the center interior by more than `contrastThreshold`. Discards false positives on uniform-colored painting edges. Also requires a minimum band size of 5 rows/cols.
-4. **Left/right — corner-restricted col means**: Column means are computed using only the detected top and bottom frame rows as the "corner bands" (or a small `refFraction` fallback). Same incremental scan + contrast check applied to these col means.
+4. **Left/right — interior-edge col means**: Column means are computed using a thin strip of rows at the *inner boundary* of the detected top/bottom frame bands (not the frame rows themselves). Frame rows are uniform across all columns (all gold, all black) and provide no left/right discrimination. Interior-edge rows contain frame material at frame-column positions and painting content at center positions, making col means discriminating. A range guard skips left/right detection if col means are still flat across all columns. Falls back to near-edge rows when no top/bottom frame was detected.
 
 **Handles**:
 - Any border thickness (1px to wide frames) — no fixed sampling window

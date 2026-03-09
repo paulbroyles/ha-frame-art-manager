@@ -471,9 +471,11 @@ async function cornerConsensusPreProcessor(buffer, {
  *      running std dev of all row means accumulated so far. Stop when including the
  *      next row would push the std dev above consistencyThreshold. Apply a post-scan
  *      contrast check (detected band mean vs. center interior).
- *   3. Left/right: compute corner-restricted col means using the detected top/bottom
- *      bands as corner row ranges (or a small refFraction fallback). Same incremental
- *      scan + contrast check.
+ *   3. Left/right: compute col means using a thin strip of rows at the INNER EDGE of
+ *      the detected top/bottom frame bands (not the frame rows themselves). Frame rows
+ *      are uniform across all columns so they provide no left/right discrimination;
+ *      interior-edge rows contain frame material at frame-column positions and painting
+ *      content elsewhere. A range guard skips left/right if col means are still flat.
  *
  * Handles any border thickness (1px to wide ornate frames). Works for solid, lightly-
  * textured, and wood/gold-leaf frames. Per-edge independent detection.
@@ -555,15 +557,30 @@ async function meanProfilePreProcessor(buffer, {
   const cropTop    = incrementalScan(rowMeans, maxRows);
   const cropBottom = incrementalScan([...rowMeans].reverse(), maxRows);
 
-  // Left and right: corner-restricted col means. Use detected frame rows as bands;
-  // fall back to a small refFraction if neither top nor bottom frame was found.
-  const topBandH  = cropTop    > 0 ? cropTop    : Math.max(3, Math.round(height * refFraction));
-  const botBandH  = cropBottom > 0 ? cropBottom : Math.max(3, Math.round(height * refFraction));
-  const cornerBands = [[0, topBandH], [height - botBandH, height]];
+  // Left and right: col means restricted to rows at the INNER EDGE of the detected frame
+  // bands, not the frame rows themselves. Frame rows are uniform across all columns (all
+  // gold, or all black) so col means computed through them cannot distinguish frame columns
+  // from painting columns. Interior-edge rows contain frame material at left/right column
+  // positions and painting content at center positions — making col means discriminating.
+  // Fall back to edge rows when no top/bottom frame was detected.
+  const refRows = Math.max(3, Math.round(height * refFraction));
+  const topInner = cropTop    > 0
+    ? [cropTop,              Math.min(cropTop    + refRows, Math.floor(height / 2))]
+    : [0,                    refRows];
+  const botInner = cropBottom > 0
+    ? [Math.max(height - cropBottom - refRows, Math.ceil(height / 2)), height - cropBottom]
+    : [height - refRows,     height];
+  const cornerBands    = [topInner, botInner];
   const cornerColMeans = Array.from({ length: width }, (_, x) => colMeanInBands(x, cornerBands));
 
-  const cropLeft  = incrementalScan(cornerColMeans, maxCols);
-  const cropRight = incrementalScan([...cornerColMeans].reverse(), maxCols);
+  // Guard: if col means are nearly flat across all columns the bands are still
+  // non-discriminating — skip left/right rather than produce false positives.
+  const colMeansMin = cornerColMeans.reduce((a, v) => Math.min(a, v),  Infinity);
+  const colMeansMax = cornerColMeans.reduce((a, v) => Math.max(a, v), -Infinity);
+  const colMeansDiscriminating = (colMeansMax - colMeansMin) >= 5;
+
+  const cropLeft  = colMeansDiscriminating ? incrementalScan(cornerColMeans, maxCols) : 0;
+  const cropRight = colMeansDiscriminating ? incrementalScan([...cornerColMeans].reverse(), maxCols) : 0;
 
   if (cropTop === 0 && cropBottom === 0 && cropLeft === 0 && cropRight === 0) {
     return buffer;
