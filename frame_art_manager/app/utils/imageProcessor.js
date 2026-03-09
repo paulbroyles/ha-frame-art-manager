@@ -638,17 +638,29 @@ function computeTargetDimensions(inputW, inputH, orientation) {
 
 // ── Main pipeline ─────────────────────────────────────────────────────────────
 
+// TODO (Option 1 — advanced mode): Allow preProcess to be an array of pre-processor keys
+// applied in sequence, letting users build custom pipelines (e.g. ['trim', 'corner_consensus',
+// 'mean_profile']). The current approach hard-codes trim as Stage 1 and a single user-selected
+// algorithm as Stage 2. An array pipeline would make both stages fully configurable and support
+// multi-matte scenarios (solid background → frame → inner matte).
+
 /**
  * Process a web source image for display on the TV.
  *
- * Phase 1 (optional): pre-process (e.g., future frame/border detection).
- * Phase 2: fit to TV — scale down if needed, then crop to 16:9 or 9:16.
+ * Phase 1 (automatic): strip solid-color borders (Sharp Trim, threshold 10). This runs
+ * whenever a pre-processor is configured, even 'none'. Removing the solid background first
+ * lets Phase 2 algorithms see the actual frame in the corners rather than featureless
+ * background pixels that confuse column-mean and corner-variance sampling.
+ *
+ * Phase 2 (user-selected): detect and remove decorative frames/borders.
+ *
+ * Phase 3: fit to TV — scale down if needed, then crop to 16:9 or 9:16.
  *
  * @param {Buffer} buffer
  * @param {'landscape'|'portrait'} orientation
  * @param {object}  [options]
- * @param {string}  [options.preProcess]                       Pre-processor key ('mean_profile'|'corner_consensus'|'region_compare'|'variance_scan'|'trim'|null)
- * @param {object}  [options.preProcessOptions]                Passed through to the pre-processor
+ * @param {string}  [options.preProcess]                       Pre-processor key ('mean_profile'|'corner_consensus'|'region_compare'|'variance_scan'|'trim'|'none'|null)
+ * @param {object}  [options.preProcessOptions]                Passed through to the Phase 2 pre-processor
  * @param {string}  [options.cropEngine='sharp']               Crop engine key
  * @param {object}  [options.cropEngineOptions]                Passed through to the crop engine
  * @param {string}  [options.cropEngineOptions.strategy='attention']  Sharp strategy
@@ -662,12 +674,17 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
 } = {}) {
   let processed = buffer;
 
-  // Phase 1: pre-process (frame/border detection and removal)
-  if (preProcess && PRE_PROCESSORS[preProcess]) {
-    processed = await PRE_PROCESSORS[preProcess](processed, preProcessOptions);
+  if (preProcess != null) {
+    // Phase 1 (automatic): strip solid-color borders before frame detection.
+    processed = await trimPreProcessor(processed);
+
+    // Phase 2 (user-selected): detect and remove decorative frames/borders.
+    if (PRE_PROCESSORS[preProcess]) {
+      processed = await PRE_PROCESSORS[preProcess](processed, preProcessOptions);
+    }
   }
 
-  // Phase 2: fit to TV
+  // Phase 3: fit to TV
   const { width, height } = await sharp(processed).metadata();
   const { finalW, finalH } = computeTargetDimensions(width, height, orientation);
 
@@ -679,12 +696,12 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
 
 const IMAGE_PROCESSING_SCHEMA = {
   preProcessors: [
-    { value: 'none',             label: 'None — skip frame detection' },
+    { value: 'none',             label: 'None — background strip only; no frame detection' },
     { value: 'mean_profile',     label: 'Mean Profile — detect frames using row/column mean consistency; handles textured and wood frames' },
     { value: 'corner_consensus', label: 'Corner Consensus — detect frames using four-corner sampling; handles multi-layer frames' },
     { value: 'region_compare',   label: 'Region Compare — detect frames by comparing edge strip to painting interior' },
     { value: 'variance_scan',    label: 'Variance Scan — detect frames by local edge variance (legacy)' },
-    { value: 'trim',             label: 'Sharp Trim — remove solid uniform borders only' },
+    { value: 'trim',             label: 'Sharp Trim — background strip only (same as None; redundant with automatic Stage 1)' },
     // TODO (Option 3): ML Segmentation — handles irregular/ornate frames; see docs/ROADMAP.md
   ],
   cropEngines: [

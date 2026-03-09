@@ -1,17 +1,20 @@
 # Image Processing Pipeline
 
-Web source images go through a two-phase pipeline before being sent to the TV:
+Web source images go through a three-phase pipeline before being sent to the TV:
 
-1. **Pre-processor** (optional) — detect and remove decorative frames or borders
-2. **Crop engine** — scale and crop to the TV's 4K aspect ratio (16:9 landscape or 9:16 portrait)
+1. **Background strip** (automatic) — remove solid-color borders using Sharp Trim
+2. **Frame detector** (user-selected) — detect and remove decorative frames or borders
+3. **Crop engine** — scale and crop to the TV's 4K aspect ratio (16:9 landscape or 9:16 portrait)
 
-Both phases are pluggable. The user selects them in the Web Sources → Settings tab.
+Phase 1 runs automatically whenever a frame detector is configured (including "None"). Stripping the solid background first ensures Phase 2 algorithms see the actual frame material in the corners, rather than featureless solid pixels that corrupt column-mean and corner-variance sampling. Phases 2 and 3 are pluggable. The user selects them in the Web Sources → Settings tab.
+
+> **TODO (advanced mode)**: Allow the frame detector field to accept an ordered list of pre-processors, enabling fully custom pipelines (e.g., background strip → frame detection → inner matte removal). See `imageProcessor.js` for details.
 
 ---
 
 ## Pre-processors
 
-Pre-processors run before the TV-fit step. Their job is to identify and remove decorative picture frames, mattes, and borders from artwork images so the crop engine sees only painting content.
+Frame detectors run as Phase 2 — after the automatic solid-border strip and before the TV-fit step. Their job is to identify and remove decorative picture frames, mattes, and borders from artwork images so the crop engine sees only painting content. Because Phase 1 has already removed solid-color backgrounds, these algorithms operate on images where the corners contain only frame material.
 
 ### Interface
 
@@ -25,7 +28,7 @@ Each pre-processor receives the raw image buffer and an options object. It retur
 
 ### None
 
-Skips frame detection entirely. Use this for sources that are known to provide clean images with no frames, or when you want to test how the crop engine behaves on the raw image.
+Skips frame detection (Phase 2) entirely. The automatic solid-border strip (Phase 1) still runs. Use this for sources that are known to provide clean images with no decorative frames, or when you want to isolate the effect of the background strip alone.
 
 ---
 
@@ -150,6 +153,8 @@ Scans inward from each edge. Rows/columns with luminance variance below `varianc
 
 Delegates to Sharp's built-in `trim()`. Removes edge pixels that match the corner pixel color within a tolerance. Works only for solid, perfectly uniform borders — any textured or multi-colored frame is ignored.
 
+**Note**: Sharp Trim is also the automatic Phase 1 background strip (threshold 10). Selecting `trim` as the Phase 2 detector is redundant — Phase 1 will have already handled the solid border. Equivalent to selecting `None`.
+
 **Parameters**:
 
 | Parameter | Default | Description |
@@ -160,7 +165,7 @@ Delegates to Sharp's built-in `trim()`. Removes edge pixels that match the corne
 
 ## Crop Engines
 
-Crop engines run after the pre-processor. They receive a clean image buffer and fit it to the TV's 4K resolution.
+Crop engines run after Phase 2. They receive a clean image buffer and fit it to the TV's 4K resolution.
 
 ### Interface
 
