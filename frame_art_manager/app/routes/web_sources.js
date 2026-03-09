@@ -556,10 +556,12 @@ router.post('/fetch-and-display', async (req, res) => {
 
     const orientation = tvOrientation || 'landscape';
     const { cropEngine, sharpStrategy } = webSources.imageProcessing;
-    const processedBuffer = await processWebSourceImage(imageBuffer, orientation, {
-      cropEngine,
-      cropEngineOptions: { strategy: sharpStrategy },
-    });
+    const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
+      ? imageBuffer
+      : await processWebSourceImage(imageBuffer, orientation, {
+          cropEngine,
+          cropEngineOptions: { strategy: sharpStrategy },
+        });
 
     const ext = contentType.includes('png') ? 'png' : 'jpg';
     const cacheDir = cacheDirFor(req.frameArtPath);
@@ -654,10 +656,12 @@ router.post('/test-fetch', async (req, res) => {
 
     const orientation = tvOrientation || 'landscape';
     const { cropEngine, sharpStrategy } = webSources.imageProcessing;
-    const processedBuffer = await processWebSourceImage(imageBuffer, orientation, {
-      cropEngine,
-      cropEngineOptions: { strategy: sharpStrategy },
-    });
+    const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
+      ? imageBuffer
+      : await processWebSourceImage(imageBuffer, orientation, {
+          cropEngine,
+          cropEngineOptions: { strategy: sharpStrategy },
+        });
 
     const ext = contentType.includes('png') ? 'png' : 'jpg';
     const cacheDir = cacheDirFor(req.frameArtPath);

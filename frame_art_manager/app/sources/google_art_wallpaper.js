@@ -101,4 +101,8 @@ const defaultMapping = {
   source:      null,
 };
 
-module.exports = { fetchRandomArtwork, metadataFields, defaultMapping };
+// Images from this source are already cropped to 3840×2160 by the URL suffix.
+// The processing pipeline should skip them to avoid re-cropping pre-sized images.
+const alreadyProcessed = true;
+
+module.exports = { fetchRandomArtwork, metadataFields, defaultMapping, alreadyProcessed };
