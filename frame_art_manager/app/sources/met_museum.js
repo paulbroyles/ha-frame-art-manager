@@ -118,7 +118,7 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
     throw new Error('No objects found matching the selected categories');
   }
 
-  const MAX_ATTEMPTS = 5;
+  const MAX_ATTEMPTS = 20;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const objectId = objectIDs[Math.floor(Math.random() * objectIDs.length)];
 
