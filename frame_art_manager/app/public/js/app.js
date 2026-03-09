@@ -14645,7 +14645,6 @@ async function loadWebSourcesTab() {
   await loadWebSourcesConfig();
   renderWebSourcesGlobalSettings();
   renderWebSourcesList();
-  renderWebSourcesMetadataMapping();
   renderWebSourcesTestSection();
 }
 
@@ -14737,7 +14736,7 @@ function renderWebSourcesList() {
   let html = '<div class="web-sources-cards">';
   for (const [sourceId, source] of Object.entries(sources)) {
     const isEnabled = !!source.enabled;
-    const hasSettings = !!webSourceSettingsSchemas[sourceId];
+    const hasSettings = !!webSourceSettingsSchemas[sourceId] || (webSourceMetadata[sourceId]?.fields?.length > 0);
     const constraint = webSourceSourceConstraints[sourceId]?.aspectRatioConstraint;
     const isIncompatible =
       (constraint === 'landscape' && currentAspectRatio === 'portrait') ||
@@ -14815,10 +14814,60 @@ const WEB_SOURCE_SETTINGS_RENDERERS = {
   met_museum: renderMetMuseumSettings,
 };
 
+/**
+ * Returns the HTML string for a source's metadata mapping section within
+ * the settings modal. Called by openWebSourceSettings for sources that have fields.
+ */
+function renderSourceMappingSection(sourceId, fields) {
+  const attributes = allAttributes || [];
+  const entityTypes = (allEntityTypes || []).filter(et => et.attributes?.length > 0);
+
+  if (attributes.length === 0 && entityTypes.length === 0) {
+    return `<div class="ws-mapping-section">
+      <h4>Metadata Mapping</h4>
+      <p class="empty-state">No custom attributes defined. Add them in the Custom Data tab to enable metadata mapping.</p>
+    </div>`;
+  }
+
+  let html = `<div class="ws-mapping-section">`;
+  html += `<h4>Metadata Mapping</h4>`;
+  html += `<p class="pool-health-description">Map metadata fields to image attributes. Fields marked <strong>auto</strong> are auto-detected from your attribute names.</p>`;
+  html += `<table class="tv-assignments-table"><thead><tr><th>Metadata Field</th><th>Maps To</th></tr></thead><tbody>`;
+
+  for (const field of fields) {
+    const currentValue = effectiveMappingTarget(sourceId, field.key);
+    const isAutoGuessed = !(field.key in (webSourcesConfig?.sources?.[sourceId]?.userMapping || {}));
+    html += `
+      <tr>
+        <td>
+          <strong>${escapeHtml(field.label)}</strong>
+          ${isAutoGuessed && currentValue ? '<span class="ws-mapping-auto-badge">auto</span>' : ''}
+          <div style="font-size:12px;color:#666;">${escapeHtml(field.description)}</div>
+        </td>
+        <td>
+          <select class="web-source-mapping-select"
+                  data-source-id="${escapeHtml(sourceId)}"
+                  data-field-key="${escapeHtml(field.key)}">
+            ${buildMappingOptionsHtml(currentValue)}
+          </select>
+        </td>
+      </tr>`;
+  }
+
+  html += `</tbody></table>`;
+  html += `<div style="margin-top:8px;">
+    <button type="button" class="btn-secondary btn-small ws-reset-mapping-btn" data-source-id="${escapeHtml(sourceId)}">Reset to Auto-detected</button>
+  </div>`;
+  html += `</div>`;
+  return html;
+}
+
 function openWebSourceSettings(sourceId) {
   const schema = webSourceSettingsSchemas[sourceId];
   const renderer = WEB_SOURCE_SETTINGS_RENDERERS[sourceId];
-  if (!schema || !renderer) return;
+  const fields = webSourceMetadata[sourceId]?.fields || [];
+
+  if ((!schema || !renderer) && fields.length === 0) return;
 
   const source = webSourcesConfig?.sources?.[sourceId] || {};
   const currentSettings = source.settings || {};
@@ -14826,7 +14875,15 @@ function openWebSourceSettings(sourceId) {
   document.getElementById('web-source-settings-title').textContent =
     `${source.name || sourceId} — Settings`;
   const body = document.getElementById('web-source-settings-body');
-  body.innerHTML = renderer(schema, currentSettings);
+
+  let html = '';
+  if (schema && renderer) {
+    html += renderer(schema, currentSettings);
+  }
+  if (fields.length > 0) {
+    html += renderSourceMappingSection(sourceId, fields);
+  }
+  body.innerHTML = html;
 
   // Apply indeterminate state (can't be set via HTML attribute)
   body.querySelectorAll('.ws-category-checkbox[data-indeterminate="true"]').forEach(cb => {
@@ -14837,6 +14894,10 @@ function openWebSourceSettings(sourceId) {
 
   // Attach expand/collapse and checkbox cascade logic
   initWebSourceSettingsInteractions();
+
+  // Bind reset mapping button
+  body.querySelector('.ws-reset-mapping-btn')
+    ?.addEventListener('click', () => resetSourceMapping(sourceId));
 
   document.getElementById('web-source-settings-modal').classList.add('active');
 }
@@ -14850,23 +14911,58 @@ async function saveWebSourceSettings() {
   const sourceId = webSourceSettingsSourceId;
   if (!sourceId) return;
 
-  const settings = readWebSourceSettingsFromUI(sourceId);
-  if (settings === null) return;
-
   const saveBtn = document.getElementById('web-source-settings-save');
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
 
   try {
-    const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/settings`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings }),
-    });
-    const data = await response.json();
-    if (!data.success) throw new Error(data.error || 'Failed to save settings');
-    if (webSourcesConfig?.sources?.[sourceId]) {
-      webSourcesConfig.sources[sourceId].settings = settings;
+    // Save media category settings if applicable
+    const schema = webSourceSettingsSchemas[sourceId];
+    const renderer = WEB_SOURCE_SETTINGS_RENDERERS[sourceId];
+    if (schema && renderer) {
+      const settings = readWebSourceSettingsFromUI(sourceId);
+      if (settings !== null) {
+        const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/settings`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ settings }),
+        });
+        const data = await response.json();
+        if (!data.success) throw new Error(data.error || 'Failed to save settings');
+        if (webSourcesConfig?.sources?.[sourceId]) {
+          webSourcesConfig.sources[sourceId].settings = settings;
+        }
+      }
     }
+
+    // Save metadata mapping if applicable
+    const fields = webSourceMetadata[sourceId]?.fields || [];
+    if (fields.length > 0) {
+      const meta = webSourceMetadata[sourceId] || {};
+      const selects = document.querySelectorAll(
+        `#web-source-settings-body .web-source-mapping-select[data-source-id="${CSS.escape(sourceId)}"]`
+      );
+      const userMapping = {};
+      selects.forEach(sel => {
+        const fieldKey = sel.dataset.fieldKey;
+        const val = sel.value;
+        const hint = meta.defaultMapping?.[fieldKey];
+        const autoVal = autoGuessMappingTarget(hint);
+        if (val !== autoVal) {
+          userMapping[fieldKey] = deserializeMappingTarget(val);
+        }
+      });
+      const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/metadata-mapping`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userMapping }),
+      });
+      const data = await response.json();
+      if (!data.success) throw new Error(data.error || 'Failed to save mapping');
+      if (webSourcesConfig?.sources?.[sourceId]) {
+        webSourcesConfig.sources[sourceId].userMapping = data.userMapping;
+      }
+    }
+
     closeWebSourceSettings();
     showToast('Settings saved');
   } catch (error) {
@@ -15158,121 +15254,12 @@ function buildMappingOptionsHtml(currentValue) {
   return html;
 }
 
-function renderWebSourcesMetadataMapping() {
-  const container = document.getElementById('web-sources-metadata-mapping');
-  if (!container) return;
-
-  const attributes = allAttributes || [];
-  const entityTypes = (allEntityTypes || []).filter(et => et.attributes?.length > 0);
-
-  if (attributes.length === 0 && entityTypes.length === 0) {
-    container.innerHTML = '<p class="empty-state">No custom attributes or entity types defined. Add them in the Custom Data tab to enable metadata mapping.</p>';
-    return;
-  }
-
-  const sourceIds = Object.keys(webSourceMetadata);
-  if (sourceIds.length === 0) {
-    container.innerHTML = '<p class="empty-state">No sources available.</p>';
-    return;
-  }
-
-  let html = '';
-  for (const sourceId of sourceIds) {
-    const meta = webSourceMetadata[sourceId];
-    const sourceName = webSourcesConfig?.sources?.[sourceId]?.name ||
-                       BUILTIN_SOURCES_CLIENT[sourceId]?.name || sourceId;
-    const fields = meta.fields || [];
-    if (fields.length === 0) continue;
-
-    html += `<div class="ws-mapping-source" data-source-id="${escapeHtml(sourceId)}">`;
-    html += `<h4 class="ws-mapping-source-title">${escapeHtml(sourceName)}</h4>`;
-    html += `<table class="tv-assignments-table"><thead><tr><th>Metadata Field</th><th>Maps To</th></tr></thead><tbody>`;
-
-    for (const field of fields) {
-      const currentValue = effectiveMappingTarget(sourceId, field.key);
-      const isAutoGuessed = !(field.key in (webSourcesConfig?.sources?.[sourceId]?.userMapping || {}));
-      html += `
-        <tr>
-          <td>
-            <strong>${escapeHtml(field.label)}</strong>
-            ${isAutoGuessed && currentValue ? '<span class="ws-mapping-auto-badge">auto</span>' : ''}
-            <div style="font-size:12px;color:#666;">${escapeHtml(field.description)}</div>
-          </td>
-          <td>
-            <select class="web-source-mapping-select"
-                    data-source-id="${escapeHtml(sourceId)}"
-                    data-field-key="${escapeHtml(field.key)}">
-              ${buildMappingOptionsHtml(currentValue)}
-            </select>
-          </td>
-        </tr>`;
-    }
-
-    html += `</tbody></table>`;
-    html += `<div style="margin-top:8px;display:flex;gap:8px;">
-      <button type="button" class="btn-primary btn-small ws-save-mapping-btn" data-source-id="${escapeHtml(sourceId)}">Save Mapping</button>
-      <button type="button" class="btn-secondary btn-small ws-reset-mapping-btn" data-source-id="${escapeHtml(sourceId)}">Reset to Auto-detected</button>
-    </div>`;
-    html += `</div>`;
-  }
-
-  container.innerHTML = html;
-
-  container.querySelectorAll('.ws-save-mapping-btn').forEach(btn => {
-    btn.addEventListener('click', () => saveSourceMapping(btn.dataset.sourceId));
-  });
-  container.querySelectorAll('.ws-reset-mapping-btn').forEach(btn => {
-    btn.addEventListener('click', () => resetSourceMapping(btn.dataset.sourceId));
-  });
-}
-
-// Client-side copy of source display names for the mapping UI header.
-// Keeps the UI from depending on webSourcesConfig being fully populated.
+// Client-side copy of source display names.
 const BUILTIN_SOURCES_CLIENT = {
   google_arts:         { name: 'Google Arts & Culture' },
   google_art_wallpaper:{ name: 'Google Art Wallpaper' },
   met_museum:          { name: 'The Metropolitan Museum of Art' },
 };
-
-async function saveSourceMapping(sourceId) {
-  const meta = webSourceMetadata[sourceId] || {};
-  const selects = document.querySelectorAll(`.web-source-mapping-select[data-source-id="${CSS.escape(sourceId)}"]`);
-  const userMapping = {};
-
-  selects.forEach(sel => {
-    const fieldKey = sel.dataset.fieldKey;
-    const val = sel.value;
-    const hint = meta.defaultMapping?.[fieldKey];
-    const autoVal = autoGuessMappingTarget(hint);
-
-    // Only store as a user override if it differs from the auto-guess
-    if (val !== autoVal) {
-      userMapping[fieldKey] = deserializeMappingTarget(val);
-    }
-  });
-
-  try {
-    const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/metadata-mapping`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userMapping }),
-    });
-    const data = await response.json();
-    if (data.success) {
-      if (webSourcesConfig?.sources?.[sourceId]) {
-        webSourcesConfig.sources[sourceId].userMapping = data.userMapping;
-      }
-      renderWebSourcesMetadataMapping();
-      const sourceName = BUILTIN_SOURCES_CLIENT[sourceId]?.name || sourceId;
-      showToast(`Mapping saved for ${sourceName}`);
-    } else {
-      throw new Error(data.error || 'Failed to save');
-    }
-  } catch (error) {
-    console.error('Error saving metadata mapping:', error);
-    showToast(`Error: ${error.message}`, 'error');
-  }
-}
 
 async function resetSourceMapping(sourceId) {
   try {
@@ -15284,7 +15271,14 @@ async function resetSourceMapping(sourceId) {
       if (webSourcesConfig?.sources?.[sourceId]) {
         delete webSourcesConfig.sources[sourceId].userMapping;
       }
-      renderWebSourcesMetadataMapping();
+      // Re-render the mapping section within the modal
+      const fields = webSourceMetadata[sourceId]?.fields || [];
+      const existing = document.querySelector('#web-source-settings-body .ws-mapping-section');
+      if (existing) {
+        existing.outerHTML = renderSourceMappingSection(sourceId, fields);
+        document.querySelector('#web-source-settings-body .ws-reset-mapping-btn')
+          ?.addEventListener('click', () => resetSourceMapping(sourceId));
+      }
       const sourceName = BUILTIN_SOURCES_CLIENT[sourceId]?.name || sourceId;
       showToast(`Mapping reset to auto-detected for ${sourceName}`);
     } else {

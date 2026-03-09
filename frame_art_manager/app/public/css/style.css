@@ -11204,6 +11204,19 @@ body.dropdown-open .image-card:hover {
   font-weight: normal;
 }
 
+.ws-mapping-section {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-color, #e0e0e0);
+}
+
+.ws-mapping-section h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 8px 0;
+  color: var(--text-primary, #333);
+}
+
 .ws-mapping-source {
   margin-bottom: 24px;
 }
