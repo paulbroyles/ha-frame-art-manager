@@ -8,6 +8,7 @@ const axios = require('axios');
 const SOURCE_MODULES = {
   google_arts: require('../sources/google_arts'),
   google_art_wallpaper: require('../sources/google_art_wallpaper'),
+  met_museum: require('../sources/met_museum'),
 };
 
 const SOURCE_FETCHERS = Object.fromEntries(
@@ -37,6 +38,12 @@ const BUILTIN_SOURCES = {
     name: 'Google Art Wallpaper',
     description: 'Curated widescreen artworks from the Google Art Wallpaper collection (~349 works), pre-formatted for large displays',
     type: 'google_art_wallpaper',
+  },
+  met_museum: {
+    id: 'met_museum',
+    name: 'The Metropolitan Museum of Art',
+    description: 'Public-domain artworks from the Met\'s Open Access collection of 500,000+ objects',
+    type: 'met_museum',
   },
 };
 

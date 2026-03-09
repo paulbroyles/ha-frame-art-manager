@@ -14743,6 +14743,7 @@ function renderWebSourcesList() {
  */
 const WEB_SOURCE_SETTINGS_RENDERERS = {
   google_arts: renderGoogleArtsSettings,
+  met_museum: renderMetMuseumSettings,
 };
 
 function openWebSourceSettings(sourceId) {
@@ -14813,6 +14814,13 @@ async function saveWebSourceSettings() {
  */
 function readWebSourceSettingsFromUI(sourceId) {
   if (sourceId === 'google_arts') {
+    const disabledMedia = [];
+    document.querySelectorAll('#web-source-settings-body .ws-media-checkbox').forEach(cb => {
+      if (!cb.checked) disabledMedia.push(cb.dataset.medium);
+    });
+    return { disabledMedia };
+  }
+  if (sourceId === 'met_museum') {
     const disabledMedia = [];
     document.querySelectorAll('#web-source-settings-body .ws-media-checkbox').forEach(cb => {
       if (!cb.checked) disabledMedia.push(cb.dataset.medium);
@@ -14900,6 +14908,53 @@ function renderGoogleArtsSettings(schema, currentSettings) {
   let html = `<div style="padding:14px 16px;">
     <p style="margin:0 0 12px;font-size:13px;color:#555;">
       Select which media types to include when fetching random artwork. Only enabled media will be chosen.
+    </p>
+    <div class="ws-media-toolbar">
+      <button type="button" id="ws-select-all" class="btn-secondary btn-small">Select All</button>
+      <button type="button" id="ws-select-none" class="btn-secondary btn-small">Select None</button>
+    </div>
+    <div class="ws-media-categories">`;
+
+  for (const cat of categories) {
+    const mediaInCat = cat.media || [];
+    const checkedCount = mediaInCat.filter(m => !disabledSet.has(m.toLowerCase())).length;
+    const allChecked = checkedCount === mediaInCat.length;
+    const noneChecked = checkedCount === 0;
+    const catChecked = allChecked ? 'checked' : '';
+    const catIndeterminate = (!allChecked && !noneChecked) ? 'data-indeterminate="true"' : '';
+
+    html += `<div class="ws-media-category">
+      <div class="ws-media-category-header">
+        <label class="ws-category-label" onclick="event.stopPropagation()">
+          <input type="checkbox" class="ws-category-checkbox" ${catChecked} ${catIndeterminate}>
+          ${escapeHtml(cat.name)}
+        </label>
+        <button type="button" class="ws-category-toggle-btn" title="Expand/collapse">▼</button>
+      </div>
+      <div class="ws-media-category-items">`;
+
+    for (const medium of mediaInCat) {
+      const isEnabled = !disabledSet.has(medium.toLowerCase());
+      html += `<label class="ws-media-item">
+        <input type="checkbox" class="ws-media-checkbox" data-medium="${escapeHtml(medium)}" ${isEnabled ? 'checked' : ''}>
+        ${escapeHtml(medium)}
+      </label>`;
+    }
+
+    html += `</div></div>`;
+  }
+
+  html += `</div></div>`;
+  return html;
+}
+
+function renderMetMuseumSettings(schema, currentSettings) {
+  const disabledSet = new Set((currentSettings.disabledMedia || []).map(m => m.toLowerCase()));
+  const categories = schema.mediaCategories || [];
+
+  let html = `<div style="padding:14px 16px;">
+    <p style="margin:0 0 12px;font-size:13px;color:#555;">
+      Select which categories to include when fetching random artwork. Only enabled categories will be chosen.
     </p>
     <div class="ws-media-toolbar">
       <button type="button" id="ws-select-all" class="btn-secondary btn-small">Select All</button>
