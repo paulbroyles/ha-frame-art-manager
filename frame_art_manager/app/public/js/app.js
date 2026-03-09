@@ -15424,6 +15424,7 @@ function renderWebSourcesTestSection() {
 
   let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
     <button type="button" id="web-source-test-fetch-btn" class="btn-secondary btn-small">Fetch Test Image</button>
+    ${testCache ? `<button type="button" id="web-source-test-reprocess-btn" class="btn-secondary btn-small">Reprocess</button>` : ''}
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;">
       <span style="font-weight:600;color:var(--text-muted,#666);">Simulate TV:</span>
       <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
@@ -15511,6 +15512,7 @@ function renderWebSourcesTestSection() {
   container.innerHTML = html;
 
   document.getElementById('web-source-test-fetch-btn')?.addEventListener('click', fetchTestWebSource);
+  document.getElementById('web-source-test-reprocess-btn')?.addEventListener('click', reprocessTestWebSource);
   container.querySelectorAll('input[name="ws-test-orientation"]').forEach(radio => {
     radio.addEventListener('change', () => {
       if (radio.checked) webSourceTestOrientation = radio.value;
@@ -15536,5 +15538,22 @@ async function fetchTestWebSource() {
     console.error('Error fetching test image:', error);
     showToast(`Error: ${error.message}`, 'error');
     if (btn) { btn.disabled = false; btn.textContent = 'Fetch Test Image'; }
+  }
+}
+
+async function reprocessTestWebSource() {
+  const btn = document.getElementById('web-source-test-reprocess-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
+
+  try {
+    const response = await fetch(`${API_BASE}/web-sources/test-reprocess`, { method: 'POST' });
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'Failed to reprocess test image');
+    if (webSourcesConfig) webSourcesConfig.testCache = data.testCache;
+    renderWebSourcesTestSection();
+  } catch (error) {
+    console.error('Error reprocessing test image:', error);
+    showToast(`Error: ${error.message}`, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Reprocess'; }
   }
 }

@@ -703,6 +703,7 @@ router.post('/test-fetch', async (req, res) => {
       rawFilename,
       ...(preprocessedFilename && { preprocessedFilename }),
       sourceId: chosenSourceId,
+      orientation,
       artworkUrl: artMetadata.artworkUrl,
       metadata: artMetadata,
       ...(Object.keys(attributeSnapshot).length > 0 && { attributeSnapshot }),
@@ -715,6 +716,66 @@ router.post('/test-fetch', async (req, res) => {
   } catch (error) {
     console.error('Error in test-fetch:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch test image' });
+  }
+});
+
+// POST /api/web-sources/test-reprocess
+// Re-run the pre-processor and crop engine on the cached raw test image without
+// fetching a new one. Useful for comparing how different algorithms handle the same image.
+router.post('/test-reprocess', async (req, res) => {
+  try {
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+    const { testCache } = webSources;
+    if (!testCache?.rawFilename) {
+      return res.status(400).json({ error: 'No cached image to reprocess. Fetch a test image first.' });
+    }
+
+    const cacheDir = cacheDirFor(req.frameArtPath);
+    const imageBuffer = await fs.readFile(path.join(cacheDir, testCache.rawFilename));
+    const ext = path.extname(testCache.rawFilename).slice(1);
+
+    const { preProcessor, cropEngine, sharpStrategy } = webSources.imageProcessing;
+    const alreadyProcessed = !!SOURCE_MODULES[testCache.sourceId]?.alreadyProcessed;
+    const activePreProcessor = (!alreadyProcessed && preProcessor !== 'none') ? preProcessor : null;
+    const orientation = testCache.orientation || 'landscape';
+
+    let preprocessedBuffer = imageBuffer;
+    if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](imageBuffer);
+    }
+
+    const processedBuffer = alreadyProcessed
+      ? imageBuffer
+      : await processWebSourceImage(preprocessedBuffer, orientation, {
+          preProcess: null,
+          cropEngine,
+          cropEngineOptions: { strategy: sharpStrategy },
+        });
+
+    const preprocessedFilename = activePreProcessor ? `_test_preprocessed.${ext}` : null;
+    const testFilename = `_test.${ext}`;
+
+    // Remove old preprocessed file if the current settings don't produce one.
+    if (!preprocessedFilename && testCache.preprocessedFilename) {
+      try { await fs.unlink(path.join(cacheDir, testCache.preprocessedFilename)); } catch {}
+    }
+    if (preprocessedFilename) {
+      await fs.writeFile(path.join(cacheDir, preprocessedFilename), preprocessedBuffer);
+    }
+    await fs.writeFile(path.join(cacheDir, testFilename), processedBuffer);
+
+    webSources.testCache = { ...testCache, filename: testFilename };
+    if (preprocessedFilename) {
+      webSources.testCache.preprocessedFilename = preprocessedFilename;
+    } else {
+      delete webSources.testCache.preprocessedFilename;
+    }
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
+
+    res.json({ success: true, testCache: webSources.testCache });
+  } catch (error) {
+    console.error('Error in test-reprocess:', error);
+    res.status(500).json({ error: error.message || 'Failed to reprocess test image' });
   }
 });
 
