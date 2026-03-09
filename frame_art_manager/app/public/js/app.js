@@ -14634,6 +14634,34 @@ let webSourceTestOrientation = 'landscape'; // Simulated TV orientation for test
 
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
 
+/**
+ * Show an image in a full-screen lightbox overlay.
+ * The lightbox is created lazily on first call and reused thereafter.
+ */
+function showImageLightbox(src, alt) {
+  let lb = document.getElementById('ws-img-lightbox');
+  if (!lb) {
+    lb = document.createElement('div');
+    lb.id = 'ws-img-lightbox';
+    lb.style.cssText = [
+      'position:fixed', 'inset:0', 'z-index:9999',
+      'background:rgba(0,0,0,0.88)', 'display:flex',
+      'align-items:center', 'justify-content:center', 'cursor:zoom-out',
+    ].join(';');
+    const img = document.createElement('img');
+    img.style.cssText = 'max-width:95vw;max-height:95vh;border-radius:4px;box-shadow:0 4px 32px rgba(0,0,0,0.7);';
+    lb.appendChild(img);
+    document.body.appendChild(lb);
+    lb.addEventListener('click', () => { lb.style.display = 'none'; });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && lb.style.display !== 'none') lb.style.display = 'none';
+    });
+  }
+  lb.querySelector('img').src = src;
+  lb.querySelector('img').alt = alt || '';
+  lb.style.display = 'flex';
+}
+
 async function loadWebSourcesTab() {
   if (!allTVs || allTVs.length === 0) {
     await loadTVs();
@@ -15449,7 +15477,8 @@ function renderWebSourcesTestSection() {
       ? `<div style="flex:1;min-width:0;">
            <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Original</div>
            <img src="${API_BASE}/web-sources/test-cache/raw-image?t=${ts}" alt="Original artwork"
-                style="max-width:100%;max-height:300px;display:block;border-radius:4px;"
+                style="max-width:100%;max-height:300px;display:block;border-radius:4px;cursor:zoom-in;"
+                onclick="showImageLightbox(this.src,'Original artwork')"
                 onerror="this.style.display='none'">
          </div>`
       : '';
@@ -15457,14 +15486,16 @@ function renderWebSourcesTestSection() {
       ? `<div style="flex:1;min-width:0;">
            <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Frame Removed</div>
            <img src="${API_BASE}/web-sources/test-cache/preprocessed-image?t=${ts}" alt="After frame detection"
-                style="max-width:100%;max-height:300px;display:block;border-radius:4px;"
+                style="max-width:100%;max-height:300px;display:block;border-radius:4px;cursor:zoom-in;"
+                onclick="showImageLightbox(this.src,'After frame detection')"
                 onerror="this.style.display='none'">
          </div>`
       : '';
     const processedImg = `<div style="flex:1;min-width:0;">
       <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Cropped for TV</div>
       <img src="${API_BASE}/web-sources/test-cache/image?t=${ts}" alt="Cropped artwork"
-           style="max-width:100%;max-height:300px;display:block;border-radius:4px;"
+           style="max-width:100%;max-height:300px;display:block;border-radius:4px;cursor:zoom-in;"
+           onclick="showImageLightbox(this.src,'Cropped for TV')"
            onerror="this.style.display='none'">
     </div>`;
 

@@ -181,14 +181,14 @@ async function varianceScanPreProcessor(buffer, {
  * options.edgeFraction (default 0.10): width of the sampled edge strip.
  * options.interiorFraction (default 0.50): size of the sampled center block.
  * options.uniformityThreshold (default 300): max edge variance to be "uniform".
- * options.contrastThreshold (default 25): min luminance difference edge vs. interior.
+ * options.contrastThreshold (default 10): min luminance difference edge vs. interior.
  * options.maxCropFraction (default 0.25): hard cap per edge (safety guard).
  */
 async function regionComparePreProcessor(buffer, {
   edgeFraction        = 0.10,
   interiorFraction    = 0.50,
   uniformityThreshold = 300,
-  contrastThreshold   = 15,
+  contrastThreshold   = 10,
   maxCropFraction     = 0.25,
 } = {}) {
   const { data, info } = await sharp(buffer)
