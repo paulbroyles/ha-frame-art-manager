@@ -188,6 +188,24 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
   throw new Error(`Could not find a suitable${aspectRatio !== 'all' ? ` ${aspectRatio}` : ''} public-domain artwork after ${MAX_ATTEMPTS} attempts`);
 }
 
+// Metadata fields this source can provide.
+const metadataFields = [
+  { key: 'title',       label: 'Title',        description: 'Artwork title' },
+  { key: 'creator',     label: 'Creator',      description: 'Artist or creator name' },
+  { key: 'medium',      label: 'Medium',       description: 'Material or technique (e.g. "Oil on canvas")' },
+  { key: 'dateCreated', label: 'Date Created', description: 'Date or year the artwork was created' },
+  { key: 'source',      label: 'Source',       description: 'Source collection name (always "The Metropolitan Museum of Art")' },
+];
+
+// Default mapping hints: source field key → suggested HA attribute name.
+const defaultMapping = {
+  title:       'title',
+  creator:     'artist',
+  medium:      'medium',
+  dateCreated: 'year',
+  source:      null,
+};
+
 // Settings schema for the web source settings dialog.
 const settingsSchema = {
   mediaCategories: MEDIUM_CATEGORIES,
@@ -211,4 +229,4 @@ function buildFetcherOptions(settings) {
   return classificationFilter.length > 0 ? { mediaFilter: classificationFilter } : {};
 }
 
-module.exports = { fetchRandomArtwork, MEDIUM_TYPES, MEDIUM_CATEGORIES, settingsSchema, buildFetcherOptions };
+module.exports = { fetchRandomArtwork, MEDIUM_TYPES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };

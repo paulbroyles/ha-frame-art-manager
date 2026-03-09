@@ -587,6 +587,37 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
   throw new Error(`Could not find a${aspectRatio !== 'all' ? ` ${aspectRatio}` : 'n'} artwork after ${MAX_ATTEMPTS} attempts`);
 }
 
+// Metadata fields this source can provide.
+// Consumed by the UI to render the per-source metadata mapping controls.
+const metadataFields = [
+  { key: 'title',              label: 'Title',              description: 'Artwork title' },
+  { key: 'creator',            label: 'Creator',            description: 'Artist or creator name' },
+  { key: 'medium',             label: 'Medium',             description: 'Material or technique (e.g. "Oil on canvas"), from /api/asset structured fields' },
+  { key: 'creatorNationality', label: 'Nationality',        description: 'Nationality of the artist' },
+  { key: 'repository',         label: 'Repository',         description: 'Museum or holding institution' },
+  { key: 'dateCreated',        label: 'Date Created',       description: 'Date or year the artwork was created' },
+  { key: 'dimensions',         label: 'Dimensions',         description: 'Physical dimensions (e.g. "w1345 x h2390 cm")' },
+  { key: 'description',        label: 'Description',        description: 'Artwork description or commentary (plain text, HTML stripped)' },
+  { key: 'color',              label: 'Dominant Color',     description: 'Dominant color of the image as a hex string (e.g. "#17120c")' },
+  { key: 'source',             label: 'Source',             description: 'Source collection name (always "Google Arts & Culture")' },
+];
+
+// Default mapping hints: source field key → suggested HA attribute name.
+// Used to auto-detect mappings when no user override is set.
+// Hint strings are matched case-insensitively against available HA attributes.
+const defaultMapping = {
+  title:              'title',
+  creator:            'artist',
+  medium:             'medium',
+  creatorNationality: null,
+  repository:         'museum',
+  dateCreated:        'year',
+  dimensions:         null,
+  description:        null,
+  color:              null,
+  source:             null,
+};
+
 // Settings schema for the web source settings dialog.
 // Returned via GET /api/web-sources/config and consumed by the UI to render controls.
 const settingsSchema = {
@@ -608,4 +639,4 @@ function buildFetcherOptions(settings) {
   return enabledMedia.length > 0 ? { mediaFilter: enabledMedia } : {};
 }
 
-module.exports = { fetchRandomArtwork, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, settingsSchema, buildFetcherOptions };
+module.exports = { fetchRandomArtwork, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };

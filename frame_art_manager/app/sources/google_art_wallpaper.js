@@ -85,4 +85,20 @@ async function fetchRandomArtwork(_mediaFilter = null, options = {}) {
   };
 }
 
-module.exports = { fetchRandomArtwork };
+// Metadata fields this source can provide.
+const metadataFields = [
+  { key: 'title',       label: 'Title',       description: 'Artwork title' },
+  { key: 'creator',     label: 'Creator',     description: 'Artist or creator name' },
+  { key: 'attribution', label: 'Attribution', description: 'Attribution line' },
+  { key: 'source',      label: 'Source',      description: 'Source collection name (always "Google Art Wallpaper")' },
+];
+
+// Default mapping hints: source field key → suggested HA attribute name.
+const defaultMapping = {
+  title:       'title',
+  creator:     'artist',
+  attribution: null,
+  source:      null,
+};
+
+module.exports = { fetchRandomArtwork, metadataFields, defaultMapping };

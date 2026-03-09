@@ -3,7 +3,9 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
 const axios = require('axios');
-// Source modules — each may optionally export settingsSchema and buildFetcherOptions.
+
+// Source modules — each must export fetchRandomArtwork, metadataFields, and defaultMapping.
+// Optional: settingsSchema, buildFetcherOptions.
 // web_sources.js delegates source-specific logic to these modules generically.
 const SOURCE_MODULES = {
   google_arts: require('../sources/google_arts'),
@@ -20,6 +22,15 @@ const SOURCE_SETTINGS_SCHEMAS = Object.fromEntries(
   Object.entries(SOURCE_MODULES)
     .filter(([, mod]) => mod.settingsSchema)
     .map(([id, mod]) => [id, mod.settingsSchema])
+);
+
+// Per-source metadata declarations: fields list + default mapping hints.
+// Exposed via GET /config so the UI can render per-source mapping controls.
+const SOURCE_METADATA = Object.fromEntries(
+  Object.entries(SOURCE_MODULES).map(([id, mod]) => [id, {
+    fields: mod.metadataFields || [],
+    defaultMapping: mod.defaultMapping || {},
+  }])
 );
 
 const SUPERVISOR_TOKEN = process.env.SUPERVISOR_TOKEN;
