@@ -14629,6 +14629,7 @@ let webSourceSettingsSchemas = {}; // Cached settings schemas from GET /config
 let webSourceSourceConstraints = {}; // Cached per-source constraints (e.g. aspectRatioConstraint)
 let webSourceMetadata = {};        // Cached per-source { fields, defaultMapping } from GET /config
 let webSourceSettingsSourceId = null; // Which source is currently open in the settings modal
+let webSourceImageProcessingSchema = {}; // Cached imageProcessingSchema from GET /config
 
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
 
@@ -14657,6 +14658,7 @@ async function loadWebSourcesConfig() {
       webSourceSettingsSchemas = data.settingsSchemas || {};
       webSourceSourceConstraints = data.sourceConstraints || {};
       webSourceMetadata = data.sourceMetadata || {};
+      webSourceImageProcessingSchema = data.imageProcessingSchema || {};
     }
   } catch (error) {
     console.error('Error loading web sources config:', error);
@@ -14714,6 +14716,42 @@ function renderWebSourcesGlobalSettings() {
       }
     });
   });
+
+  // Image processing settings
+  const strategies = webSourceImageProcessingSchema.sharpStrategies || [];
+  const currentStrategy = webSourcesConfig?.imageProcessing?.sharpStrategy || 'attention';
+  if (strategies.length > 0) {
+    const processingHtml = `
+      <div class="ws-global-setting" style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color,#e0e0e0);">
+        <label class="ws-global-label">Crop Strategy</label>
+        <p class="pool-health-description">How to select which portion of an image to keep when cropping to fit the TV's 16:9 aspect ratio.</p>
+        <select id="ws-crop-strategy-select" class="ws-select">
+          ${strategies.map(s => `<option value="${s.value}" ${currentStrategy === s.value ? 'selected' : ''}>${escapeHtml(s.label)}</option>`).join('')}
+        </select>
+      </div>`;
+    container.insertAdjacentHTML('beforeend', processingHtml);
+
+    document.getElementById('ws-crop-strategy-select')?.addEventListener('change', async (e) => {
+      const sharpStrategy = e.target.value;
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sharpStrategy }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
+          showToast('Crop strategy updated');
+        } else {
+          throw new Error(data.error || 'Failed to update setting');
+        }
+      } catch (error) {
+        console.error('Error updating crop strategy:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    });
+  }
 }
 
 function hasEnabledWebSources() {
@@ -15364,10 +15402,26 @@ function renderWebSourcesTestSection() {
         <table style="border-collapse:collapse;font-size:13px;">${attrRows}${entityRows}</table>
       </div>` : '';
 
-    html += `<div class="web-source-test-result">
-      <img src="${API_BASE}/web-sources/test-cache/image?t=${Date.now()}" alt="Test artwork"
-           style="max-width:100%;max-height:360px;display:block;border-radius:4px;margin-bottom:12px;"
+    const ts = Date.now();
+    const rawImg = testCache.rawFilename
+      ? `<div style="flex:1;min-width:0;">
+           <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Original</div>
+           <img src="${API_BASE}/web-sources/test-cache/raw-image?t=${ts}" alt="Original artwork"
+                style="max-width:100%;max-height:300px;display:block;border-radius:4px;"
+                onerror="this.style.display='none'">
+         </div>`
+      : '';
+    const processedImg = `<div style="flex:1;min-width:0;">
+      <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">${rawImg ? 'Cropped for TV' : 'Cropped for TV'}</div>
+      <img src="${API_BASE}/web-sources/test-cache/image?t=${ts}" alt="Cropped artwork"
+           style="max-width:100%;max-height:300px;display:block;border-radius:4px;"
            onerror="this.style.display='none'">
+    </div>`;
+
+    html += `<div class="web-source-test-result">
+      <div style="display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap;">
+        ${rawImg}${processedImg}
+      </div>
       <table style="border-collapse:collapse;font-size:13px;">${metaRows}${artworkLinkRow}</table>
       ${mappedSection}
     </div>`;

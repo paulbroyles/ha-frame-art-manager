@@ -11172,7 +11172,7 @@ body.dropdown-open .image-card:hover {
   cursor: not-allowed;
 }
 
-/* Global settings — aspect ratio filter */
+/* Global settings — aspect ratio filter + image processing */
 .ws-global-setting {
   display: flex;
   flex-direction: column;
@@ -11182,6 +11182,15 @@ body.dropdown-open .image-card:hover {
 .ws-global-label {
   font-weight: 600;
   font-size: 14px;
+}
+
+.ws-select {
+  padding: 6px 8px;
+  border: 1px solid var(--border-color, #d1d5db);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bg-primary, #fff);
+  max-width: 480px;
 }
 
 .ws-aspect-radio-group {
