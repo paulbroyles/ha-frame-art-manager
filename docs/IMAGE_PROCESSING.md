@@ -37,29 +37,29 @@ Skips frame detection entirely. Use this for sources that are known to provide c
 
 **Algorithm**:
 
-1. Precompute full-width row means (`rowMeans[y]`) for every row. For left/right edges, compute corner-restricted column means (`cornerColMeans[x]`) using only the top and bottom `cornerFraction` rows — this avoids dilution by painting content in the middle of the image.
-2. Gate each edge independently:
-   - **Consistency**: Std dev of the edge-region means < `consistencyThreshold` (default 15). Tests whether all rows in the edge region have similar mean luminance.
-   - **Contrast**: |edge mean − interior mean| > `contrastThreshold` (default 20). Guards against uniform-colored paintings (sky, simple backgrounds) that might also have consistent row means.
-3. If the gate passes, scan inward while each row/col mean stays within `scanTolerance` (default 20) of the established frame mean. Stop at the first deviation.
+1. Compute full-width row means (`rowMeans[y]`).
+2. **Top/bottom — incremental scan**: Starting from the outermost row, accumulate a running mean and std dev of row means. Extend the "frame band" as long as including the next row keeps the running std dev below `consistencyThreshold`. Stop on the first row that would break consistency. No fixed pre-gate window — works for any border thickness.
+3. **Post-scan contrast check**: The detected band mean must differ from the center interior by more than `contrastThreshold`. Discards false positives on uniform-colored painting edges. Also requires a minimum band size of 5 rows/cols.
+4. **Left/right — corner-restricted col means**: Column means are computed using only the detected top and bottom frame rows as the "corner bands" (or a small `refFraction` fallback). Same incremental scan + contrast check applied to these col means.
 
 **Handles**:
-- Solid uniform borders (obvious)
-- Textured frames: wood grain, gold leaf, canvas — where row means are consistent even though each row is internally varied
-- Per-edge independent detection (can detect on some sides but not others)
+- Any border thickness (1px to wide frames) — no fixed sampling window
+- Solid uniform borders
+- Textured frames: wood grain, gold leaf, canvas — row means are consistent across the frame even when each row is internally varied
+- Per-edge independent detection
 
 **Failure modes**:
-- Multi-layer frames: the frame mean is set from the edge region (e.g., outer black border). When the scan reaches the inner textured layer (e.g., gold), the scan threshold may reject it if the inner frame mean differs significantly from the outer frame mean. Each layer must be within `scanTolerance` of the outermost frame mean.
-- Paintings with consistent top/bottom rows (e.g., a plain sky band) whose mean differs from the overall interior — may trigger a false positive on the top/bottom.
+- Ornate or highly variable frames where the frame's own row means vary by more than `consistencyThreshold` (e.g., a gilded frame with complex shadows or color variation across height)
+- Paintings with a consistent-colored band at the edge whose mean differs from the interior — contrast check provides protection but isn't perfect
+- Multi-layer frames where outer and inner layers have very different mean luminance (scan stops at the first layer boundary)
 
 **Parameters**:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `cornerFraction` | 0.10 | Fraction of each dimension for edge sampling |
-| `consistencyThreshold` | 15 | Max std dev of edge row/col means |
-| `contrastThreshold` | 20 | Min luminance difference between frame mean and interior |
-| `scanTolerance` | 20 | Max deviation from frame mean during inward scan |
+| `consistencyThreshold` | 20 | Max running std dev of row/col means to continue scan. Solid: ≈ 1. Light texture: ≈ 5–12. Moderate wood grain: ≈ 15–20. |
+| `contrastThreshold` | 20 | Min luminance difference between detected band and interior |
+| `refFraction` | 0.03 | Fallback corner-band fraction when no top/bottom frame detected |
 | `maxCropFraction` | 0.25 | Hard cap per edge |
 
 ---

@@ -456,43 +456,38 @@ async function cornerConsensusPreProcessor(buffer, {
 /**
  * Mean Profile pre-processor.
  *
- * Addresses the key failure mode of Corner Consensus and Region Compare: both
- * algorithms test whether edge pixels are *internally uniform* (low per-row/col
- * variance). Textured frames (wood grain, gold leaf, canvas) fail this test even
- * though they are clearly frames — each row is textured, but all rows look similar.
+ * Extends the key insight (consistent row means = frame) into an incremental scan
+ * that works for any border thickness. The previous version used a fixed edge
+ * sampling window that failed when the border was thinner than the window.
  *
- * Key insight: A textured frame has high variance *within* each row, but the
- * *row means* are consistent from row to row (the wood color averages out across
- * the full width). Complex painting content, by contrast, has wildly varying row
- * means. Testing the consistency of row means is a stronger discriminator than
- * testing the internal uniformity of each row.
+ * Key insight: Frames have consistent row/col means across their extent; painting
+ * content does not. Scanning incrementally and tracking the running std dev of
+ * means lets the algorithm self-terminate at the frame/painting boundary, without
+ * needing to know the border width in advance.
  *
  * Algorithm:
- *   1. Precompute full-width row means (rowMeans[y]) and corner-restricted column
- *      means (cornerColMeans[x]) for all rows and columns. Corner-restricted col
- *      means use only the top-cH and bottom-cH rows to avoid painting dilution
- *      on the left/right edges.
- *   2. Gate each edge independently:
- *        a. Edge mean consistency: std dev of the edge-region means < consistencyThreshold
- *        b. Contrast: |edge mean − interior mean| > contrastThreshold
- *   3. If gate passes for an edge, scan inward while the row/col mean stays within
- *      scanTolerance of the established frame mean. Stop on the first row/col that
- *      deviates.
+ *   1. Compute full-width row means (rowMeans[y]).
+ *   2. Top/bottom: scan from each edge inward. For each candidate row, compute the
+ *      running std dev of all row means accumulated so far. Stop when including the
+ *      next row would push the std dev above consistencyThreshold. Apply a post-scan
+ *      contrast check (detected band mean vs. center interior).
+ *   3. Left/right: compute corner-restricted col means using the detected top/bottom
+ *      bands as corner row ranges (or a small refFraction fallback). Same incremental
+ *      scan + contrast check.
  *
- * This handles solid, lightly-textured, and wood/gold-leaf frames better than
- * variance-based algorithms. The per-edge gate allows asymmetric detection.
+ * Handles any border thickness (1px to wide ornate frames). Works for solid, lightly-
+ * textured, and wood/gold-leaf frames. Per-edge independent detection.
  *
- * options.cornerFraction (default 0.10): fraction of each dimension for edge sampling.
- * options.consistencyThreshold (default 15): max std dev of edge means to be "consistent".
- * options.contrastThreshold (default 20): min luminance diff between frame and interior.
- * options.scanTolerance (default 20): max deviation from frame mean during inward scan.
+ * options.consistencyThreshold (default 20): max running std dev of means to continue scan.
+ *   Solid borders: ≈ 1. Lightly-textured: ≈ 5–12. Moderate wood grain: ≈ 15–20.
+ * options.contrastThreshold (default 20): min luminance diff between detected band and interior.
+ * options.refFraction (default 0.03): fallback corner-band fraction when no top/bottom frame found.
  * options.maxCropFraction (default 0.25): hard cap per edge (safety guard).
  */
 async function meanProfilePreProcessor(buffer, {
-  cornerFraction       = 0.10,
-  consistencyThreshold = 15,
+  consistencyThreshold = 20,
   contrastThreshold    = 20,
-  scanTolerance        = 20,
+  refFraction          = 0.03,
   maxCropFraction      = 0.25,
 } = {}) {
   const { data, info } = await sharp(buffer)
@@ -505,45 +500,24 @@ async function meanProfilePreProcessor(buffer, {
     return 0.299 * data[b] + 0.587 * data[b + 1] + 0.114 * data[b + 2];
   }
 
-  // Mean luminance for a full-width row.
   function rowMean(y) {
     let sum = 0;
     for (let x = 0; x < width; x++) sum += pixelLum((y * width + x) * channels);
     return sum / width;
   }
 
-  // Mean luminance for a column, restricted to specific [y0, y1) bands.
   function colMeanInBands(x, bands) {
     let sum = 0, n = 0;
     for (const [y0, y1] of bands) {
-      for (let y = y0; y < y1; y++) {
-        sum += pixelLum((y * width + x) * channels);
-        n++;
-      }
+      for (let y = y0; y < y1; y++) { sum += pixelLum((y * width + x) * channels); n++; }
     }
     return n > 0 ? sum / n : 0;
   }
 
-  // Mean and std dev of a numeric array.
-  function arrayStats(arr) {
-    const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
-    const stdDev = Math.sqrt(arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length);
-    return { mean, stdDev };
-  }
-
-  const cH = Math.round(height * cornerFraction);
-  const cW = Math.round(width  * cornerFraction);
   const maxRows = Math.floor(height * maxCropFraction);
   const maxCols = Math.floor(width  * maxCropFraction);
 
-  // Precompute all row means (full width).
   const rowMeans = Array.from({ length: height }, (_, y) => rowMean(y));
-
-  // Precompute corner-restricted column means: columns sampled only in the top + bottom
-  // cH rows. These are guaranteed to be frame pixels (no painting dilution) if the
-  // image has a top+bottom frame. Used for left/right edge detection.
-  const cornerBands = [[0, cH], [height - cH, height]];
-  const cornerColMeans = Array.from({ length: width }, (_, x) => colMeanInBands(x, cornerBands));
 
   // Interior reference: center 50% block.
   let iSum = 0, iN = 0;
@@ -554,46 +528,42 @@ async function meanProfilePreProcessor(buffer, {
   }
   const interiorMean = iSum / iN;
 
-  // Gate: edge means must be consistent and visually distinct from interior.
-  function edgePasses(edgeMeans, frameMean) {
-    const { stdDev } = arrayStats(edgeMeans);
-    return stdDev < consistencyThreshold &&
-           Math.abs(frameMean - interiorMean) > contrastThreshold;
-  }
-
-  let cropTop = 0, cropBottom = 0, cropLeft = 0, cropRight = 0;
-
-  const topMeans  = rowMeans.slice(0, cH);
-  const { mean: topFrameMean } = arrayStats(topMeans);
-  if (edgePasses(topMeans, topFrameMean)) {
-    for (let y = 0; y < maxRows; y++) {
-      if (Math.abs(rowMeans[y] - topFrameMean) <= scanTolerance) cropTop = y + 1; else break;
+  // Scan values[] from index 0 inward. Extend while including the next value keeps
+  // the running std dev < consistencyThreshold. Require a minimum band size (5) and
+  // a contrast check against interiorMean. Returns crop count (0 = no crop).
+  function incrementalScan(values, maxN) {
+    if (maxN < 5 || values.length < 5) return 0;
+    let sum = values[0], sumSq = values[0] ** 2, n = 1, crop = 1;
+    for (let i = 1; i < Math.min(maxN, values.length); i++) {
+      const v = values[i];
+      const newN = n + 1, newSum = sum + v, newSumSq = sumSq + v * v;
+      const newMean = newSum / newN;
+      const newStdDev = Math.sqrt(Math.max(0, newSumSq / newN - newMean ** 2));
+      if (newStdDev < consistencyThreshold) {
+        crop = i + 1;
+        sum = newSum; sumSq = newSumSq; n = newN;
+      } else {
+        break;
+      }
     }
+    if (crop < 5) return 0;
+    const bandMean = sum / n;
+    return Math.abs(bandMean - interiorMean) > contrastThreshold ? crop : 0;
   }
 
-  const botMeans  = rowMeans.slice(height - cH);
-  const { mean: botFrameMean } = arrayStats(botMeans);
-  if (edgePasses(botMeans, botFrameMean)) {
-    for (let y = height - 1; y >= height - maxRows; y--) {
-      if (Math.abs(rowMeans[y] - botFrameMean) <= scanTolerance) cropBottom = height - y; else break;
-    }
-  }
+  // Top and bottom: scan using full-width row means.
+  const cropTop    = incrementalScan(rowMeans, maxRows);
+  const cropBottom = incrementalScan([...rowMeans].reverse(), maxRows);
 
-  const leftMeans = cornerColMeans.slice(0, cW);
-  const { mean: leftFrameMean } = arrayStats(leftMeans);
-  if (edgePasses(leftMeans, leftFrameMean)) {
-    for (let x = 0; x < maxCols; x++) {
-      if (Math.abs(cornerColMeans[x] - leftFrameMean) <= scanTolerance) cropLeft = x + 1; else break;
-    }
-  }
+  // Left and right: corner-restricted col means. Use detected frame rows as bands;
+  // fall back to a small refFraction if neither top nor bottom frame was found.
+  const topBandH  = cropTop    > 0 ? cropTop    : Math.max(3, Math.round(height * refFraction));
+  const botBandH  = cropBottom > 0 ? cropBottom : Math.max(3, Math.round(height * refFraction));
+  const cornerBands = [[0, topBandH], [height - botBandH, height]];
+  const cornerColMeans = Array.from({ length: width }, (_, x) => colMeanInBands(x, cornerBands));
 
-  const rightMeans = cornerColMeans.slice(width - cW);
-  const { mean: rightFrameMean } = arrayStats(rightMeans);
-  if (edgePasses(rightMeans, rightFrameMean)) {
-    for (let x = width - 1; x >= width - maxCols; x--) {
-      if (Math.abs(cornerColMeans[x] - rightFrameMean) <= scanTolerance) cropRight = width - x; else break;
-    }
-  }
+  const cropLeft  = incrementalScan(cornerColMeans, maxCols);
+  const cropRight = incrementalScan([...cornerColMeans].reverse(), maxCols);
 
   if (cropTop === 0 && cropBottom === 0 && cropLeft === 0 && cropRight === 0) {
     return buffer;
