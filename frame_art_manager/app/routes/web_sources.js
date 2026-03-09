@@ -139,7 +139,8 @@ async function readWebSourcesConfig(frameArtPath) {
   if (!config.aspectRatioFilter) config.aspectRatioFilter = 'all';
   if (!config.sources) config.sources = {};
   if (!config.perTvCache) config.perTvCache = {};
-  if (!config.imageProcessing) config.imageProcessing = { cropEngine: 'sharp', sharpStrategy: 'attention' };
+  if (!config.imageProcessing) config.imageProcessing = { preProcessor: 'variance_scan', cropEngine: 'sharp', sharpStrategy: 'attention' };
+  if (!config.imageProcessing.preProcessor) config.imageProcessing.preProcessor = 'variance_scan';
 
   // Ensure all builtin sources are present (add any missing ones with defaults)
   for (const [id, def] of Object.entries(BUILTIN_SOURCES)) {
@@ -335,17 +336,22 @@ router.get('/config', async (req, res) => {
 // PUT /api/web-sources/image-processing
 router.put('/image-processing', async (req, res) => {
   try {
-    const { cropEngine, sharpStrategy } = req.body;
-    const validEngines = Object.keys(IMAGE_PROCESSING_SCHEMA.cropEngines.reduce((a, e) => ({ ...a, [e.value]: 1 }), {}));
-    const validStrategies = IMAGE_PROCESSING_SCHEMA.sharpStrategies.map(s => s.value);
-    if (cropEngine && !validEngines.includes(cropEngine)) {
+    const { preProcessor, cropEngine, sharpStrategy } = req.body;
+    const validPreProcessors = IMAGE_PROCESSING_SCHEMA.preProcessors.map(p => p.value);
+    const validEngines       = IMAGE_PROCESSING_SCHEMA.cropEngines.map(e => e.value);
+    const validStrategies    = IMAGE_PROCESSING_SCHEMA.sharpStrategies.map(s => s.value);
+    if (preProcessor  && !validPreProcessors.includes(preProcessor)) {
+      return res.status(400).json({ error: `preProcessor must be one of: ${validPreProcessors.join(', ')}` });
+    }
+    if (cropEngine    && !validEngines.includes(cropEngine)) {
       return res.status(400).json({ error: `cropEngine must be one of: ${validEngines.join(', ')}` });
     }
     if (sharpStrategy && !validStrategies.includes(sharpStrategy)) {
       return res.status(400).json({ error: `sharpStrategy must be one of: ${validStrategies.join(', ')}` });
     }
     const webSources = await readWebSourcesConfig(req.frameArtPath);
-    if (cropEngine) webSources.imageProcessing.cropEngine = cropEngine;
+    if (preProcessor)  webSources.imageProcessing.preProcessor  = preProcessor;
+    if (cropEngine)    webSources.imageProcessing.cropEngine    = cropEngine;
     if (sharpStrategy) webSources.imageProcessing.sharpStrategy = sharpStrategy;
     await writeWebSourcesConfig(req.frameArtPath, webSources);
     res.json({ success: true, imageProcessing: webSources.imageProcessing });
@@ -555,10 +561,11 @@ router.post('/fetch-and-display', async (req, res) => {
     const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
     const orientation = tvOrientation || 'landscape';
-    const { cropEngine, sharpStrategy } = webSources.imageProcessing;
+    const { preProcessor, cropEngine, sharpStrategy } = webSources.imageProcessing;
     const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
       ? imageBuffer
       : await processWebSourceImage(imageBuffer, orientation, {
+          preProcess: preProcessor !== 'none' ? preProcessor : null,
           cropEngine,
           cropEngineOptions: { strategy: sharpStrategy },
         });
@@ -655,10 +662,11 @@ router.post('/test-fetch', async (req, res) => {
     const { imageBuffer, contentType, metadata: artMetadata } = await fetcher(fetcherOpts.mediaFilter, { aspectRatio });
 
     const orientation = tvOrientation || 'landscape';
-    const { cropEngine, sharpStrategy } = webSources.imageProcessing;
+    const { preProcessor, cropEngine, sharpStrategy } = webSources.imageProcessing;
     const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
       ? imageBuffer
       : await processWebSourceImage(imageBuffer, orientation, {
+          preProcess: preProcessor !== 'none' ? preProcessor : null,
           cropEngine,
           cropEngineOptions: { strategy: sharpStrategy },
         });

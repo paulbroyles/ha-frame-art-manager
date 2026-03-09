@@ -14719,18 +14719,50 @@ function renderWebSourcesGlobalSettings() {
   });
 
   // Image processing settings
-  const strategies = webSourceImageProcessingSchema.sharpStrategies || [];
+  const preProcessors   = webSourceImageProcessingSchema.preProcessors  || [];
+  const strategies      = webSourceImageProcessingSchema.sharpStrategies || [];
+  const currentPreProc  = webSourcesConfig?.imageProcessing?.preProcessor  || 'variance_scan';
   const currentStrategy = webSourcesConfig?.imageProcessing?.sharpStrategy || 'attention';
-  if (strategies.length > 0) {
+  if (preProcessors.length > 0 || strategies.length > 0) {
     const processingHtml = `
       <div class="ws-global-setting" style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color,#e0e0e0);">
-        <label class="ws-global-label">Crop Strategy</label>
-        <p class="pool-health-description">How to select which portion of an image to keep when cropping to fit the TV's 16:9 aspect ratio.</p>
-        <select id="ws-crop-strategy-select" class="ws-select">
-          ${strategies.map(s => `<option value="${s.value}" ${currentStrategy === s.value ? 'selected' : ''}>${escapeHtml(s.label)}</option>`).join('')}
-        </select>
+        ${preProcessors.length > 0 ? `
+          <label class="ws-global-label">Frame Detection</label>
+          <p class="pool-health-description">Detect and remove decorative frames or borders from artwork images before cropping. Variance Scan works on both solid and lightly-textured borders; Sharp Trim handles solid uniform borders only.</p>
+          <select id="ws-pre-processor-select" class="ws-select">
+            ${preProcessors.map(p => `<option value="${p.value}" ${currentPreProc === p.value ? 'selected' : ''}>${escapeHtml(p.label)}</option>`).join('')}
+          </select>
+        ` : ''}
+        ${strategies.length > 0 ? `
+          <label class="ws-global-label" style="margin-top:16px;display:block;">Crop Strategy</label>
+          <p class="pool-health-description">How to select which portion of an image to keep when cropping to fit the TV's 16:9 aspect ratio.</p>
+          <select id="ws-crop-strategy-select" class="ws-select">
+            ${strategies.map(s => `<option value="${s.value}" ${currentStrategy === s.value ? 'selected' : ''}>${escapeHtml(s.label)}</option>`).join('')}
+          </select>
+        ` : ''}
       </div>`;
     container.insertAdjacentHTML('beforeend', processingHtml);
+
+    document.getElementById('ws-pre-processor-select')?.addEventListener('change', async (e) => {
+      const preProcessor = e.target.value;
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ preProcessor }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
+          showToast('Frame detection updated');
+        } else {
+          throw new Error(data.error || 'Failed to update setting');
+        }
+      } catch (error) {
+        console.error('Error updating frame detection setting:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    });
 
     document.getElementById('ws-crop-strategy-select')?.addEventListener('change', async (e) => {
       const sharpStrategy = e.target.value;

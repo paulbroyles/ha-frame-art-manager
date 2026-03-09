@@ -39,18 +39,130 @@ const CROP_ENGINES = {
   // Future: ml: mlCropEngine
 };
 
-// ── Pre-processor registry ────────────────────────────────────────────────────
+// ── Pre-processors ────────────────────────────────────────────────────────────
 
 /**
  * Pre-processor interface:
- *   async (buffer) → Buffer
+ *   async (buffer, options) → Buffer
  *
- * Pre-processors run before the TV-fit step. Intended for future use cases such
- * as detecting and removing decorative frames or borders from artwork images
- * before cropping to the target aspect ratio.
+ * Pre-processors run before the TV-fit step. They detect and remove decorative
+ * frames or borders from artwork images so the crop engine sees only painting content.
  */
+
+/**
+ * Sharp Trim pre-processor.
+ * Removes pixels along the image edges that match the corner pixel color within
+ * a tolerance threshold. Works best on solid uniform borders (e.g., matte black).
+ *
+ * options.threshold (default 10): color similarity tolerance (0–255).
+ *   Higher values trim more aggressively.
+ */
+async function trimPreProcessor(buffer, { threshold = 10 } = {}) {
+  try {
+    return await sharp(buffer).trim({ threshold }).toBuffer();
+  } catch {
+    // Sharp throws if trim() would eliminate the entire image — return original.
+    return buffer;
+  }
+}
+
+/**
+ * Variance Scan pre-processor.
+ * Scans inward from each edge, computing per-row/column luminance variance.
+ * Rows/columns with variance below varianceThreshold are considered frame (low
+ * detail) and removed. Scanning stops at the first high-variance row/column
+ * (painting content) or when maxCropFraction is reached.
+ *
+ * options.varianceThreshold (default 400): minimum luminance variance to be
+ *   treated as painting content. Solid black → ~0; textured frame → ~100–600;
+ *   complex painting → typically 1000+. Tune upward for heavily textured frames.
+ *
+ * options.maxCropFraction (default 0.25): hard cap on how much of any single
+ *   dimension may be cropped. Guards against pathological over-cropping of
+ *   paintings with dark or simple edges.
+ */
+async function varianceScanPreProcessor(buffer, {
+  varianceThreshold = 400,
+  maxCropFraction  = 0.25,
+} = {}) {
+  const { data, info } = await sharp(buffer)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const { width, height, channels } = info;
+
+  // Luminance (BT.601) variance for a horizontal row.
+  function rowVariance(y) {
+    const offset = y * width * channels;
+    let sum = 0, sumSq = 0;
+    for (let x = 0; x < width; x++) {
+      const b = offset + x * channels;
+      const lum = 0.299 * data[b] + 0.587 * data[b + 1] + 0.114 * data[b + 2];
+      sum += lum;
+      sumSq += lum * lum;
+    }
+    const mean = sum / width;
+    return sumSq / width - mean * mean;
+  }
+
+  // Luminance variance for a vertical column.
+  function colVariance(x) {
+    let sum = 0, sumSq = 0;
+    for (let y = 0; y < height; y++) {
+      const b = (y * width + x) * channels;
+      const lum = 0.299 * data[b] + 0.587 * data[b + 1] + 0.114 * data[b + 2];
+      sum += lum;
+      sumSq += lum * lum;
+    }
+    const mean = sum / height;
+    return sumSq / height - mean * mean;
+  }
+
+  const maxRows = Math.floor(height * maxCropFraction);
+  const maxCols = Math.floor(width  * maxCropFraction);
+
+  // Scan each edge inward; extend crop while variance is below threshold.
+  let cropTop = 0;
+  for (let y = 0; y < maxRows; y++) {
+    if (rowVariance(y) < varianceThreshold) cropTop = y + 1; else break;
+  }
+  let cropBottom = 0;
+  for (let y = height - 1; y >= height - maxRows; y--) {
+    if (rowVariance(y) < varianceThreshold) cropBottom = height - y; else break;
+  }
+  let cropLeft = 0;
+  for (let x = 0; x < maxCols; x++) {
+    if (colVariance(x) < varianceThreshold) cropLeft = x + 1; else break;
+  }
+  let cropRight = 0;
+  for (let x = width - 1; x >= width - maxCols; x--) {
+    if (colVariance(x) < varianceThreshold) cropRight = width - x; else break;
+  }
+
+  if (cropTop === 0 && cropBottom === 0 && cropLeft === 0 && cropRight === 0) {
+    return buffer;
+  }
+
+  const extractLeft   = cropLeft;
+  const extractTop    = cropTop;
+  const extractWidth  = width  - cropLeft - cropRight;
+  const extractHeight = height - cropTop  - cropBottom;
+
+  console.log(`[imageProcessor] variance_scan: removing ${cropTop}px top, ${cropBottom}px bottom, ${cropLeft}px left, ${cropRight}px right`);
+  return sharp(buffer)
+    .extract({ left: extractLeft, top: extractTop, width: extractWidth, height: extractHeight })
+    .toBuffer();
+}
+
+// TODO (Option 3): ML-based frame segmentation
+// Use a pre-trained ONNX model (e.g., fine-tuned SAM or SegFormer) to identify
+// painting region vs. decorative frame — handles irregular and ornate frames.
+// Cost: ~50–200 MB model weights, onnxruntime-node dependency, startup latency.
+// See docs/ROADMAP.md for discussion.
+
 const PRE_PROCESSORS = {
-  // Future: detect_frame: detectFramePreProcessor
+  trim:          trimPreProcessor,
+  variance_scan: varianceScanPreProcessor,
 };
 
 // ── Dimension computation ─────────────────────────────────────────────────────
@@ -106,22 +218,24 @@ function computeTargetDimensions(inputW, inputH, orientation) {
  * @param {Buffer} buffer
  * @param {'landscape'|'portrait'} orientation
  * @param {object}  [options]
- * @param {string}  [options.preProcess]           Pre-processor key (reserved for future use)
- * @param {string}  [options.cropEngine='sharp']   Crop engine key
- * @param {object}  [options.cropEngineOptions]    Passed through to the crop engine
+ * @param {string}  [options.preProcess]                       Pre-processor key ('trim'|'variance_scan'|null)
+ * @param {object}  [options.preProcessOptions]                Passed through to the pre-processor
+ * @param {string}  [options.cropEngine='sharp']               Crop engine key
+ * @param {object}  [options.cropEngineOptions]                Passed through to the crop engine
  * @param {string}  [options.cropEngineOptions.strategy='attention']  Sharp strategy
  * @returns {Promise<Buffer>}
  */
 async function processWebSourceImage(buffer, orientation = 'landscape', {
   preProcess = null,
+  preProcessOptions = {},
   cropEngine = 'sharp',
   cropEngineOptions = {},
 } = {}) {
   let processed = buffer;
 
-  // Phase 1: pre-process
+  // Phase 1: pre-process (frame/border detection and removal)
   if (preProcess && PRE_PROCESSORS[preProcess]) {
-    processed = await PRE_PROCESSORS[preProcess](processed);
+    processed = await PRE_PROCESSORS[preProcess](processed, preProcessOptions);
   }
 
   // Phase 2: fit to TV
@@ -135,6 +249,12 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
 // ── Schema (for UI) ───────────────────────────────────────────────────────────
 
 const IMAGE_PROCESSING_SCHEMA = {
+  preProcessors: [
+    { value: 'none',          label: 'None — skip frame detection' },
+    { value: 'variance_scan', label: 'Variance Scan — detect and remove frame/border regions (recommended)' },
+    { value: 'trim',          label: 'Sharp Trim — remove solid uniform borders only' },
+    // TODO (Option 3): ML Segmentation — handles irregular/ornate frames; see docs/ROADMAP.md
+  ],
   cropEngines: [
     { value: 'sharp', label: 'Sharp (built-in)' },
   ],
