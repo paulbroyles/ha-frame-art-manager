@@ -14627,6 +14627,7 @@ function initTagsetModalListeners() {
 let webSourcesConfig = null;       // Cached web sources config
 let webSourceSettingsSchemas = {}; // Cached settings schemas from GET /config
 let webSourceSourceConstraints = {}; // Cached per-source constraints (e.g. aspectRatioConstraint)
+let webSourceMetadata = {};        // Cached per-source { fields, defaultMapping } from GET /config
 let webSourceSettingsSourceId = null; // Which source is currently open in the settings modal
 
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
@@ -14656,6 +14657,7 @@ async function loadWebSourcesConfig() {
       webSourcesConfig = data.webSources;
       webSourceSettingsSchemas = data.settingsSchemas || {};
       webSourceSourceConstraints = data.sourceConstraints || {};
+      webSourceMetadata = data.sourceMetadata || {};
     }
   } catch (error) {
     console.error('Error loading web sources config:', error);
@@ -15072,112 +15074,224 @@ function initWebSourceSettingsModal() {
   });
 }
 
-// Metadata fields provided by web sources and their display labels
-const WEB_SOURCE_METADATA_FIELDS = [
-  { key: 'title',       label: 'Title',        description: 'The title of the artwork' },
-  { key: 'creator',     label: 'Creator',      description: 'The artist or creator' },
-  { key: 'medium',      label: 'Medium',       description: 'The painting medium or media (comma-separated if multiple) — Google Arts & Culture only' },
-  { key: 'repository',  label: 'Repository',   description: 'The museum or holding institution — Google Arts & Culture only' },
-  { key: 'dateCreated', label: 'Date Created', description: 'The date or year the artwork was created — Google Arts & Culture only' },
-  { key: 'attribution', label: 'Attribution',  description: 'The museum or institution — Google Art Wallpaper only' },
-];
+// ── Per-source metadata mapping ──────────────────────────────────────────────
+
+/**
+ * Serialize a mapping target (null | string | {entity,attribute}) to a select option value.
+ * Uses prefixes: "attr:<name>" for plain attributes, "entity:<id>:<attr>" for entity refs.
+ */
+function serializeMappingTarget(target) {
+  if (!target) return '';
+  if (typeof target === 'string') return `attr:${target}`;
+  if (target.entity && target.attribute) return `entity:${target.entity}:${target.attribute}`;
+  return '';
+}
+
+/**
+ * Deserialize a select option value back to a mapping target.
+ */
+function deserializeMappingTarget(val) {
+  if (!val) return null;
+  if (val.startsWith('attr:')) return val.slice(5);
+  if (val.startsWith('entity:')) {
+    const parts = val.split(':');
+    return { entity: parts[1], attribute: parts.slice(2).join(':') };
+  }
+  return null;
+}
+
+/**
+ * Auto-guess the serialized target for a mapping hint string.
+ * Looks for an HA attribute whose name matches the hint (case-insensitive),
+ * then falls back to looking in entity type attributes.
+ * Returns a serialized value ("attr:<name>", "entity:<id>:<attr>") or '' if no match.
+ */
+function autoGuessMappingTarget(hint) {
+  if (!hint) return '';
+  const hintLower = hint.toLowerCase();
+  const attrMatch = (allAttributes || []).find(a => a.toLowerCase() === hintLower);
+  if (attrMatch) return `attr:${attrMatch}`;
+  for (const et of (allEntityTypes || []).filter(e => e.attributes?.length > 0)) {
+    const eaMatch = (et.attributes || []).find(a => a.toLowerCase() === hintLower);
+    if (eaMatch) return `entity:${et.id}:${eaMatch}`;
+  }
+  return '';
+}
+
+/**
+ * Get the effective serialized target for a field:
+ * - If the user has an explicit override in userMapping, use that.
+ * - Otherwise auto-guess from the source's defaultMapping hint.
+ */
+function effectiveMappingTarget(sourceId, fieldKey) {
+  const userMapping = webSourcesConfig?.sources?.[sourceId]?.userMapping || {};
+  if (fieldKey in userMapping) return serializeMappingTarget(userMapping[fieldKey]);
+  const hint = webSourceMetadata[sourceId]?.defaultMapping?.[fieldKey];
+  return autoGuessMappingTarget(hint);
+}
+
+/**
+ * Build the options HTML for a mapping select dropdown.
+ * currentValue is a serialized target string.
+ */
+function buildMappingOptionsHtml(currentValue) {
+  const attributes = allAttributes || [];
+  const entityTypes = (allEntityTypes || []).filter(et => et.attributes?.length > 0);
+
+  let html = `<option value="">— Not mapped —</option>`;
+  if (attributes.length > 0) {
+    html += `<optgroup label="Attributes">` +
+      attributes.map(attr => {
+        const val = `attr:${attr}`;
+        return `<option value="${escapeHtml(val)}" ${currentValue === val ? 'selected' : ''}>${escapeHtml(attr)}</option>`;
+      }).join('') +
+      `</optgroup>`;
+  }
+  for (const et of entityTypes) {
+    html += `<optgroup label="${escapeHtml(et.name)}">` +
+      et.attributes.map(attr => {
+        const val = `entity:${et.id}:${attr}`;
+        return `<option value="${escapeHtml(val)}" ${currentValue === val ? 'selected' : ''}>${escapeHtml(attr)}</option>`;
+      }).join('') +
+      `</optgroup>`;
+  }
+  return html;
+}
 
 function renderWebSourcesMetadataMapping() {
   const container = document.getElementById('web-sources-metadata-mapping');
   if (!container) return;
 
-  const mapping = webSourcesConfig?.metadataMapping || {};
   const attributes = allAttributes || [];
-  const entityTypes = (allEntityTypes || []).filter(et => et.attributes && et.attributes.length > 0);
+  const entityTypes = (allEntityTypes || []).filter(et => et.attributes?.length > 0);
 
   if (attributes.length === 0 && entityTypes.length === 0) {
     container.innerHTML = '<p class="empty-state">No custom attributes or entity types defined. Add them in the Custom Data tab to enable metadata mapping.</p>';
     return;
   }
 
-  // Serialize a mapping target (null | string | {entity,attribute}) to a select option value.
-  // Uses prefixes to distinguish: "attr:<name>" or "entity:<id>:<attr>"
-  function serializeTarget(target) {
-    if (!target) return '';
-    if (typeof target === 'string') return `attr:${target}`;
-    if (target.entity && target.attribute) return `entity:${target.entity}:${target.attribute}`;
-    return '';
+  const sourceIds = Object.keys(webSourceMetadata);
+  if (sourceIds.length === 0) {
+    container.innerHTML = '<p class="empty-state">No sources available.</p>';
+    return;
   }
 
-  let html = '<table class="tv-assignments-table"><thead><tr><th>Web Source Field</th><th>Maps To</th></tr></thead><tbody>';
+  let html = '';
+  for (const sourceId of sourceIds) {
+    const meta = webSourceMetadata[sourceId];
+    const sourceName = webSourcesConfig?.sources?.[sourceId]?.name ||
+                       BUILTIN_SOURCES_CLIENT[sourceId]?.name || sourceId;
+    const fields = meta.fields || [];
+    if (fields.length === 0) continue;
 
-  for (const field of WEB_SOURCE_METADATA_FIELDS) {
-    const currentValue = serializeTarget(mapping[field.key] ?? null);
+    html += `<div class="ws-mapping-source" data-source-id="${escapeHtml(sourceId)}">`;
+    html += `<h4 class="ws-mapping-source-title">${escapeHtml(sourceName)}</h4>`;
+    html += `<table class="tv-assignments-table"><thead><tr><th>Metadata Field</th><th>Maps To</th></tr></thead><tbody>`;
 
-    let optionsHtml = '<option value="">— Not mapped —</option>';
-    if (attributes.length > 0) {
-      optionsHtml += `<optgroup label="Attributes">` +
-        attributes.map(attr => {
-          const val = `attr:${attr}`;
-          return `<option value="${escapeHtml(val)}" ${currentValue === val ? 'selected' : ''}>${escapeHtml(attr)}</option>`;
-        }).join('') +
-        '</optgroup>';
+    for (const field of fields) {
+      const currentValue = effectiveMappingTarget(sourceId, field.key);
+      const isAutoGuessed = !(field.key in (webSourcesConfig?.sources?.[sourceId]?.userMapping || {}));
+      html += `
+        <tr>
+          <td>
+            <strong>${escapeHtml(field.label)}</strong>
+            ${isAutoGuessed && currentValue ? '<span class="ws-mapping-auto-badge">auto</span>' : ''}
+            <div style="font-size:12px;color:#666;">${escapeHtml(field.description)}</div>
+          </td>
+          <td>
+            <select class="web-source-mapping-select"
+                    data-source-id="${escapeHtml(sourceId)}"
+                    data-field-key="${escapeHtml(field.key)}">
+              ${buildMappingOptionsHtml(currentValue)}
+            </select>
+          </td>
+        </tr>`;
     }
-    for (const et of entityTypes) {
-      optionsHtml += `<optgroup label="${escapeHtml(et.name)}">` +
-        et.attributes.map(attr => {
-          const val = `entity:${et.id}:${attr}`;
-          return `<option value="${escapeHtml(val)}" ${currentValue === val ? 'selected' : ''}>${escapeHtml(attr)}</option>`;
-        }).join('') +
-        '</optgroup>';
-    }
 
-    html += `
-      <tr>
-        <td>
-          <strong>${escapeHtml(field.label)}</strong>
-          <div style="font-size:12px;color:#666;">${escapeHtml(field.description)}</div>
-        </td>
-        <td>
-          <select class="web-source-mapping-select" data-field-key="${escapeHtml(field.key)}">
-            ${optionsHtml}
-          </select>
-        </td>
-      </tr>`;
+    html += `</tbody></table>`;
+    html += `<div style="margin-top:8px;display:flex;gap:8px;">
+      <button type="button" class="btn-primary btn-small ws-save-mapping-btn" data-source-id="${escapeHtml(sourceId)}">Save Mapping</button>
+      <button type="button" class="btn-secondary btn-small ws-reset-mapping-btn" data-source-id="${escapeHtml(sourceId)}">Reset to Auto-detected</button>
+    </div>`;
+    html += `</div>`;
   }
 
-  html += '</tbody></table>';
-  html += '<div style="margin-top:12px;"><button type="button" id="save-metadata-mapping-btn" class="btn-primary btn-small">Save Mapping</button></div>';
   container.innerHTML = html;
 
-  document.getElementById('save-metadata-mapping-btn')?.addEventListener('click', saveMetadataMapping);
+  container.querySelectorAll('.ws-save-mapping-btn').forEach(btn => {
+    btn.addEventListener('click', () => saveSourceMapping(btn.dataset.sourceId));
+  });
+  container.querySelectorAll('.ws-reset-mapping-btn').forEach(btn => {
+    btn.addEventListener('click', () => resetSourceMapping(btn.dataset.sourceId));
+  });
 }
 
-async function saveMetadataMapping() {
-  const selects = document.querySelectorAll('.web-source-mapping-select');
-  const mapping = {};
+// Client-side copy of source display names for the mapping UI header.
+// Keeps the UI from depending on webSourcesConfig being fully populated.
+const BUILTIN_SOURCES_CLIENT = {
+  google_arts:         { name: 'Google Arts & Culture' },
+  google_art_wallpaper:{ name: 'Google Art Wallpaper' },
+  met_museum:          { name: 'The Metropolitan Museum of Art' },
+};
+
+async function saveSourceMapping(sourceId) {
+  const meta = webSourceMetadata[sourceId] || {};
+  const selects = document.querySelectorAll(`.web-source-mapping-select[data-source-id="${CSS.escape(sourceId)}"]`);
+  const userMapping = {};
+
   selects.forEach(sel => {
+    const fieldKey = sel.dataset.fieldKey;
     const val = sel.value;
-    if (!val) {
-      mapping[sel.dataset.fieldKey] = null;
-    } else if (val.startsWith('attr:')) {
-      mapping[sel.dataset.fieldKey] = val.slice(5);
-    } else if (val.startsWith('entity:')) {
-      const parts = val.split(':');
-      mapping[sel.dataset.fieldKey] = { entity: parts[1], attribute: parts.slice(2).join(':') };
+    const hint = meta.defaultMapping?.[fieldKey];
+    const autoVal = autoGuessMappingTarget(hint);
+
+    // Only store as a user override if it differs from the auto-guess
+    if (val !== autoVal) {
+      userMapping[fieldKey] = deserializeMappingTarget(val);
     }
   });
 
   try {
-    const response = await fetch(`${API_BASE}/web-sources/metadata-mapping`, {
+    const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/metadata-mapping`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mapping }),
+      body: JSON.stringify({ userMapping }),
     });
     const data = await response.json();
     if (data.success) {
-      if (webSourcesConfig) webSourcesConfig.metadataMapping = data.metadataMapping;
-      showToast('Metadata mapping saved');
+      if (webSourcesConfig?.sources?.[sourceId]) {
+        webSourcesConfig.sources[sourceId].userMapping = data.userMapping;
+      }
+      renderWebSourcesMetadataMapping();
+      const sourceName = BUILTIN_SOURCES_CLIENT[sourceId]?.name || sourceId;
+      showToast(`Mapping saved for ${sourceName}`);
     } else {
       throw new Error(data.error || 'Failed to save');
     }
   } catch (error) {
     console.error('Error saving metadata mapping:', error);
+    showToast(`Error: ${error.message}`, 'error');
+  }
+}
+
+async function resetSourceMapping(sourceId) {
+  try {
+    const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/metadata-mapping`, {
+      method: 'DELETE',
+    });
+    const data = await response.json();
+    if (data.success) {
+      if (webSourcesConfig?.sources?.[sourceId]) {
+        delete webSourcesConfig.sources[sourceId].userMapping;
+      }
+      renderWebSourcesMetadataMapping();
+      const sourceName = BUILTIN_SOURCES_CLIENT[sourceId]?.name || sourceId;
+      showToast(`Mapping reset to auto-detected for ${sourceName}`);
+    } else {
+      throw new Error(data.error || 'Failed to reset');
+    }
+  } catch (error) {
+    console.error('Error resetting metadata mapping:', error);
     showToast(`Error: ${error.message}`, 'error');
   }
 }

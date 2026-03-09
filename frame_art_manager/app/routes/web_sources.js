@@ -217,6 +217,62 @@ function buildFetcherOptions(sourceId, settings) {
 }
 
 /**
+ * Compute the effective metadata mapping for a source.
+ *
+ * Effective = source module's defaultMapping hints (as plain attribute name strings)
+ * overridden by any per-source userMapping stored in config.
+ *
+ * The defaultMapping hints are bare attribute name strings (e.g. 'title', 'artist').
+ * The userMapping values are the full stored format: null | string | {entity, attribute}.
+ *
+ * @param {string} sourceId
+ * @param {object} userMapping - Stored user overrides from config.sources[id].userMapping
+ * @returns {object} Merged mapping: { fieldKey: null|string|{entity,attribute} }
+ */
+function getEffectiveMapping(sourceId, userMapping) {
+  const defaultMapping = SOURCE_MODULES[sourceId]?.defaultMapping || {};
+  const effective = {};
+
+  // Apply source defaults (hints are bare attribute name strings)
+  for (const [key, hint] of Object.entries(defaultMapping)) {
+    effective[key] = hint || null;
+  }
+
+  // Apply user overrides
+  for (const [key, target] of Object.entries(userMapping || {})) {
+    effective[key] = target;
+  }
+
+  return effective;
+}
+
+/**
+ * Apply an effective metadata mapping to artwork metadata, producing HA attribute snapshots.
+ *
+ * @param {object} artMetadata - Raw metadata from the source fetcher
+ * @param {object} effectiveMapping - { fieldKey: null|string|{entity,attribute} }
+ * @returns {{ attributeSnapshot, entitySnapshot }}
+ */
+function buildWebSourceSnapshot(artMetadata, effectiveMapping) {
+  const attributeSnapshot = {};
+  const entitySnapshot = {};
+
+  for (const [sourceField, target] of Object.entries(effectiveMapping || {})) {
+    const value = artMetadata[sourceField];
+    if (value == null || target == null) continue;
+
+    if (typeof target === 'string') {
+      attributeSnapshot[target] = String(value);
+    } else if (target.entity && target.attribute) {
+      if (!entitySnapshot[target.entity]) entitySnapshot[target.entity] = {};
+      entitySnapshot[target.entity][target.attribute] = String(value);
+    }
+  }
+
+  return { attributeSnapshot, entitySnapshot };
+}
+
+/**
  * Resolve the effective aspect ratio filter for a fetch operation.
  *
  * 'match_tv' requires the caller to pass tvOrientation ('landscape' or 'portrait').
@@ -252,15 +308,19 @@ function isSourceCompatible(sourceId, aspectRatio) {
 // GET /api/web-sources/config
 router.get('/config', async (req, res) => {
   try {
-    const { webSources } = await readWebSourcesConfig(req.frameArtPath);
-    // Expose per-source constraints so the UI can react (e.g. disable landscape-only
-    // sources when portrait filter is active).
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
     const sourceConstraints = Object.fromEntries(
       Object.entries(BUILTIN_SOURCES)
         .filter(([, s]) => s.aspectRatioConstraint)
         .map(([id, s]) => [id, { aspectRatioConstraint: s.aspectRatioConstraint }])
     );
-    res.json({ success: true, webSources, settingsSchemas: SOURCE_SETTINGS_SCHEMAS, sourceConstraints });
+    res.json({
+      success: true,
+      webSources,
+      settingsSchemas: SOURCE_SETTINGS_SCHEMAS,
+      sourceConstraints,
+      sourceMetadata: SOURCE_METADATA,
+    });
   } catch (error) {
     console.error('Error reading web sources config:', error);
     res.status(500).json({ error: 'Failed to read web sources config' });
@@ -337,77 +397,66 @@ router.put('/sources/:sourceId/enable', async (req, res) => {
   }
 });
 
-/**
- * Validate and normalize a single metadata mapping target value.
- * Returns the normalized value, or throws an error string if invalid.
- *
- * Valid values:
- *   null / ''           → null (disabled)
- *   string              → plain attribute name
- *   { entity, attribute } → entity type attribute reference (dummy snapshot only)
- */
-function normalizeMapTarget(val) {
-  if (val == null || val === '') return null;
-  if (typeof val === 'string') return val;
-  if (typeof val === 'object' && typeof val.entity === 'string' && typeof val.attribute === 'string') {
-    return { entity: val.entity, attribute: val.attribute };
-  }
-  throw new Error('must be null, a string, or { entity, attribute }');
-}
-
-/**
- * Apply metadataMapping to web source artwork metadata, producing static snapshots
- * that mirror the library image attribute/entityRef structure without modifying any
- * real library data.
- *
- * Returns:
- *   attributeSnapshot — { attrName: value } for plain-attribute targets
- *   entitySnapshot    — { entityId: { attrName: value } } for entity-attribute targets
- */
-function buildWebSourceSnapshot(artMetadata, mapping) {
-  const attributeSnapshot = {};
-  const entitySnapshot = {};
-
-  for (const [sourceField, target] of Object.entries(mapping || {})) {
-    const value = artMetadata[sourceField];
-    if (value == null || target == null) continue;
-
-    if (typeof target === 'string') {
-      attributeSnapshot[target] = String(value);
-    } else if (target.entity && target.attribute) {
-      if (!entitySnapshot[target.entity]) entitySnapshot[target.entity] = {};
-      entitySnapshot[target.entity][target.attribute] = String(value);
-    }
-  }
-
-  return { attributeSnapshot, entitySnapshot };
-}
-
-// PUT /api/web-sources/metadata-mapping
-router.put('/metadata-mapping', async (req, res) => {
+// PUT /api/web-sources/sources/:sourceId/metadata-mapping
+// Body: { userMapping: { fieldKey: null|string|{entity,attribute} } }
+// Saves per-source user overrides. Fields absent from userMapping fall back to
+// auto-detected defaults (source module's defaultMapping hints).
+router.put('/sources/:sourceId/metadata-mapping', async (req, res) => {
   try {
-    const { mapping } = req.body;
-    if (!mapping || typeof mapping !== 'object') {
-      return res.status(400).json({ error: 'mapping must be an object' });
+    const { sourceId } = req.params;
+    const { userMapping } = req.body;
+
+    if (!BUILTIN_SOURCES[sourceId]) {
+      return res.status(404).json({ error: `Unknown source: ${sourceId}` });
+    }
+    if (userMapping == null || typeof userMapping !== 'object' || Array.isArray(userMapping)) {
+      return res.status(400).json({ error: 'userMapping must be an object' });
     }
 
-    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
-    const allowed = ['title', 'creator', 'medium', 'attribution', 'repository', 'dateCreated'];
-    const oldMapping = webSources.metadataMapping || {};
-    webSources.metadataMapping = {};
-    for (const key of allowed) {
-      const raw = mapping[key] !== undefined ? mapping[key] : (oldMapping[key] ?? null);
-      try {
-        webSources.metadataMapping[key] = normalizeMapTarget(raw);
-      } catch (err) {
-        return res.status(400).json({ error: `Invalid mapping value for "${key}": ${err.message}` });
+    // Validate each value: null, string, or { entity, attribute }
+    for (const [key, val] of Object.entries(userMapping)) {
+      if (
+        val !== null &&
+        typeof val !== 'string' &&
+        !(typeof val === 'object' && typeof val.entity === 'string' && typeof val.attribute === 'string')
+      ) {
+        return res.status(400).json({
+          error: `Invalid mapping value for "${key}": must be null, a string, or { entity, attribute }`,
+        });
       }
     }
-    await writeWebSourcesConfig(req.frameArtPath, metadata);
-    res.json({ success: true, metadataMapping: webSources.metadataMapping });
+
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+    webSources.sources[sourceId] = {
+      ...(webSources.sources[sourceId] || BUILTIN_SOURCES[sourceId]),
+      userMapping,
+    };
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
+    res.json({ success: true, userMapping });
   } catch (error) {
     console.error('Error updating metadata mapping:', error);
     res.status(500).json({ error: 'Failed to update metadata mapping' });
+  }
+});
+
+// DELETE /api/web-sources/sources/:sourceId/metadata-mapping
+// Clears all user mapping overrides, restoring auto-detected defaults.
+router.delete('/sources/:sourceId/metadata-mapping', async (req, res) => {
+  try {
+    const { sourceId } = req.params;
+    if (!BUILTIN_SOURCES[sourceId]) {
+      return res.status(404).json({ error: `Unknown source: ${sourceId}` });
+    }
+
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+    if (webSources.sources[sourceId]) {
+      delete webSources.sources[sourceId].userMapping;
+    }
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error resetting metadata mapping:', error);
+    res.status(500).json({ error: 'Failed to reset metadata mapping' });
   }
 });
 
@@ -422,60 +471,51 @@ router.post('/fetch-and-display', async (req, res) => {
   }
 
   try {
-    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
-
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
     const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
 
     // Determine which source to use
     let chosenSourceId = sourceId;
     if (!chosenSourceId) {
-      // Pick an enabled source compatible with the current aspect ratio filter
       const enabledSources = Object.entries(webSources.sources)
         .filter(([id, s]) => s.enabled && isSourceCompatible(id, aspectRatio))
         .map(([id]) => id);
       if (enabledSources.length === 0) {
-        return res.status(400).json({ error: 'No web sources are enabled and compatible with the current orientation filter. Enable at least one compatible source in Web Sources settings.' });
+        return res.status(400).json({
+          error: 'No web sources are enabled and compatible with the current orientation filter. Enable at least one compatible source in Web Sources settings.',
+        });
       }
       chosenSourceId = enabledSources[Math.floor(Math.random() * enabledSources.length)];
     } else if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
-      return res.status(400).json({ error: `Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})` });
+      return res.status(400).json({
+        error: `Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`,
+      });
     }
 
     if (!BUILTIN_SOURCES[chosenSourceId]) {
       return res.status(400).json({ error: `Unknown source: ${chosenSourceId}` });
     }
 
-    // Fetch artwork from the chosen source
     const fetcher = SOURCE_FETCHERS[chosenSourceId];
     if (!fetcher) {
       return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
     }
+
     const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
     const fetchResult = await fetcher(fetcherOpts.mediaFilter, { aspectRatio });
-
     const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
-    // Determine file extension
     const ext = contentType.includes('png') ? 'png' : 'jpg';
-
-    // Ensure cache dir exists
     const cacheDir = cacheDirFor(req.frameArtPath);
     await fs.mkdir(cacheDir, { recursive: true });
-
-    // Clear any previous cache for this device
     await clearCacheForDevice(req.frameArtPath, deviceId);
-
-    // Save new image to cache
     const cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
     await fs.writeFile(cacheFile, imageBuffer);
 
-    // Build static attribute/entity snapshots from metadata mapping
-    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(
-      artMetadata, webSources.metadataMapping
-    );
+    const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
+    const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
+    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
 
-    // Update per-TV cache record in metadata.json
-    webSources.perTvCache = webSources.perTvCache || {};
     webSources.perTvCache[deviceId] = {
       filename: path.basename(cacheFile),
       sourceId: chosenSourceId,
@@ -485,9 +525,8 @@ router.post('/fetch-and-display', async (req, res) => {
       ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
       fetchedAt: new Date().toISOString(),
     };
-    await writeWebSourcesConfig(req.frameArtPath, metadata);
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
 
-    // Display on TV
     await displayImageOnTV(cacheFile, deviceId, { screenOn });
 
     res.json({
@@ -578,12 +617,9 @@ router.post('/test-fetch', async (req, res) => {
       ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
       fetchedAt: new Date().toISOString(),
     };
-    await writeWebSourcesConfig(req.frameArtPath, metadata);
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
 
-    res.json({
-      success: true,
-      testCache: webSources.testCache,
-    });
+    res.json({ success: true, testCache: webSources.testCache });
   } catch (error) {
     console.error('Error in test-fetch:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch test image' });

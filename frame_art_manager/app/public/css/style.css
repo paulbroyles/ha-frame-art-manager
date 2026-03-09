@@ -11204,6 +11204,29 @@ body.dropdown-open .image-card:hover {
   font-weight: normal;
 }
 
+.ws-mapping-source {
+  margin-bottom: 24px;
+}
+
+.ws-mapping-source-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 8px 0;
+  color: var(--text-primary, #333);
+}
+
+.ws-mapping-auto-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted, #888);
+  background: var(--bg-muted, #f0f0f0);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
 .web-source-card-header {
   display: flex;
   align-items: flex-start;

@@ -45,24 +45,54 @@ async function fetchRandomArtwork(mediaFilter = null, options = {})
   imageBuffer: Buffer,      // Raw image bytes
   contentType: string,      // MIME type, e.g. 'image/jpeg' or 'image/png'
   metadata: {
+    // Include whichever fields this source provides; omit ones it doesn't have.
+    // Any field declared in metadataFields (see below) can be mapped by the user.
     title: string | null,
     creator: string | null,
-    medium: string | null,       // Material/technique (e.g. "Oil on canvas")
-    attribution: string | null,  // Attribution line if different from creator
-    dateCreated: string | null,  // Human-readable date (e.g. "1889", "ca. 1880–1890")
-    artworkUrl: string | null,   // Canonical URL to the artwork page
-    source: string,              // Human-readable source name (e.g. "The Metropolitan Museum of Art")
+    medium: string | null,         // Material/technique (e.g. "Oil on canvas")
+    attribution: string | null,    // Attribution line if different from creator
+    dateCreated: string | null,    // Human-readable date (e.g. "1889", "ca. 1880–1890")
+    artworkUrl: string | null,     // Canonical URL to artwork page (not in metadataFields)
+    source: string,                // Human-readable source name — always include this
+    // Additional fields as appropriate for the source:
+    // repository, creatorNationality, dimensions, description, color, ...
   }
 }
 ```
 
-Only `title`, `creator`, `medium`, `attribution`, `dateCreated`, and `artworkUrl` are surfaced to
-the metadata mapping UI. Include all that are available; omit fields the source doesn't provide.
-Always include `source`.
+`artworkUrl` is used internally (stored in perTvCache) but is not a mappable field.
+All other fields returned in `metadata` should be declared in `metadataFields` so users can map them.
 
 **Errors:** Throw a plain `Error` with a descriptive message on network failure, empty results, or
 an unsatisfiable filter (e.g. portrait requested from a landscape-only source). The route layer
 catches all errors and returns HTTP 500 with `error.message`.
+
+### Required metadata exports
+
+Every source must also export `metadataFields` and `defaultMapping`:
+
+```js
+// Declares which metadata fields this source provides.
+// Consumed by the UI to render per-source mapping controls.
+// Include every field that appears in fetchRandomArtwork's metadata return value
+// (except artworkUrl, which is internal-only).
+const metadataFields = [
+  { key: 'title',  label: 'Title',  description: 'Artwork title' },
+  { key: 'source', label: 'Source', description: 'Source collection name (always "My Source")' },
+  // ... add all fields this source provides
+];
+
+// Default mapping hints: source field key → suggested HA attribute name (or null).
+// Hint strings are matched case-insensitively against available HA attributes at render time.
+// Fields whose hint matches an existing attribute are auto-selected in the UI (shown as "auto").
+// User can override any field; "Reset to Auto-detected" clears overrides.
+const defaultMapping = {
+  title:  'title',   // look for an HA attribute named 'title' (case-insensitive)
+  source: null,      // no good guess — leave unmapped by default
+};
+```
+
+Both must be included in `module.exports`.
 
 ### Optional Exports
 
