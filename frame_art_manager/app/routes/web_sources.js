@@ -50,7 +50,7 @@ const BUILTIN_SOURCES = {
   },
 };
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Config file helpers ───────────────────────────────────────────────────────
 
 function cacheDirFor(frameArtPath) {
   return path.join(frameArtPath, 'web_source_cache');
@@ -60,50 +60,93 @@ function cacheFileFor(frameArtPath, deviceId, ext = 'jpg') {
   return path.join(cacheDirFor(frameArtPath), `${deviceId}.${ext}`);
 }
 
+function webSourcesConfigPath(frameArtPath) {
+  return path.join(frameArtPath, 'web_sources.json');
+}
+
 /**
- * Read the webSources section from metadata.json.
- * Returns a default structure if not present.
+ * Migrate web sources config out of metadata.json into web_sources.json.
+ * Called automatically on first read when web_sources.json does not exist.
+ * The old global metadataMapping is dropped — per-source userMapping replaces it.
+ * Returns the migrated config object, or null if nothing to migrate.
  */
-async function readWebSourcesConfig(frameArtPath) {
+async function migrateFromMetadata(frameArtPath) {
   const metadataPath = path.join(frameArtPath, 'metadata.json');
   let metadata = {};
   try {
     const raw = await fs.readFile(metadataPath, 'utf8');
     metadata = JSON.parse(raw);
   } catch {
-    // ignore – will write defaults
+    return null;
   }
 
-  if (!metadata.webSources) {
-    metadata.webSources = {
-      sources: { google_arts: { ...BUILTIN_SOURCES.google_arts, enabled: false } },
-      metadataMapping: { title: null, creator: null, medium: null, attribution: null },
+  if (!metadata.webSources) return null;
+
+  // Extract webSources, dropping the old global metadataMapping (per-source now)
+  const { metadataMapping: _dropped, ...wsConfig } = metadata.webSources;
+
+  // Write metadata.json without the webSources key
+  const { webSources: _ws, ...metadataRest } = metadata;
+  try {
+    await fs.writeFile(metadataPath, JSON.stringify(metadataRest, null, 2));
+  } catch (err) {
+    console.warn('[web_sources] Failed to clean up metadata.json during migration:', err.message);
+  }
+
+  console.log('[web_sources] Migrated web sources config from metadata.json to web_sources.json');
+  return wsConfig;
+}
+
+/**
+ * Read web sources config from web_sources.json.
+ * On first access, migrates automatically from metadata.json if present.
+ * Returns the config object directly.
+ */
+async function readWebSourcesConfig(frameArtPath) {
+  const configPath = webSourcesConfigPath(frameArtPath);
+  let config = null;
+
+  try {
+    const raw = await fs.readFile(configPath, 'utf8');
+    config = JSON.parse(raw);
+  } catch {
+    // Not found — try migrating from the old location
+    const migrated = await migrateFromMetadata(frameArtPath);
+    if (migrated) config = migrated;
+  }
+
+  if (!config) {
+    config = {
       aspectRatioFilter: 'all',
+      sources: {},
       perTvCache: {},
     };
   }
 
-  if (!metadata.webSources.aspectRatioFilter) {
-    metadata.webSources.aspectRatioFilter = 'all';
-  }
+  // Guard: fill in any missing top-level fields
+  if (!config.aspectRatioFilter) config.aspectRatioFilter = 'all';
+  if (!config.sources) config.sources = {};
+  if (!config.perTvCache) config.perTvCache = {};
 
-  // Ensure all builtin sources are present (add any missing ones)
+  // Ensure all builtin sources are present (add any missing ones with defaults)
   for (const [id, def] of Object.entries(BUILTIN_SOURCES)) {
-    if (!metadata.webSources.sources[id]) {
-      metadata.webSources.sources[id] = { ...def, enabled: false };
+    if (!config.sources[id]) {
+      config.sources[id] = { ...def, enabled: false };
     }
   }
 
-  return { metadata, webSources: metadata.webSources };
+  return config;
 }
 
 /**
- * Write updated webSources back to metadata.json.
+ * Write web sources config to web_sources.json.
  */
-async function writeWebSourcesConfig(frameArtPath, metadata) {
-  const metadataPath = path.join(frameArtPath, 'metadata.json');
-  await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
+async function writeWebSourcesConfig(frameArtPath, config) {
+  const configPath = webSourcesConfigPath(frameArtPath);
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
  * Delete any existing cache file(s) for a device.
@@ -140,12 +183,6 @@ async function displayImageOnTV(imagePath, deviceId, { screenOn = true } = {}) {
     return;
   }
 
-  const payload = {
-    device_id: deviceId,
-    image_path: imagePath,
-    screen_on: screenOn,
-  };
-
   await axios({
     method: 'POST',
     url: `${HA_API_BASE}/services/frame_art_shuffler/display_image`,
@@ -153,7 +190,7 @@ async function displayImageOnTV(imagePath, deviceId, { screenOn = true } = {}) {
       Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
       'Content-Type': 'application/json',
     },
-    data: payload,
+    data: { device_id: deviceId, image_path: imagePath, screen_on: screenOn },
     timeout: 60000,
   });
 }
@@ -227,9 +264,9 @@ router.put('/aspect-ratio-filter', async (req, res) => {
     if (!valid.includes(aspectRatioFilter)) {
       return res.status(400).json({ error: `aspectRatioFilter must be one of: ${valid.join(', ')}` });
     }
-    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
     webSources.aspectRatioFilter = aspectRatioFilter;
-    await writeWebSourcesConfig(req.frameArtPath, metadata);
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
     res.json({ success: true, aspectRatioFilter });
   } catch (error) {
     console.error('Error updating aspect ratio filter:', error);
@@ -250,12 +287,12 @@ router.put('/sources/:sourceId/settings', async (req, res) => {
       return res.status(400).json({ error: 'settings must be an object' });
     }
 
-    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
     webSources.sources[sourceId] = {
       ...(webSources.sources[sourceId] || BUILTIN_SOURCES[sourceId]),
       settings,
     };
-    await writeWebSourcesConfig(req.frameArtPath, metadata);
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
     res.json({ success: true, source: webSources.sources[sourceId] });
   } catch (error) {
     console.error('Error updating web source settings:', error);
@@ -276,12 +313,12 @@ router.put('/sources/:sourceId/enable', async (req, res) => {
       return res.status(404).json({ error: `Unknown source: ${sourceId}` });
     }
 
-    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
     webSources.sources[sourceId] = {
       ...(webSources.sources[sourceId] || BUILTIN_SOURCES[sourceId]),
       enabled,
     };
-    await writeWebSourcesConfig(req.frameArtPath, metadata);
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
     res.json({ success: true, source: webSources.sources[sourceId] });
   } catch (error) {
     console.error('Error updating web source:', error);
@@ -459,13 +496,13 @@ router.post('/fetch-and-display', async (req, res) => {
 router.delete('/cache/:deviceId', async (req, res) => {
   try {
     const { deviceId } = req.params;
-    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
 
     await clearCacheForDevice(req.frameArtPath, deviceId);
 
-    if (webSources.perTvCache && webSources.perTvCache[deviceId]) {
+    if (webSources.perTvCache?.[deviceId]) {
       delete webSources.perTvCache[deviceId];
-      await writeWebSourcesConfig(req.frameArtPath, metadata);
+      await writeWebSourcesConfig(req.frameArtPath, webSources);
     }
 
     res.json({ success: true });
@@ -477,29 +514,27 @@ router.delete('/cache/:deviceId', async (req, res) => {
 
 // POST /api/web-sources/test-fetch
 // Fetch a test image from an enabled web source without sending it to any TV.
-// Stores the result in webSources.testCache (same structure as perTvCache entries)
-// so it can later be promoted to a queued or pending dispatch.
+// Stores the result in webSources.testCache (same structure as perTvCache entries).
 //
 // Body: { tvOrientation?: 'landscape'|'portrait' }
 // tvOrientation is used when aspectRatioFilter is 'match_tv'. Pass the orientation
-// of the TV being simulated (e.g. based on the user's TV selection in the test UI).
-// If omitted and filter is 'match_tv', falls back to 'all'.
+// of the TV being simulated. If omitted and filter is 'match_tv', falls back to 'all'.
 //
 // TODO (docs/ROADMAP.md): Consider adding "virtual TV" support so users can test
 // portrait artwork without a portrait-mounted physical TV.
 router.post('/test-fetch', async (req, res) => {
   try {
     const { tvOrientation } = req.body || {};
-    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
-
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
     const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
 
-    // Pick an enabled source compatible with the current aspect ratio filter
     const enabledSources = Object.entries(webSources.sources)
       .filter(([id, s]) => s.enabled && isSourceCompatible(id, aspectRatio))
       .map(([id]) => id);
     if (enabledSources.length === 0) {
-      return res.status(400).json({ error: 'No web sources are enabled and compatible with the current orientation filter. Enable at least one compatible source in Web Sources settings.' });
+      return res.status(400).json({
+        error: 'No web sources are enabled and compatible with the current orientation filter. Enable at least one compatible source in Web Sources settings.',
+      });
     }
     const chosenSourceId = enabledSources[Math.floor(Math.random() * enabledSources.length)];
 
@@ -507,22 +542,21 @@ router.post('/test-fetch', async (req, res) => {
     if (!fetcher) {
       return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
     }
+
     const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
     const { imageBuffer, contentType, metadata: artMetadata } = await fetcher(fetcherOpts.mediaFilter, { aspectRatio });
 
     const ext = contentType.includes('png') ? 'png' : 'jpg';
     const cacheDir = cacheDirFor(req.frameArtPath);
     await fs.mkdir(cacheDir, { recursive: true });
-
-    // Remove any previous test image and write the new one
     await clearTestCacheFile(req.frameArtPath);
     const testFilename = `_test.${ext}`;
     const testFile = path.join(cacheDir, testFilename);
     await fs.writeFile(testFile, imageBuffer);
 
-    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(
-      artMetadata, webSources.metadataMapping
-    );
+    const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
+    const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
+    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
 
     webSources.testCache = {
       filename: testFilename,
@@ -549,7 +583,7 @@ router.post('/test-fetch', async (req, res) => {
 // Serve the current test image file.
 router.get('/test-cache/image', async (req, res) => {
   try {
-    const { webSources } = await readWebSourcesConfig(req.frameArtPath);
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
     if (!webSources.testCache?.filename) {
       return res.status(404).json({ error: 'No test image available' });
     }
@@ -568,10 +602,10 @@ router.get('/test-cache/image', async (req, res) => {
 // Clear the test cache image and record.
 router.delete('/test-cache', async (req, res) => {
   try {
-    const { metadata, webSources } = await readWebSourcesConfig(req.frameArtPath);
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
     await clearTestCacheFile(req.frameArtPath);
     delete webSources.testCache;
-    await writeWebSourcesConfig(req.frameArtPath, metadata);
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
     res.json({ success: true });
   } catch (error) {
     console.error('Error clearing test cache:', error);
