@@ -40,28 +40,56 @@ Skips frame detection (Phase 2) entirely. The automatic solid-border strip (Phas
 
 **Algorithm**:
 
-1. Compute full-width row means (`rowMeans[y]`).
-2. **Top/bottom — incremental scan**: Starting from the outermost row, accumulate a running mean and std dev of row means. Extend the "frame band" as long as including the next row keeps the running std dev below `consistencyThreshold`. Stop on the first row that would break consistency. No fixed pre-gate window — works for any border thickness.
-3. **Post-scan contrast check**: The detected band mean must differ from the center interior by more than `contrastThreshold`. Discards false positives on uniform-colored painting edges. Also requires a minimum band size of 5 rows/cols.
-4. **Left/right — interior-edge col means**: Column means are computed using a thin strip of rows at the *inner boundary* of the detected top/bottom frame bands (not the frame rows themselves). Frame rows are uniform across all columns (all gold, all black) and provide no left/right discrimination. Interior-edge rows contain frame material at frame-column positions and painting content at center positions, making col means discriminating. A range guard skips left/right detection if col means are still flat across all columns. Falls back to near-edge rows when no top/bottom frame was detected.
+1. **Decode and compute row means**: Compute full-width row means (`rowMeans[y]`) and a center-interior luminance reference (`interiorMean` from the center 50% block).
+
+2. **Top/bottom — incremental scan** (`incrementalScan`): Starting from the outermost row, establish a reference mean (`refMean`) from the first 5 edge values (always pure frame material after Phase 1). Extend the "frame band" as long as each new row's luminance deviation from `refMean` stays below `consistencyThreshold`. Requires N=3 consecutive outliers before stopping (hysteresis guard — prevents isolated bright grain rows from prematurely terminating the scan). A runaway guard rejects the result if the scan reaches the cap with no natural stopping point (meaning the content never diverges from frame-like material). A contrast check (`refMean` vs `interiorMean`) rejects false positives. Minimum band size: 5 rows/cols.
+
+   *Why refMean rather than running std dev*: Running std dev accumulates every row's mean and becomes less sensitive as the band grows. Deviation from a fixed refMean stays sharp at any band depth, which matters for wide frames.
+
+3. **Left/right — col medians in corner bands**: Column medians are computed using thin strips of rows at the *inner boundary* of the detected top/bottom frame bands (not the frame rows themselves). Frame rows are uniform across all columns (all wood, all gold) and provide no left/right discrimination. Interior-edge rows contain frame material at left/right column positions and painting content at center positions, making the signal discriminating.
+
+   *Why median instead of mean*: Wood grain frames contain occasional bright grain rows that inflate the mean luminance of a column, causing the incremental scan to see them as outliers and stopping prematurely. The median is robust to these isolated bright rows. A range guard skips left/right detection if the column medians are flat across all columns (non-discriminating).
+
+4. **Symmetry guard**: After all four edges are scanned, compute the median of the four crop values. Reject any edge whose crop exceeds 4× that median. This catches runaway detections on one edge while the others correctly stop short.
+
+5. **Cross-edge inference (primary)**: If one pair of edges is detected but the perpendicular pair is not, infer the missing pair using the detected pair's average thickness:
+   - *L+R detected, T+B both missing*: infer from (L+R)/2 average using full-height col means
+   - *L+R detected, T detected, B missing*: infer B ≈ T using `restrictedRowMean`
+   - *L+R detected, B detected, T missing*: infer T ≈ B using `restrictedRowMean`
+   - *T+B detected, L+R both missing*: infer from (T+B)/2 using full-height col means
+
+   `restrictedRowMean(y, leftCols, rightCols)` computes row mean using only the detected frame-column strips (left + right edges), not the full row width. When frame columns are narrow, a full-width row mean is dominated by painting content and the contrast check fails even though the top/bottom frame material is clearly different from the interior. Restricting to the detected frame columns isolates the frame signal.
+
+6. **Secondary inference — T/B-backed (for underdetected L/R)**: After primary detection and inference, if T and B are both detected but L and/or R appear underdetected (less than half the T/B average), re-infer using a two-step approach:
+
+   *Step 1 (validate)*: Compute full-height col means for the estimated L/R band width. Frame columns reliably average darker than the painting interior over the full height because painting rows dilute but can't eliminate the frame signal. Reject if contrast is insufficient.
+
+   *Step 2 (extend)*: Run `incrementalScan` on the corner-band col medians starting from `x=estimate` (the T/B average width), scanning outward toward the detected boundary. Starting at `x=estimate` instead of `x=0` avoids the **dark outer bevel problem** (see below). The scan can extend beyond the T/B estimate if additional frame material exists.
+
+   **The dark outer bevel problem**: Some wood frames have a near-black outer bevel strip (median luminance ≈ 1–7) after Phase 1 strips the solid background. When scanning from `x=0`, this bevel establishes `refMean ≈ 1–7`. Normal wood grain at `x=10+` (median ≈ 35–85) deviates far from this refMean, so the scan stops immediately. The true frame/painting boundary at `x=90+` is never reached. By starting the extension scan at `x=estimate` (mid-frame wood grain zone, median ≈ 50), `refMean` is representative of actual frame material, and the painting edge (median ≈ 87+) produces a clear deviation that correctly stops the scan.
+
+7. **Secondary inference — L/R-backed (for underdetected T/B)**: Symmetric to the above. If L and R are both detected but T and/or B appear underdetected (less than half the L/R average), re-infer T/B from the L/R estimate using `restrictedRowMean`.
 
 **Handles**:
 - Any border thickness (1px to wide frames) — no fixed sampling window
 - Solid uniform borders
 - Textured frames: wood grain, gold leaf, canvas — row means are consistent across the frame even when each row is internally varied
-- Per-edge independent detection
+- Wood frames with dark outer bevels — T/B-backed secondary inference avoids the bevel contamination problem
+- Asymmetric detection — missing edges are inferred from detected perpendicular edges
+- Per-edge independent detection with cross-edge consistency checks
 
 **Failure modes**:
-- Ornate or highly variable frames where the frame's own row means vary by more than `consistencyThreshold` (e.g., a gilded frame with complex shadows or color variation across height)
+- Ornate or highly variable frames where the frame's own row means vary by more than `consistencyThreshold` across height (e.g., a gilded frame with complex shadows or color variation). Increasing `consistencyThreshold` may help but risks false positives.
 - Paintings with a consistent-colored band at the edge whose mean differs from the interior — contrast check provides protection but isn't perfect
 - Multi-layer frames where outer and inner layers have very different mean luminance (scan stops at the first layer boundary)
+- Frames with a very narrow outer bevel at a completely different luminance than the main frame body — the bevel sets `refMean` and the main frame appears as outliers, stopping the scan prematurely. The T/B-backed secondary inference addresses this for L/R detection (see above). A future fix for T/B detection would be analogous.
 
 **Parameters**:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `consistencyThreshold` | 20 | Max running std dev of row/col means to continue scan. Solid: ≈ 1. Light texture: ≈ 5–12. Moderate wood grain: ≈ 15–20. |
-| `contrastThreshold` | 20 | Min luminance difference between detected band and interior |
+| `consistencyThreshold` | 35 | Max deviation from `refMean` for a row/col to continue the incremental scan. Solid borders: ≈ 5–10. Light texture (gold/gilded): ≈ 15–25. Moderate wood grain: ≈ 25–40. The frame→painting boundary jump is typically 40–80. |
+| `contrastThreshold` | 20 | Min luminance difference between detected band (`refMean`) and `interiorMean` |
 | `refFraction` | 0.03 | Fallback corner-band fraction when no top/bottom frame detected |
 | `maxCropFraction` | 0.25 | Hard cap per edge |
 
@@ -93,6 +121,7 @@ Skips frame detection (Phase 2) entirely. The automatic solid-border strip (Phas
 **Failure modes**:
 - Paintings where the corners genuinely look like frames (very simple, uniform corner content). The contrast gate usually protects against this.
 - Frames that match the painting in luminance (e.g., a sand-colored frame around a sandy landscape). Uncommon in practice.
+- Textured frames whose corner variance exceeds `uniformityThreshold` — the gate rejects the frame entirely and no cropping occurs.
 
 **Parameters**:
 
@@ -205,6 +234,49 @@ Target resolutions: 3840×2160 (landscape) and 2160×3840 (portrait).
 
 ---
 
+## Known Limitations
+
+### Angled frame boundaries
+
+The col median scan operates on fixed horizontal bands. If a frame boundary is not perfectly vertical (e.g., slight perspective causes the right frame edge to angle inward toward the bottom), the median-based detection gives an average position across the full height rather than the true boundary at each point. This results in slight under-cropping on the angled side — the detected boundary is a compromise between where the frame starts at the top and where it starts at the bottom.
+
+**Verified on**: Met Museum #435765 (wood-grain frame, right side). The right boundary was detected at 89px while the left (more uniform) was 98px. The right frame edge visibly angles inward toward the bottom, so 89px was the averaged position rather than the true outermost boundary.
+
+**Strategy for future fix**: Run the col median scan over multiple independent horizontal bands (e.g., top third, middle third, bottom third) and take the minimum result across bands. The minimum represents the most conservative detection — the point where the frame is narrowest (where it enters furthest into the image). This would give a crop that is correct at all heights, though it will under-crop slightly at heights where the frame is widest. Alternative: detect the frame boundary as a line rather than a single value (using a per-row col scan and fitting a line through the detected boundary positions).
+
+---
+
+## Test Images
+
+Images used to develop and validate the pipeline. Useful for regression testing.
+
+| Image | Source | URL | Frame type | Notes |
+|---|---|---|---|---|
+| #435765 | Met Museum | https://www.metmuseum.org/art/collection/search/435765 | Wide wood-grain frame with dark outer bevel | Used to develop T/B-backed secondary inference and the dark outer bevel fix. Expected: T=56px, B=56px, L≈98px, R≈89px (right slightly under due to angled frame boundary). |
+| #435766 | Met Museum | https://www.metmuseum.org/art/collection/search/435766 | Gold/gilded frame | Confirmed working correctly with mean_profile prior to #435765 work. |
+
+---
+
+## Performance
+
+Measured on Met Museum #435765 (~4MB JPEG, 3000×2385px), using `mean_profile` + `sharp` crop engine.
+
+| Phase | Breakdown | Total |
+|---|---|---|
+| Phase 1 — solidBorderStrip | decode 112ms, scan 33ms, encode 161ms | **306ms** |
+| Phase 2 — mean_profile | decode 82ms, rowMeans 57ms, T/B scan 0ms, colMedians 113ms, inference 50ms, encode 142ms | **444ms** |
+| Phase 3 — sharp crop | 137ms | **137ms** |
+| **Pipeline total** | | **~887ms** |
+
+Notable observations:
+- **Encode/decode round-trips dominate**: Phase 1 encodes (161ms) and Phase 2 immediately decodes (82ms) the same pixel data — 243ms of pure overhead. Passing a raw pixel buffer between phases would eliminate this.
+- **colMedians is the most expensive compute step** (113ms) — sorting pixel values for every column across the corner bands.
+- **T/B row-mean scan is nearly free** (0ms) — simple running mean over pre-computed rowMeans.
+
+---
+
 ## Future Work
+
+**Raw buffer pipeline**: Pass raw pixel data (`{ data, info }`) between phases instead of encoding/decoding between each phase. This would save ~240ms per image (the Phase 1 encode + Phase 2 decode round-trip). The pre-processor interface would need a parallel raw-buffer path while keeping the current `async (buffer, options) → Buffer` interface for compatibility.
 
 **Option 3 — ML segmentation**: See `docs/ROADMAP.md`. Using ONNX Runtime + a fine-tuned segmentation model (SAM or SegFormer) to handle irregular and ornate frames that defeat variance-based approaches.

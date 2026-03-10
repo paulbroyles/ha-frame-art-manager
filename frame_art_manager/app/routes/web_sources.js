@@ -3,7 +3,7 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
 const axios = require('axios');
-const { processWebSourceImage, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA } = require('../utils/imageProcessor');
+const { processWebSourceImage, solidBorderStrip, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA } = require('../utils/imageProcessor');
 
 // Source modules — each must export fetchRandomArtwork, metadataFields, and defaultMapping.
 // Optional: settingsSchema, buildFetcherOptions.
@@ -666,10 +666,10 @@ router.post('/test-fetch', async (req, res) => {
     const alreadyProcessed = !!SOURCE_MODULES[chosenSourceId]?.alreadyProcessed;
     const activePreProcessor = (!alreadyProcessed && preProcessor !== 'none') ? preProcessor : null;
 
-    // Run the pre-processor separately so its output can be saved for visual comparison.
-    let preprocessedBuffer = imageBuffer;
+    // Run Phase 1 + Phase 2 pre-processors separately so the output can be saved for visual comparison.
+    let preprocessedBuffer = !alreadyProcessed ? await solidBorderStrip(imageBuffer) : imageBuffer;
     if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
-      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](imageBuffer);
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer);
     }
 
     // Run the crop engine on the pre-processed buffer (pre-process already applied).
@@ -739,9 +739,9 @@ router.post('/test-reprocess', async (req, res) => {
     const activePreProcessor = (!alreadyProcessed && preProcessor !== 'none') ? preProcessor : null;
     const orientation = testCache.orientation || 'landscape';
 
-    let preprocessedBuffer = imageBuffer;
+    let preprocessedBuffer = !alreadyProcessed ? await solidBorderStrip(imageBuffer) : imageBuffer;
     if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
-      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](imageBuffer);
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer);
     }
 
     const processedBuffer = alreadyProcessed

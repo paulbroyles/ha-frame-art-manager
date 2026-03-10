@@ -69,7 +69,9 @@ const CROP_ENGINES = {
  *      falsely stripping dark or light painting edges.
  */
 async function solidBorderStrip(buffer) {
+  const _t0 = Date.now();
   const { data, info } = await sharp(buffer).raw().toBuffer({ resolveWithObject: true });
+  const _tDecode = Date.now();
   const { width, height, channels } = info;
 
   function pixelLum(b) {
@@ -139,8 +141,10 @@ async function solidBorderStrip(buffer) {
   const cropBottom = scanEdge(y => rowStats(height - 1 - y),   maxRows);
   const cropLeft   = scanEdge(x => colStats(x),                maxCols);
   const cropRight  = scanEdge(x => colStats(width  - 1 - x),   maxCols);
+  const _tScan = Date.now();
 
   if (cropTop === 0 && cropBottom === 0 && cropLeft === 0 && cropRight === 0) {
+    console.log(`[solidBorderStrip] no border found — decode=${_tDecode - _t0}ms scan=${_tScan - _tDecode}ms total=${_tScan - _t0}ms`);
     return buffer;
   }
 
@@ -152,9 +156,11 @@ async function solidBorderStrip(buffer) {
   if (extractWidth <= 0 || extractHeight <= 0) return buffer;
 
   console.log(`[solidBorderStrip] removing top=${cropTop}px, bottom=${cropBottom}px, left=${cropLeft}px, right=${cropRight}px (interiorMean=${interiorMean.toFixed(1)})`);
-  return sharp(buffer)
+  const result = await sharp(buffer)
     .extract({ left: extractLeft, top: extractTop, width: extractWidth, height: extractHeight })
     .toBuffer();
+  console.log(`[solidBorderStrip timing] decode=${_tDecode - _t0}ms scan=${_tScan - _tDecode}ms encode=${Date.now() - _tScan}ms total=${Date.now() - _t0}ms`);
+  return result;
 }
 
 /**
@@ -588,21 +594,25 @@ async function cornerConsensusPreProcessor(buffer, {
  * Handles any border thickness (1px to wide ornate frames). Works for solid, lightly-
  * textured, and wood/gold-leaf frames. Per-edge independent detection.
  *
- * options.consistencyThreshold (default 20): max running std dev of means to continue scan.
- *   Solid borders: ≈ 1. Lightly-textured: ≈ 5–12. Moderate wood grain: ≈ 15–20.
+ * options.consistencyThreshold (default 35): max allowed deviation of any value from
+ *   the reference mean (established from the first few edge values) to continue the scan.
+ *   Solid borders: ≈ 5–10. Lightly-textured gold/gilded: ≈ 15–25. Wood grain: ≈ 25–40.
+ *   The frame→painting boundary jump is typically 40–80, well above in-frame variation.
  * options.contrastThreshold (default 20): min luminance diff between detected band and interior.
  * options.refFraction (default 0.03): fallback corner-band fraction when no top/bottom frame found.
  * options.maxCropFraction (default 0.25): hard cap per edge (safety guard).
  */
 async function meanProfilePreProcessor(buffer, {
-  consistencyThreshold = 20,
+  consistencyThreshold = 35,
   contrastThreshold    = 20,
   refFraction          = 0.03,
   maxCropFraction      = 0.25,
 } = {}) {
+  const _t0 = Date.now();
   const { data, info } = await sharp(buffer)
     .raw()
     .toBuffer({ resolveWithObject: true });
+  const _tDecode = Date.now();
 
   const { width, height, channels } = info;
 
@@ -624,6 +634,20 @@ async function meanProfilePreProcessor(buffer, {
     return n > 0 ? sum / n : 0;
   }
 
+  // Median luminance for a column within specified row bands.
+  // More robust than mean for wood grain frames: a few bright grain rows within a
+  // dark frame column inflate the mean (causing early scan termination) but not the median.
+  function colMedianInBands(x, bands) {
+    const vals = [];
+    for (const [y0, y1] of bands) {
+      for (let y = y0; y < y1; y++) { vals.push(pixelLum((y * width + x) * channels)); }
+    }
+    if (vals.length === 0) return 0;
+    vals.sort((a, b) => a - b);
+    const mid = Math.floor(vals.length / 2);
+    return vals.length % 2 === 0 ? (vals[mid - 1] + vals[mid]) / 2 : vals[mid];
+  }
+
   const maxRows = Math.floor(height * maxCropFraction);
   const maxCols = Math.floor(width  * maxCropFraction);
 
@@ -637,43 +661,68 @@ async function meanProfilePreProcessor(buffer, {
     for (let x = ix0; x < ix1; x++) { iSum += pixelLum((y * width + x) * channels); iN++; }
   }
   const interiorMean = iSum / iN;
+  const _tRowMeans = Date.now();
 
   console.log(`[mean_profile] image ${width}×${height}, interiorMean=${interiorMean.toFixed(1)}, consistencyThreshold=${consistencyThreshold}, contrastThreshold=${contrastThreshold}`);
 
-  // Scan values[] from index 0 inward. Extend while including the next value keeps
-  // the running std dev < consistencyThreshold. Require a minimum band size (5) and
-  // a contrast check against interiorMean. Returns crop count (0 = no crop).
+  // Scan values[] from index 0 inward. Extends while each new value is within
+  // consistencyThreshold of a reference mean established from the first few edge values.
+  // This handles frames with internal texture (wood grain ≈ ±20 variation) while
+  // stopping at the sharper frame/painting boundary (typically ±40–80 jump).
+  // Requires a minimum band size (5), a natural stopping point (runaway guard),
+  // and a contrast check against interiorMean.
   function incrementalScan(values, maxN, label) {
     if (maxN < 5 || values.length < 5) return 0;
-    let sum = values[0], sumSq = values[0] ** 2, n = 1, crop = 1;
-    let stopStdDev = 0, stopIdx = -1;
-    for (let i = 1; i < Math.min(maxN, values.length); i++) {
-      const v = values[i];
-      const newN = n + 1, newSum = sum + v, newSumSq = sumSq + v * v;
-      const newMean = newSum / newN;
-      const newStdDev = Math.sqrt(Math.max(0, newSumSq / newN - newMean ** 2));
-      if (newStdDev < consistencyThreshold) {
-        crop = i + 1;
-        sum = newSum; sumSq = newSumSq; n = newN;
+    // Reference mean from the first few values (outermost edge — always frame material
+    // after solidBorderStrip). More robust than running stdDev for wood grain frames.
+    const initN = Math.min(5, Math.floor(maxN / 2));
+    const refMean = values.slice(0, initN).reduce((s, v) => s + v, 0) / initN;
+    // Hysteresis: require 3 consecutive outliers before stopping, so that isolated
+    // bright grain columns within a textured frame don't prematurely end the scan.
+    // Only a sustained run of high-deviation values (as seen at the frame/painting
+    // boundary) triggers a stop.
+    const hysteresisN = 3;
+    let lastGoodIdx = initN - 1, consecutiveOutliers = 0;
+    let stopIdx = -1, stopDev = 0;
+    for (let i = initN; i < Math.min(maxN, values.length); i++) {
+      const dev = Math.abs(values[i] - refMean);
+      if (dev < consistencyThreshold) {
+        consecutiveOutliers = 0;
+        lastGoodIdx = i;
       } else {
-        stopStdDev = newStdDev; stopIdx = i;
-        break;
+        consecutiveOutliers++;
+        if (consecutiveOutliers >= hysteresisN) {
+          stopIdx = lastGoodIdx + 1;
+          stopDev = dev;
+          break;
+        }
       }
     }
+    const crop = lastGoodIdx + 1;
     if (crop < 5) {
-      console.log(`[mean_profile] ${label}: scan stopped at ${crop} rows (need ≥5)${stopIdx >= 0 ? `, stdDev=${stopStdDev.toFixed(1)} at index ${stopIdx}` : ''}`);
+      console.log(`[mean_profile] ${label}: scan found only ${crop} rows (need ≥5), refMean=${refMean.toFixed(1)}`);
       return 0;
     }
-    const bandMean = sum / n;
-    const contrast = Math.abs(bandMean - interiorMean);
+    // Runaway guard: if the scan ran all the way to the cap with no natural stopping point,
+    // the crop is bounded by maxN not by image content — reject.
+    if (stopIdx < 0) {
+      console.log(`[mean_profile] ${label}: scan ran to cap (${crop}px, refMean=${refMean.toFixed(1)}) — REJECTED (runaway)`);
+      return 0;
+    }
+    // Use refMean (initial edge values, most clearly frame-colored) for the contrast check
+    // rather than bandMean. bandMean gets diluted by rows near the frame/painting boundary
+    // whose values trend toward interior; refMean reflects the actual frame color.
+    const bandMean = values.slice(0, crop).reduce((s, v) => s + v, 0) / crop;
+    const contrast = Math.abs(refMean - interiorMean);
     const passed = contrast > contrastThreshold;
-    console.log(`[mean_profile] ${label}: crop=${crop}px, bandMean=${bandMean.toFixed(1)}, contrast=${contrast.toFixed(1)} (need >${contrastThreshold}), finalStdDev=${(Math.sqrt(Math.max(0, sumSq/n - (sum/n)**2))).toFixed(1)}${stopIdx >= 0 ? `, stopped at ${stopIdx} stdDev=${stopStdDev.toFixed(1)}` : ''} → ${passed ? 'CROP' : 'REJECTED (low contrast)'}`);
+    console.log(`[mean_profile] ${label}: crop=${crop}px, refMean=${refMean.toFixed(1)}, bandMean=${bandMean.toFixed(1)}, contrast(refMean)=${contrast.toFixed(1)} (need >${contrastThreshold}), stopped at ${stopIdx} dev=${stopDev.toFixed(1)} → ${passed ? 'CROP' : 'REJECTED (low contrast)'}`);
     return passed ? crop : 0;
   }
 
   // Top and bottom: scan using full-width row means.
-  const cropTop    = incrementalScan(rowMeans, maxRows, 'top');
-  const cropBottom = incrementalScan([...rowMeans].reverse(), maxRows, 'bottom');
+  let cropTop    = incrementalScan(rowMeans, maxRows, 'top');
+  let cropBottom = incrementalScan([...rowMeans].reverse(), maxRows, 'bottom');
+  const _tTB = Date.now();
 
   // Left and right: col means restricted to rows at the INNER EDGE of the detected frame
   // bands, not the frame rows themselves. Frame rows are uniform across all columns (all
@@ -689,17 +738,137 @@ async function meanProfilePreProcessor(buffer, {
     ? [Math.max(height - cropBottom - refRows, Math.ceil(height / 2)), height - cropBottom]
     : [height - refRows,     height];
   const cornerBands    = [topInner, botInner];
-  const cornerColMeans = Array.from({ length: width }, (_, x) => colMeanInBands(x, cornerBands));
+  // Use col median (not mean) for L/R detection: robust against isolated bright grain
+  // columns within a dark wood frame that inflate the mean and cause early scan termination.
+  const cornerColMeans = Array.from({ length: width }, (_, x) => colMedianInBands(x, cornerBands));
+  const _tColMedians = Date.now();
 
-  // Guard: if col means are nearly flat across all columns the bands are still
+  // Guard: if col medians are nearly flat across all columns the bands are still
   // non-discriminating — skip left/right rather than produce false positives.
   const colMeansMin = cornerColMeans.reduce((a, v) => Math.min(a, v),  Infinity);
   const colMeansMax = cornerColMeans.reduce((a, v) => Math.max(a, v), -Infinity);
   const colMeansDiscriminating = (colMeansMax - colMeansMin) >= 5;
-  console.log(`[mean_profile] col means range=${( colMeansMax - colMeansMin).toFixed(1)} (bands top=${JSON.stringify(topInner)}, bot=${JSON.stringify(botInner)})${colMeansDiscriminating ? '' : ' → SKIPPING left/right (non-discriminating)'}`);
+  console.log(`[mean_profile] col medians range=${( colMeansMax - colMeansMin).toFixed(1)} (bands top=${JSON.stringify(topInner)}, bot=${JSON.stringify(botInner)})${colMeansDiscriminating ? '' : ' → SKIPPING left/right (non-discriminating)'}`);
 
-  const cropLeft  = colMeansDiscriminating ? incrementalScan(cornerColMeans, maxCols, 'left') : 0;
-  const cropRight = colMeansDiscriminating ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right') : 0;
+  let cropLeft  = colMeansDiscriminating ? incrementalScan(cornerColMeans, maxCols, 'left') : 0;
+  let cropRight = colMeansDiscriminating ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right') : 0;
+
+  // Symmetry guard: frame borders should be roughly comparable in thickness across all
+  // four edges. Use the median of all four values as a reference; reject any edge whose
+  // crop is more than 4× the median (catches cases where one edge runs far into the
+  // painting while the others correctly detect nothing or a modest border).
+  {
+    const crops = [cropTop, cropBottom, cropLeft, cropRight].sort((a, b) => a - b);
+    const median = (crops[1] + crops[2]) / 2;
+    if (median > 0) {
+      const maxAllowed = median * 4;
+      if (cropTop    > maxAllowed) { console.log(`[mean_profile] top symmetry-rejected: ${cropTop}px > 4×median(${median.toFixed(0)})`);    cropTop    = 0; }
+      if (cropBottom > maxAllowed) { console.log(`[mean_profile] bottom symmetry-rejected: ${cropBottom}px > 4×median(${median.toFixed(0)})`); cropBottom = 0; }
+      if (cropLeft   > maxAllowed) { console.log(`[mean_profile] left symmetry-rejected: ${cropLeft}px > 4×median(${median.toFixed(0)})`);   cropLeft   = 0; }
+      if (cropRight  > maxAllowed) { console.log(`[mean_profile] right symmetry-rejected: ${cropRight}px > 4×median(${median.toFixed(0)})`);  cropRight  = 0; }
+    }
+  }
+
+  // Cross-edge inference: if a parallel edge pair is detected but the perpendicular pair
+  // is not (e.g. L and R detected but T and B = 0), infer the missing pair using the
+  // detected pair's average thickness. This handles frames — like wood grain — whose
+  // row means vary too much for a direct scan but whose borders are structurally symmetric.
+  // A contrast check guards against falsely cropping painting edges.
+  function inferEdge(estimate, getMeans, label) {
+    const n = Math.min(estimate, maxRows);
+    if (n < 1) return 0;
+    const bandMean = getMeans(n).reduce((s, v) => s + v, 0) / n;
+    const contrast = Math.abs(bandMean - interiorMean);
+    const passed = contrast > contrastThreshold;
+    console.log(`[mean_profile] ${label} inferred from parallel pair: estimate=${estimate}px, bandMean=${bandMean.toFixed(1)}, contrast=${contrast.toFixed(1)} → ${passed ? 'CROP' : 'REJECTED (low contrast)'}`);
+    return passed ? estimate : 0;
+  }
+
+  // For inferring T/B from L/R: use restricted row means (only the detected frame-column
+  // strips) rather than full-width row means. Full-width means are dominated by painting
+  // content when frame columns are thin (<5% of width), causing the contrast check to
+  // fail even when the top/bottom frame material IS a different color from the interior.
+  function restrictedRowMean(y, leftCols, rightCols) {
+    let sum = 0, count = 0;
+    for (let x = 0; x < leftCols; x++) { sum += pixelLum((y * width + x) * channels); count++; }
+    for (let x = width - rightCols; x < width; x++) { sum += pixelLum((y * width + x) * channels); count++; }
+    return count > 0 ? sum / count : interiorMean;
+  }
+
+  if (cropLeft > 0 && cropRight > 0 && cropTop === 0 && cropBottom === 0) {
+    // Both T and B missing — infer from (L+R)/2 average.
+    const estimate = Math.round((cropLeft + cropRight) / 2);
+    cropTop    = inferEdge(estimate, n => Array.from({ length: n }, (_, y) => restrictedRowMean(y, cropLeft, cropRight)),                'top');
+    cropBottom = inferEdge(estimate, n => Array.from({ length: n }, (_, i) => restrictedRowMean(height - 1 - i, cropLeft, cropRight)), 'bottom');
+  } else if (cropLeft > 0 && cropRight > 0 && cropTop > 0 && cropBottom === 0) {
+    // T detected but B missing — infer B ≈ T using frame-column strips.
+    cropBottom = inferEdge(cropTop, n => Array.from({ length: n }, (_, i) => restrictedRowMean(height - 1 - i, cropLeft, cropRight)), 'bottom');
+  } else if (cropLeft > 0 && cropRight > 0 && cropTop === 0 && cropBottom > 0) {
+    // B detected but T missing — infer T ≈ B using frame-column strips.
+    cropTop = inferEdge(cropBottom, n => Array.from({ length: n }, (_, y) => restrictedRowMean(y, cropLeft, cropRight)), 'top');
+  } else if (cropTop > 0 && cropBottom > 0 && cropLeft === 0 && cropRight === 0) {
+    // Both L and R missing — infer from (T+B)/2 average.
+    const estimate = Math.round((cropTop + cropBottom) / 2);
+    const colMeansAll = Array.from({ length: width }, (_, x) => colMeanInBands(x, [[0, height]]));
+    cropLeft  = inferEdge(estimate, n => colMeansAll.slice(0, n),                   'left');
+    cropRight = inferEdge(estimate, n => colMeansAll.slice(colMeansAll.length - n), 'right');
+  }
+
+  // Secondary inference: if T/B are both detected but L and/or R appear underdetected
+  // (less than half the T/B average), re-infer using a two-step approach:
+  //
+  //   Step 1 (validate): confirm the T/B estimate covers actual frame material using
+  //   full-height col means — painting dominates full height so frame columns reliably
+  //   average darker than the painting interior.
+  //
+  //   Step 2 (extend): scan outward from x=estimate using restricted-band col medians.
+  //   Starting from x=estimate avoids the near-black outer bevel (x=0..9, median≈1–7)
+  //   that contaminates refMean when scanning from x=0. From x=estimate the refMean is
+  //   established from the mid-frame wood grain zone (median≈50), which clearly differs
+  //   from the painting edge (median≈87+). The scan stops at the frame/painting boundary.
+  if (cropTop > 0 && cropBottom > 0) {
+    const tbAvg = (cropTop + cropBottom) / 2;
+    if (cropLeft < tbAvg / 2 || cropRight < tbAvg / 2) {
+      const estimate = Math.round(tbAvg);
+      const colMeansAll = Array.from({ length: width }, (_, x) => colMeanInBands(x, [[0, height]]));
+      const revMeansAll = [...colMeansAll].reverse();
+      const revMedians  = [...cornerColMeans].reverse();
+
+      function tbBackedInfer(isLeft, detected) {
+        const bandSlice = isLeft ? colMeansAll.slice(0, estimate) : revMeansAll.slice(0, estimate);
+        const bandMean  = bandSlice.reduce((s, v) => s + v, 0) / estimate;
+        const contrast  = Math.abs(bandMean - interiorMean);
+        if (contrast <= contrastThreshold) {
+          console.log(`[mean_profile] ${isLeft ? 'left' : 'right'} T/B-backed: est=${estimate}px REJECTED (contrast=${contrast.toFixed(1)} ≤ ${contrastThreshold})`);
+          return detected;
+        }
+        // Extend outward from x=estimate using restricted-band medians.
+        const extVals = (isLeft ? cornerColMeans : revMedians).slice(estimate, maxCols);
+        const ext     = extVals.length >= 5 ? incrementalScan(extVals, extVals.length, `${isLeft ? 'left' : 'right'} ext`) : 0;
+        const total   = estimate + ext;
+        console.log(`[mean_profile] ${isLeft ? 'left' : 'right'} T/B-backed: est=${estimate}px + ext=${ext}px → ${total}px (bandMean=${bandMean.toFixed(1)}, contrast=${contrast.toFixed(1)})`);
+        return total > detected ? total : detected;
+      }
+
+      if (cropLeft  < tbAvg / 2) { const v = tbBackedInfer(true,  cropLeft);  if (v > cropLeft)  { console.log(`[mean_profile] left: ${cropLeft}px → ${v}px`);   cropLeft  = v; } }
+      if (cropRight < tbAvg / 2) { const v = tbBackedInfer(false, cropRight); if (v > cropRight) { console.log(`[mean_profile] right: ${cropRight}px → ${v}px`); cropRight = v; } }
+    }
+  }
+  // Symmetric: if L/R both detected but T and/or B appear underdetected, re-infer from L/R.
+  if (cropLeft > 0 && cropRight > 0) {
+    const lrAvg = (cropLeft + cropRight) / 2;
+    if (cropTop < lrAvg / 2 || cropBottom < lrAvg / 2) {
+      const estimate = Math.round(lrAvg);
+      if (cropTop < lrAvg / 2) {
+        const inferred = inferEdge(estimate, n => Array.from({ length: n }, (_, y) => restrictedRowMean(y, cropLeft, cropRight)), 'top (L/R-backed)');
+        if (inferred > cropTop) { console.log(`[mean_profile] top: ${cropTop}px → ${inferred}px (L/R-backed)`); cropTop = inferred; }
+      }
+      if (cropBottom < lrAvg / 2) {
+        const inferred = inferEdge(estimate, n => Array.from({ length: n }, (_, i) => restrictedRowMean(height - 1 - i, cropLeft, cropRight)), 'bottom (L/R-backed)');
+        if (inferred > cropBottom) { console.log(`[mean_profile] bottom: ${cropBottom}px → ${inferred}px (L/R-backed)`); cropBottom = inferred; }
+      }
+    }
+  }
 
   if (cropTop === 0 && cropBottom === 0 && cropLeft === 0 && cropRight === 0) {
     return buffer;
@@ -710,10 +879,14 @@ async function meanProfilePreProcessor(buffer, {
   const extractWidth  = width  - cropLeft - cropRight;
   const extractHeight = height - cropTop  - cropBottom;
 
+  const _tInference = Date.now();
   console.log(`[imageProcessor] mean_profile: removing top=${cropTop}px, bottom=${cropBottom}px, left=${cropLeft}px, right=${cropRight}px`);
-  return sharp(buffer)
+  const _result = await sharp(buffer)
     .extract({ left: extractLeft, top: extractTop, width: extractWidth, height: extractHeight })
     .toBuffer();
+  const _tEnd = Date.now();
+  console.log(`[mean_profile timing] decode=${_tDecode-_t0}ms rowMeans=${_tRowMeans-_tDecode}ms TB=${_tTB-_tRowMeans}ms colMedians=${_tColMedians-_tTB}ms inference=${_tInference-_tColMedians}ms encode=${_tEnd-_tInference}ms total=${_tEnd-_t0}ms`);
+  return _result;
 }
 
 // TODO (Option 3): ML-based frame segmentation
@@ -810,24 +983,32 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
   cropEngine = 'sharp',
   cropEngineOptions = {},
 } = {}) {
+  const _t0 = Date.now();
   let processed = buffer;
 
   if (preProcess != null) {
     // Phase 1 (automatic): strip solid-color borders before frame detection.
     processed = await solidBorderStrip(processed);
+    const _t1 = Date.now();
 
     // Phase 2 (user-selected): detect and remove decorative frames/borders.
     if (PRE_PROCESSORS[preProcess]) {
       processed = await PRE_PROCESSORS[preProcess](processed, preProcessOptions);
     }
+    const _t2 = Date.now();
+    console.log(`[imageProcessor timing] phase1(solidBorderStrip)=${_t1-_t0}ms phase2(${preProcess})=${_t2-_t1}ms`);
   }
 
   // Phase 3: fit to TV
   const { width, height } = await sharp(processed).metadata();
   const { finalW, finalH } = computeTargetDimensions(width, height, orientation);
 
+  const _tCrop = Date.now();
   const engine = CROP_ENGINES[cropEngine] || CROP_ENGINES.sharp;
-  return engine(processed, width, height, finalW, finalH, cropEngineOptions);
+  const result = await engine(processed, width, height, finalW, finalH, cropEngineOptions);
+  const _tEnd = Date.now();
+  console.log(`[imageProcessor timing] phase3(${cropEngine} crop)=${_tEnd-_tCrop}ms total=${_tEnd-_t0}ms`);
+  return result;
 }
 
 // ── Schema (for UI) ───────────────────────────────────────────────────────────
@@ -854,6 +1035,7 @@ const IMAGE_PROCESSING_SCHEMA = {
 
 module.exports = {
   processWebSourceImage,
+  solidBorderStrip,
   computeTargetDimensions,
   CROP_ENGINES,
   PRE_PROCESSORS,
