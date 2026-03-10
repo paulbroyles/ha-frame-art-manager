@@ -719,30 +719,173 @@ async function meanProfilePreProcessor(buffer, {
     return passed ? crop : 0;
   }
 
+  // Per-column frame boundary scan for bevel-continuation zones.
+  //
+  // WHY PER-COLUMN: incrementalScan uses row means, which work well for uniform or
+  // wood-grain frames but fail for ornate frames (e.g. gold) whose internal luminance
+  // variation exceeds the consistency threshold before reaching the actual frame/painting
+  // boundary. Per-column analysis avoids this because:
+  //
+  //   1. "Last frame-side" detection: for each column, scan ALL rows in the zone and
+  //      find the LAST row that is on the frame side of the midpoint (closer in luminance
+  //      to the per-column edge reference than to interiorMean). Internal dark zones
+  //      within an ornate frame (carved crevices, bevels between molding elements) are
+  //      interior-side in isolation, but the frame material resumes after them — so the
+  //      last frame-side row correctly lands at the actual frame/painting boundary rather
+  //      than stopping at the first dark zone encountered.
+  //
+  //      Example: gold | crevice | gold | crevice | gold | DARK PAINTING
+  //               frame  interior  frame  interior  frame   interior (permanent)
+  //               last frame-side = last gold row before painting → correct boundary ✓
+  //
+  //   2. Percentile aggregation: frames are roughly (not strictly) horizontal. Individual
+  //      column boundaries vary by a few pixels due to slight frame tilt, ornamentation,
+  //      or paint partially covering the frame edge. The median (50th percentile) of all
+  //      column boundaries is stable against these outliers.
+  //
+  //   3. Runaway guard: columns where frame-like material extends to the end of the scan
+  //      zone (last frame-side row is within tailZone of the cap) are excluded — they
+  //      failed to find a clear boundary and would inflate the result.
+  //
+  //   4. Direction: yStep=+1 scans downward (top continuation), yStep=-1 scans upward
+  //      (bottom continuation). Returns the offset from startRow at which the frame
+  //      ends, for the caller to add to cropTop/cropBottom.
+  // minEdgeLum: skip columns whose per-column edge reference is below this luminance.
+  //
+  // adaptiveRef: when true, scan each column forward from startRow to find the first row
+  // where |lum - interiorMean| >= contrastThreshold before computing colEdgeMean. This
+  // is used by bevel continuation where startRow is still in the transition zone between
+  // the near-black outer bevel and the actual frame material (e.g. gold). Without adaptive
+  // ref, colEdgeMean is computed from the transition zone (lum 20–80), which sets
+  // edgeBrighter=false and misclassifies bright gold as interior-side. With adaptive ref,
+  // colEdgeMean is computed from the first solidly frame-material rows per column, so
+  // edgeBrighter is set correctly regardless of frame brightness.
+  //
+  // Columns where no clearly-frame row is found within refScanLimit rows fall back to
+  // refStartDr=0 (dark frame path: bevel rows as reference, edgeBrighter=false, works for
+  // dark wood frames on bright paintings).
+  function columnPercentileScan(startRow, maxCropN, yStep, label, minEdgeLum = 0, adaptiveRef = false) {
+    const refRows       = 5;
+    const refScanLimit  = 40; // max rows to search for adaptive reference per column
+    const columnStep    = 16;
+    const tailZone      = 10;
+    const pct           = 0.65;
+
+    const boundaries = [];
+    for (let x = 0; x < width; x += columnStep) {
+      // Determine per-column reference start row.
+      // When adaptiveRef=true, scan forward to find the first row in bright frame material
+      // (lum >= interiorMean + contrastThreshold). This places colEdgeMean in the solid
+      // gold zone so edgeBrighter=true, rather than in the dark transition zone where
+      // edgeBrighter=false misclassifies bright gold pixels as interior-side.
+      // If no bright row is found within refScanLimit, refStartDr stays 0 — this is the
+      // correct fallback for dark frames (bevel rows as reference, edgeBrighter=false).
+      let refStartDr = 0;
+      if (adaptiveRef) {
+        for (let dr = 0; dr < Math.min(maxCropN, refScanLimit); dr++) {
+          const y = startRow + yStep * dr;
+          if (y < 0 || y >= height) break;
+          if (pixelLum((y * width + x) * channels) >= interiorMean + contrastThreshold) {
+            refStartDr = dr;
+            break;
+          }
+        }
+      }
+
+      // Per-column reference mean from refRows rows starting at refStartDr.
+      let colEdgeMean = 0;
+      let refCount = 0;
+      for (let dr = refStartDr; dr < refStartDr + refRows; dr++) {
+        const y = startRow + yStep * dr;
+        if (y >= 0 && y < height) { colEdgeMean += pixelLum((y * width + x) * channels); refCount++; }
+      }
+      if (refCount === 0) continue;
+      colEdgeMean /= refCount;
+      if (colEdgeMean < minEdgeLum) continue;
+      if (Math.abs(colEdgeMean - interiorMean) <= contrastThreshold) continue;
+
+      const midPoint     = (colEdgeMean + interiorMean) / 2;
+      const edgeBrighter = colEdgeMean > interiorMean;
+
+      // Scan rows in zone; track the last row on the frame side.
+      // Stop updating once a sustained run of interior-side rows is seen: this
+      // tolerates short frame crevices without overshooting into painting content.
+      const maxInteriorRun = Math.max(8, Math.round(height * 0.006));
+      let lastFrameSide = refStartDr + refRows - 1; // reference rows are by definition frame-side
+      let interiorRunLen = 0;
+      for (let dr = refStartDr + refRows; dr < maxCropN; dr++) {
+        const y = startRow + yStep * dr;
+        if (y < 0 || y >= height) break;
+        const val = pixelLum((y * width + x) * channels);
+        if (edgeBrighter ? val >= midPoint : val <= midPoint) {
+          lastFrameSide = dr;
+          interiorRunLen = 0;
+        } else {
+          interiorRunLen++;
+          if (interiorRunLen >= maxInteriorRun) break;
+        }
+      }
+
+      // Runaway guard: frame-like material extended to the cap — no clear boundary found.
+      if (lastFrameSide >= maxCropN - tailZone) continue;
+
+      boundaries.push(lastFrameSide + 1); // crop starts after the last frame-side row
+    }
+
+    if (boundaries.length < 3) {
+      console.log(`[mean_profile] ${label}: column scan — only ${boundaries.length} column(s) gave a boundary (need ≥3)`);
+      return 0;
+    }
+    boundaries.sort((a, b) => a - b);
+    const crop = boundaries[Math.min(Math.floor(boundaries.length * pct), boundaries.length - 1)];
+    console.log(`[mean_profile] ${label}: column scan — ${boundaries.length} cols, range=[${boundaries[0]}..${boundaries[boundaries.length - 1]}], P${Math.round(pct * 100)}=${crop}px`);
+    return crop;
+  }
+
   // Top and bottom: scan using full-width row means.
   let cropTop    = incrementalScan(rowMeans, maxRows, 'top');
   let cropBottom = incrementalScan([...rowMeans].reverse(), maxRows, 'bottom');
 
-  // Bevel continuation: if the primary scan stopped early because a near-black outer bevel
-  // set refMean very low, continue scanning from the bevel end. The actual frame material
-  // (e.g. gold) starts just past the bevel, and the strong contrast between the frame and
-  // the dark background immediately inside the painting provides a clear stopping point —
-  // far more reliable than comparing to the global interiorMean.
+  // Bevel continuation: if the primary scan stopped because a near-black outer bevel set
+  // refMean very low, continue from the bevel end using per-column midpoint classification
+  // (columnPercentileScan) rather than incrementalScan. incrementalScan's consistency
+  // threshold fails for ornate frames (e.g. gold) whose internal luminance variation
+  // exceeds the threshold before reaching the actual frame/painting boundary. Column-
+  // level midpoint classification is robust to that variation; see function comment above.
   const bevelThreshold = 20;
   const initN = Math.min(5, Math.floor(maxRows / 2));
+  // cropTopForBand / cropBottomForBand: used for L/R band computation and T/B-backed
+  // estimate. These are set by the NON-adaptive bevel continuation pass (same ext as
+  // the stable "great progress" version), keeping the band boundaries stable regardless
+  // of how much the adaptive ref pass adds for the actual crop. Without this separation,
+  // the adaptive ref's larger cropTop shifts `estimate` and the band start, which changes
+  // refMean for the right ext scan by ~12 units and causes it to miss the frame boundary.
+  let cropTopForBand    = cropTop;
+  let cropBottomForBand = cropBottom;
   {
     const topRefMean = rowMeans.slice(0, initN).reduce((s, v) => s + v, 0) / initN;
     if (cropTop > 0 && topRefMean < bevelThreshold) {
-      const ext = incrementalScan(rowMeans.slice(cropTop), maxRows - cropTop, 'top-bevel-cont');
-      if (ext > 0) { console.log(`[mean_profile] top: bevel continuation +${ext}px → ${cropTop + ext}px total`); cropTop += ext; }
+      const maxBevelExt = Math.round(height * 0.12);
+      const scanN = Math.min(maxRows - cropTop, maxBevelExt);
+      // Pass 1 (no adaptiveRef): stable result used to anchor the L/R band.
+      const extSimple = columnPercentileScan(cropTop, scanN, +1, 'top-bevel-cont', bevelThreshold, false);
+      cropTopForBand = cropTop + extSimple;
+      // Pass 2 (adaptiveRef): finds the actual frame/painting boundary for the crop.
+      const ext = columnPercentileScan(cropTop, scanN, +1, 'top-bevel-cont-adaptive', bevelThreshold, true);
+      const bestExt = Math.max(extSimple, ext);
+      if (bestExt > 0) { console.log(`[mean_profile] top: bevel continuation simple=${extSimple}px adaptive=${ext}px → using ${bestExt}px → ${cropTop + bestExt}px total`); cropTop += bestExt; }
     }
   }
   {
-    const revMeans = [...rowMeans].reverse();
-    const botRefMean = revMeans.slice(0, initN).reduce((s, v) => s + v, 0) / initN;
+    const botRefMean = rowMeans.slice(height - initN).reduce((s, v) => s + v, 0) / initN;
     if (cropBottom > 0 && botRefMean < bevelThreshold) {
-      const ext = incrementalScan(revMeans.slice(cropBottom), maxRows - cropBottom, 'bottom-bevel-cont');
-      if (ext > 0) { console.log(`[mean_profile] bottom: bevel continuation +${ext}px → ${cropBottom + ext}px total`); cropBottom += ext; }
+      const maxBevelExt = Math.round(height * 0.12);
+      const scanN = Math.min(maxRows - cropBottom, maxBevelExt);
+      const extSimple = columnPercentileScan(height - 1 - cropBottom, scanN, -1, 'bottom-bevel-cont', bevelThreshold, false);
+      cropBottomForBand = cropBottom + extSimple;
+      const ext = columnPercentileScan(height - 1 - cropBottom, scanN, -1, 'bottom-bevel-cont-adaptive', bevelThreshold, true);
+      const bestExt = Math.max(extSimple, ext);
+      if (bestExt > 0) { console.log(`[mean_profile] bottom: bevel continuation simple=${extSimple}px adaptive=${ext}px → using ${bestExt}px → ${cropBottom + bestExt}px total`); cropBottom += bestExt; }
     }
   }
   const _tTB = Date.now();
@@ -754,11 +897,11 @@ async function meanProfilePreProcessor(buffer, {
   // positions and painting content at center positions — making col means discriminating.
   // Fall back to edge rows when no top/bottom frame was detected.
   const refRows = Math.max(3, Math.round(height * refFraction));
-  const topInner = cropTop    > 0
-    ? [cropTop,              Math.min(cropTop    + refRows, Math.floor(height / 2))]
+  const topInner = cropTopForBand    > 0
+    ? [cropTopForBand,              Math.min(cropTopForBand    + refRows, Math.floor(height / 2))]
     : [0,                    refRows];
-  const botInner = cropBottom > 0
-    ? [Math.max(height - cropBottom - refRows, Math.ceil(height / 2)), height - cropBottom]
+  const botInner = cropBottomForBand > 0
+    ? [Math.max(height - cropBottomForBand - refRows, Math.ceil(height / 2)), height - cropBottomForBand]
     : [height - refRows,     height];
   const cornerBands    = [topInner, botInner];
   // Use col median (not mean) for L/R detection: robust against isolated bright grain
@@ -834,7 +977,7 @@ async function meanProfilePreProcessor(buffer, {
   //   established from the mid-frame wood grain zone (median≈50), which clearly differs
   //   from the painting edge (median≈87+). The scan stops at the frame/painting boundary.
   if (cropTop > 0 && cropBottom > 0) {
-    const tbAvg = (cropTop + cropBottom) / 2;
+    const tbAvg = (cropTopForBand + cropBottomForBand) / 2;
     if (cropLeft < tbAvg / 2 || cropRight < tbAvg / 2) {
       const estimate = Math.round(tbAvg);
       const colMeansAll = Array.from({ length: width }, (_, x) => colMeanInBands(x, [[0, height]]));
