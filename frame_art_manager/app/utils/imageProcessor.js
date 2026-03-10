@@ -126,6 +126,15 @@ async function solidBorderStrip(buffer) {
     return Math.abs(bandSum / crop - interiorMean) > contrastThreshold ? crop : 0;
   }
 
+  // Diagnostic: log variance of first 3 rows and first 3 cols to help tune solidThreshold.
+  {
+    const r0 = rowStats(0), r1 = rowStats(1), r2 = rowStats(2);
+    const c0 = colStats(0), c1 = colStats(1), c2 = colStats(2);
+    console.log(`[solidBorderStrip] interiorMean=${interiorMean.toFixed(1)}, solidThreshold=${solidThreshold}`);
+    console.log(`[solidBorderStrip] row[0] mean=${r0.mean.toFixed(1)} var=${r0.variance.toFixed(0)}, row[1] mean=${r1.mean.toFixed(1)} var=${r1.variance.toFixed(0)}, row[2] mean=${r2.mean.toFixed(1)} var=${r2.variance.toFixed(0)}`);
+    console.log(`[solidBorderStrip] col[0] mean=${c0.mean.toFixed(1)} var=${c0.variance.toFixed(0)}, col[1] mean=${c1.mean.toFixed(1)} var=${c1.variance.toFixed(0)}, col[2] mean=${c2.mean.toFixed(1)} var=${c2.variance.toFixed(0)}`);
+  }
+
   const cropTop    = scanEdge(y => rowStats(y),                maxRows);
   const cropBottom = scanEdge(y => rowStats(height - 1 - y),   maxRows);
   const cropLeft   = scanEdge(x => colStats(x),                maxCols);
