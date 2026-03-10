@@ -704,7 +704,10 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
 
   if (preProcess != null) {
     // Phase 1 (automatic): strip solid-color borders before frame detection.
-    processed = await trimPreProcessor(processed);
+    // threshold=30 (vs. the standalone default of 10) catches near-black JPEG artifacts
+    // that a tighter threshold leaves behind, which would otherwise anchor Phase 2's
+    // incremental scan and prevent it from reaching the actual frame.
+    processed = await trimPreProcessor(processed, { threshold: 30 });
 
     // Phase 2 (user-selected): detect and remove decorative frames/borders.
     if (PRE_PROCESSORS[preProcess]) {
