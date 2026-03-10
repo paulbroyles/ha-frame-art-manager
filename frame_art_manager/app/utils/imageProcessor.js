@@ -530,12 +530,15 @@ async function meanProfilePreProcessor(buffer, {
   }
   const interiorMean = iSum / iN;
 
+  console.log(`[mean_profile] image ${width}×${height}, interiorMean=${interiorMean.toFixed(1)}, consistencyThreshold=${consistencyThreshold}, contrastThreshold=${contrastThreshold}`);
+
   // Scan values[] from index 0 inward. Extend while including the next value keeps
   // the running std dev < consistencyThreshold. Require a minimum band size (5) and
   // a contrast check against interiorMean. Returns crop count (0 = no crop).
-  function incrementalScan(values, maxN) {
+  function incrementalScan(values, maxN, label) {
     if (maxN < 5 || values.length < 5) return 0;
     let sum = values[0], sumSq = values[0] ** 2, n = 1, crop = 1;
+    let stopStdDev = 0, stopIdx = -1;
     for (let i = 1; i < Math.min(maxN, values.length); i++) {
       const v = values[i];
       const newN = n + 1, newSum = sum + v, newSumSq = sumSq + v * v;
@@ -545,17 +548,24 @@ async function meanProfilePreProcessor(buffer, {
         crop = i + 1;
         sum = newSum; sumSq = newSumSq; n = newN;
       } else {
+        stopStdDev = newStdDev; stopIdx = i;
         break;
       }
     }
-    if (crop < 5) return 0;
+    if (crop < 5) {
+      console.log(`[mean_profile] ${label}: scan stopped at ${crop} rows (need ≥5)${stopIdx >= 0 ? `, stdDev=${stopStdDev.toFixed(1)} at index ${stopIdx}` : ''}`);
+      return 0;
+    }
     const bandMean = sum / n;
-    return Math.abs(bandMean - interiorMean) > contrastThreshold ? crop : 0;
+    const contrast = Math.abs(bandMean - interiorMean);
+    const passed = contrast > contrastThreshold;
+    console.log(`[mean_profile] ${label}: crop=${crop}px, bandMean=${bandMean.toFixed(1)}, contrast=${contrast.toFixed(1)} (need >${contrastThreshold}), finalStdDev=${(Math.sqrt(Math.max(0, sumSq/n - (sum/n)**2))).toFixed(1)}${stopIdx >= 0 ? `, stopped at ${stopIdx} stdDev=${stopStdDev.toFixed(1)}` : ''} → ${passed ? 'CROP' : 'REJECTED (low contrast)'}`);
+    return passed ? crop : 0;
   }
 
   // Top and bottom: scan using full-width row means.
-  const cropTop    = incrementalScan(rowMeans, maxRows);
-  const cropBottom = incrementalScan([...rowMeans].reverse(), maxRows);
+  const cropTop    = incrementalScan(rowMeans, maxRows, 'top');
+  const cropBottom = incrementalScan([...rowMeans].reverse(), maxRows, 'bottom');
 
   // Left and right: col means restricted to rows at the INNER EDGE of the detected frame
   // bands, not the frame rows themselves. Frame rows are uniform across all columns (all
@@ -578,9 +588,10 @@ async function meanProfilePreProcessor(buffer, {
   const colMeansMin = cornerColMeans.reduce((a, v) => Math.min(a, v),  Infinity);
   const colMeansMax = cornerColMeans.reduce((a, v) => Math.max(a, v), -Infinity);
   const colMeansDiscriminating = (colMeansMax - colMeansMin) >= 5;
+  console.log(`[mean_profile] col means range=${( colMeansMax - colMeansMin).toFixed(1)} (bands top=${JSON.stringify(topInner)}, bot=${JSON.stringify(botInner)})${colMeansDiscriminating ? '' : ' → SKIPPING left/right (non-discriminating)'}`);
 
-  const cropLeft  = colMeansDiscriminating ? incrementalScan(cornerColMeans, maxCols) : 0;
-  const cropRight = colMeansDiscriminating ? incrementalScan([...cornerColMeans].reverse(), maxCols) : 0;
+  const cropLeft  = colMeansDiscriminating ? incrementalScan(cornerColMeans, maxCols, 'left') : 0;
+  const cropRight = colMeansDiscriminating ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right') : 0;
 
   if (cropTop === 0 && cropBottom === 0 && cropLeft === 0 && cropRight === 0) {
     return buffer;
