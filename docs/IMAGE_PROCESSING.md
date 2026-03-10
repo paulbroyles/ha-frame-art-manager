@@ -2,11 +2,11 @@
 
 Web source images go through a three-phase pipeline before being sent to the TV:
 
-1. **Background strip** (automatic) — remove solid-color borders using Sharp Trim
+1. **Background strip** (automatic) — remove solid-color borders using variance scan + contrast check (`solidBorderStrip`)
 2. **Frame detector** (user-selected) — detect and remove decorative frames or borders
 3. **Crop engine** — scale and crop to the TV's 4K aspect ratio (16:9 landscape or 9:16 portrait)
 
-Phase 1 runs automatically whenever a frame detector is configured (including "None"). Stripping the solid background first ensures Phase 2 algorithms see the actual frame material in the corners, rather than featureless solid pixels that corrupt column-mean and corner-variance sampling. Phases 2 and 3 are pluggable. The user selects them in the Web Sources → Settings tab.
+Phase 1 runs automatically whenever a frame detector is configured (including "None"). Stripping the solid background first ensures Phase 2 algorithms see the actual frame material in the corners, rather than featureless solid pixels that corrupt column-mean and corner-variance sampling. `solidBorderStrip` uses a per-row/column variance scan (not corner pixel matching) so it handles JPEG-artifact-noisy dark borders that Sharp Trim misses. Phases 2 and 3 are pluggable. The user selects them in the Web Sources → Settings tab.
 
 > **TODO (advanced mode)**: Allow the frame detector field to accept an ordered list of pre-processors, enabling fully custom pipelines (e.g., background strip → frame detection → inner matte removal). See `imageProcessor.js` for details.
 

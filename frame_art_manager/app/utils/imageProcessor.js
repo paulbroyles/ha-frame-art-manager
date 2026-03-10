@@ -50,6 +50,105 @@ const CROP_ENGINES = {
  */
 
 /**
+ * Solid-border strip — Phase 1 of the image processing pipeline.
+ *
+ * Strips solid or near-solid border rows/columns from each edge using a
+ * per-row/column luminance variance scan with a contrast check. Designed to
+ * clear flat backgrounds (black, white, gray) and JPEG-artifact-noisy dark
+ * borders before Phase 2 frame detection runs.
+ *
+ * Unlike Sharp Trim, this does not depend on the corner pixel color, so it
+ * handles JPEG noise in what visually looks like a solid black border.
+ *
+ * Algorithm per edge:
+ *   1. Scan inward: extend the crop while per-row (or per-col) luminance
+ *      variance is below solidThreshold. Stop at the first high-variance
+ *      row/col (frame or painting content).
+ *   2. Contrast check: the scanned band's mean luminance must differ from
+ *      the center interior by more than contrastThreshold. Guards against
+ *      falsely stripping dark or light painting edges.
+ */
+async function solidBorderStrip(buffer) {
+  const { data, info } = await sharp(buffer).raw().toBuffer({ resolveWithObject: true });
+  const { width, height, channels } = info;
+
+  function pixelLum(b) {
+    return 0.299 * data[b] + 0.587 * data[b + 1] + 0.114 * data[b + 2];
+  }
+
+  function rowStats(y) {
+    let sum = 0, sumSq = 0;
+    for (let x = 0; x < width; x++) {
+      const v = pixelLum((y * width + x) * channels);
+      sum += v; sumSq += v * v;
+    }
+    const mean = sum / width;
+    return { mean, variance: sumSq / width - mean * mean };
+  }
+
+  function colStats(x) {
+    let sum = 0, sumSq = 0;
+    for (let y = 0; y < height; y++) {
+      const v = pixelLum((y * width + x) * channels);
+      sum += v; sumSq += v * v;
+    }
+    const mean = sum / height;
+    return { mean, variance: sumSq / height - mean * mean };
+  }
+
+  // Interior reference: center 50% block.
+  let iSum = 0, iN = 0;
+  const iy0 = Math.round(height * 0.25), iy1 = Math.round(height * 0.75);
+  const ix0 = Math.round(width  * 0.25), ix1 = Math.round(width  * 0.75);
+  for (let y = iy0; y < iy1; y++) {
+    for (let x = ix0; x < ix1; x++) { iSum += pixelLum((y * width + x) * channels); iN++; }
+  }
+  const interiorMean = iSum / iN;
+
+  // Max per-row/col variance to qualify as "solid". Solid black ≈ 0–20;
+  // JPEG-noisy near-black ≈ 20–150; lightly textured frames ≈ 500+.
+  const solidThreshold    = 150;
+  // Min luminance diff between detected band and interior to apply the crop.
+  const contrastThreshold = 20;
+  const maxCropFraction   = 0.25;
+  const maxRows = Math.floor(height * maxCropFraction);
+  const maxCols = Math.floor(width  * maxCropFraction);
+
+  // Scan from one edge inward using a stats function indexed 0 = outermost.
+  function scanEdge(statsFn, maxN) {
+    let crop = 0, bandSum = 0;
+    for (let i = 0; i < maxN; i++) {
+      const { mean, variance } = statsFn(i);
+      if (variance < solidThreshold) { crop = i + 1; bandSum += mean; }
+      else break;
+    }
+    if (crop === 0) return 0;
+    return Math.abs(bandSum / crop - interiorMean) > contrastThreshold ? crop : 0;
+  }
+
+  const cropTop    = scanEdge(y => rowStats(y),                maxRows);
+  const cropBottom = scanEdge(y => rowStats(height - 1 - y),   maxRows);
+  const cropLeft   = scanEdge(x => colStats(x),                maxCols);
+  const cropRight  = scanEdge(x => colStats(width  - 1 - x),   maxCols);
+
+  if (cropTop === 0 && cropBottom === 0 && cropLeft === 0 && cropRight === 0) {
+    return buffer;
+  }
+
+  const extractLeft   = cropLeft;
+  const extractTop    = cropTop;
+  const extractWidth  = width  - cropLeft - cropRight;
+  const extractHeight = height - cropTop  - cropBottom;
+
+  if (extractWidth <= 0 || extractHeight <= 0) return buffer;
+
+  console.log(`[solidBorderStrip] removing top=${cropTop}px, bottom=${cropBottom}px, left=${cropLeft}px, right=${cropRight}px (interiorMean=${interiorMean.toFixed(1)})`);
+  return sharp(buffer)
+    .extract({ left: extractLeft, top: extractTop, width: extractWidth, height: extractHeight })
+    .toBuffer();
+}
+
+/**
  * Sharp Trim pre-processor.
  * Removes pixels along the image edges that match the corner pixel color within
  * a tolerance threshold. Works best on solid uniform borders (e.g., matte black).
@@ -675,10 +774,12 @@ function computeTargetDimensions(inputW, inputH, orientation) {
 /**
  * Process a web source image for display on the TV.
  *
- * Phase 1 (automatic): strip solid-color borders (Sharp Trim, threshold 10). This runs
- * whenever a pre-processor is configured, even 'none'. Removing the solid background first
- * lets Phase 2 algorithms see the actual frame in the corners rather than featureless
- * background pixels that confuse column-mean and corner-variance sampling.
+ * Phase 1 (automatic): strip solid-color borders (solidBorderStrip — variance scan +
+ * contrast check). This runs whenever a pre-processor is configured, even 'none'.
+ * Removing the solid background first lets Phase 2 algorithms see the actual frame
+ * in the corners rather than featureless background pixels that confuse column-mean
+ * and corner-variance sampling. Unlike Sharp Trim, solidBorderStrip does not depend
+ * on the corner pixel color, so it handles JPEG-artifact-noisy dark borders correctly.
  *
  * Phase 2 (user-selected): detect and remove decorative frames/borders.
  *
@@ -704,10 +805,7 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
 
   if (preProcess != null) {
     // Phase 1 (automatic): strip solid-color borders before frame detection.
-    // threshold=30 (vs. the standalone default of 10) catches near-black JPEG artifacts
-    // that a tighter threshold leaves behind, which would otherwise anchor Phase 2's
-    // incremental scan and prevent it from reaching the actual frame.
-    processed = await trimPreProcessor(processed, { threshold: 30 });
+    processed = await solidBorderStrip(processed);
 
     // Phase 2 (user-selected): detect and remove decorative frames/borders.
     if (PRE_PROCESSORS[preProcess]) {
