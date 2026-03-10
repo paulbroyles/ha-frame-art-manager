@@ -627,39 +627,93 @@ router.delete('/cache/:deviceId', async (req, res) => {
   }
 });
 
+/**
+ * Resolve a specific image request (URL or ID) to a source ID and fetch result.
+ * Supports:
+ *   - Met Museum collection URL (metmuseum.org/art/collection/search/<id>)
+ *   - Numeric string (assumed to be a Met Museum object ID)
+ *   - Any other HTTP(S) URL (downloaded directly; metadata is minimal)
+ *
+ * Returns { chosenSourceId, imageBuffer, contentType, artMetadata } or throws.
+ */
+async function fetchSpecificImage(specificImage) {
+  const trimmed = specificImage.trim();
+
+  // Ask each source module if it can handle this identifier. Modules are checked
+  // in SOURCE_MODULES definition order, so more-specific patterns (e.g. google_arts
+  // before google_art_wallpaper for the shared artsandculture.google.com domain) win.
+  for (const [sourceId, mod] of Object.entries(SOURCE_MODULES)) {
+    if (mod.canHandleIdentifier?.(trimmed)) {
+      const result = await mod.fetchByIdentifier(trimmed);
+      return { chosenSourceId: sourceId, ...result, artMetadata: result.metadata };
+    }
+  }
+
+  // Fallback: arbitrary HTTP(S) URL → download directly, no source-specific processing.
+  if (/^https?:\/\//i.test(trimmed)) {
+    const imageResponse = await axios.get(trimmed, { responseType: 'arraybuffer', timeout: 30000 });
+    const imageBuffer = Buffer.from(imageResponse.data);
+    const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
+    return {
+      chosenSourceId: null,
+      imageBuffer,
+      contentType,
+      artMetadata: { artworkUrl: trimmed, source: 'Direct URL' },
+    };
+  }
+
+  throw new Error(`Cannot interpret "${specificImage}" as a known source identifier or image URL`);
+}
+
 // POST /api/web-sources/test-fetch
 // Fetch a test image from an enabled web source without sending it to any TV.
 // Stores the result in webSources.testCache (same structure as perTvCache entries).
 //
-// Body: { tvOrientation?: 'landscape'|'portrait' }
+// Body: { tvOrientation?: 'landscape'|'portrait', specificImage?: string }
 // tvOrientation is used when aspectRatioFilter is 'match_tv'. Pass the orientation
 // of the TV being simulated. If omitted and filter is 'match_tv', falls back to 'all'.
+// specificImage is a Met Museum object ID, Met Museum collection URL, or any image URL.
 //
 // TODO (docs/ROADMAP.md): Consider adding "virtual TV" support so users can test
 // portrait artwork without a portrait-mounted physical TV.
 router.post('/test-fetch', async (req, res) => {
   try {
-    const { tvOrientation } = req.body || {};
+    const { tvOrientation, specificImage } = req.body || {};
     const webSources = await readWebSourcesConfig(req.frameArtPath);
     const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
 
-    const enabledSources = Object.entries(webSources.sources)
-      .filter(([id, s]) => s.enabled && isSourceCompatible(id, aspectRatio))
-      .map(([id]) => id);
-    if (enabledSources.length === 0) {
-      return res.status(400).json({
-        error: 'No web sources are enabled and compatible with the current orientation filter. Enable at least one compatible source in Web Sources settings.',
-      });
-    }
-    const chosenSourceId = enabledSources[Math.floor(Math.random() * enabledSources.length)];
+    let chosenSourceId, imageBuffer, contentType, artMetadata;
 
-    const fetcher = SOURCE_FETCHERS[chosenSourceId];
-    if (!fetcher) {
-      return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
-    }
+    if (specificImage && specificImage.trim()) {
+      // Fetch a specific image rather than a random one from an enabled source.
+      ({ chosenSourceId, imageBuffer, contentType, artMetadata } = await fetchSpecificImage(specificImage));
+      // If source could not be determined (direct URL), fall back to first enabled source for
+      // processing pipeline metadata (alreadyProcessed flag, effectiveMapping).
+      if (!chosenSourceId) {
+        const enabledSources = Object.entries(webSources.sources)
+          .filter(([id, s]) => s.enabled)
+          .map(([id]) => id);
+        chosenSourceId = enabledSources[0] || Object.keys(SOURCE_MODULES)[0];
+      }
+    } else {
+      const enabledSources = Object.entries(webSources.sources)
+        .filter(([id, s]) => s.enabled && isSourceCompatible(id, aspectRatio))
+        .map(([id]) => id);
+      if (enabledSources.length === 0) {
+        return res.status(400).json({
+          error: 'No web sources are enabled and compatible with the current orientation filter. Enable at least one compatible source in Web Sources settings.',
+        });
+      }
+      chosenSourceId = enabledSources[Math.floor(Math.random() * enabledSources.length)];
 
-    const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
-    const { imageBuffer, contentType, metadata: artMetadata } = await fetcher(fetcherOpts.mediaFilter, { aspectRatio });
+      const fetcher = SOURCE_FETCHERS[chosenSourceId];
+      if (!fetcher) {
+        return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
+      }
+
+      const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
+      ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(fetcherOpts.mediaFilter, { aspectRatio }));
+    }
 
     const orientation = tvOrientation || 'landscape';
     const { preProcessor, cropEngine, sharpStrategy } = webSources.imageProcessing;

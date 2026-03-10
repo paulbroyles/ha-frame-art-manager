@@ -229,4 +229,71 @@ function buildFetcherOptions(settings) {
   return classificationFilter.length > 0 ? { mediaFilter: classificationFilter } : {};
 }
 
-module.exports = { fetchRandomArtwork, MEDIUM_TYPES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };
+/**
+ * Fetch a specific artwork by Met Museum object ID.
+ * Skips the random selection loop and retrieves the exact object.
+ * Throws if the object is not public domain, has no image, or download fails.
+ *
+ * @param {number|string} objectId - The numeric Met Museum object ID
+ * @returns {{ imageBuffer, contentType, metadata }}
+ */
+async function fetchByObjectId(objectId) {
+  let obj;
+  try {
+    const response = await axios.get(`${BASE_URL}/objects/${objectId}`, { timeout: 15000 });
+    obj = response.data;
+  } catch (err) {
+    throw new Error(`Failed to fetch Met Museum object ${objectId}: ${err.message}`);
+  }
+  if (!obj.isPublicDomain) throw new Error(`Object ${objectId} is not public domain`);
+  if (!obj.primaryImage) throw new Error(`Object ${objectId} has no primary image`);
+
+  let imageBuffer, contentType;
+  try {
+    const imageResponse = await axios.get(obj.primaryImage, { responseType: 'arraybuffer', timeout: 30000 });
+    imageBuffer = Buffer.from(imageResponse.data);
+    contentType = imageResponse.headers['content-type'] || 'image/jpeg';
+  } catch (err) {
+    throw new Error(`Failed to download image for Met Museum object ${objectId}: ${err.message}`);
+  }
+
+  return {
+    imageBuffer,
+    contentType,
+    metadata: {
+      title: obj.title || null,
+      creator: obj.artistDisplayName || null,
+      medium: obj.medium || null,
+      dateCreated: obj.objectDate || null,
+      artworkUrl: obj.objectURL || null,
+      source: 'The Metropolitan Museum of Art',
+    },
+  };
+}
+
+/**
+ * Returns true if this source can fetch the given identifier.
+ * Accepts Met Museum collection URLs and bare numeric object IDs.
+ */
+function canHandleIdentifier(identifier) {
+  const t = identifier.trim();
+  return /metmuseum\.org\/art\/collection\/search\/\d+/i.test(t) || /^\d+$/.test(t);
+}
+
+// fetchByObjectId is the canonical specific-fetch function for this source.
+// It accepts a numeric ID (from canHandleIdentifier) or a Met Museum URL
+// (caller should extract the ID first, or pass the full URL — the ID is parsed here).
+const _fetchByObjectIdOriginal = fetchByObjectId;
+
+/**
+ * Fetch a specific artwork by Met Museum object ID or collection URL.
+ * Delegates to fetchByObjectId after extracting the ID from a URL if needed.
+ */
+async function fetchByIdentifier(identifier) {
+  const t = identifier.trim();
+  const urlMatch = t.match(/metmuseum\.org\/art\/collection\/search\/(\d+)/i);
+  const objectId = urlMatch ? urlMatch[1] : t;
+  return _fetchByObjectIdOriginal(objectId);
+}
+
+module.exports = { fetchRandomArtwork, fetchByObjectId, fetchByIdentifier, canHandleIdentifier, MEDIUM_TYPES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };

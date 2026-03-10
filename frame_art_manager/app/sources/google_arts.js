@@ -731,4 +731,121 @@ async function clearCookies() {
   console.log('[google_arts] Cookie jar cleared manually');
 }
 
-module.exports = { fetchRandomArtwork, clearCookies, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };
+/**
+ * Fetch a specific artwork by Google Arts & Culture asset ID or URL.
+ *
+ * Identifier formats accepted:
+ *   - Full artwork URL: https://artsandculture.google.com/asset/<slug>/<assetId>
+ *   - Bare asset ID (the last path segment of a Google Arts URL, e.g. "xAHC42GKKiZ8pQ")
+ *
+ * The /api/asset endpoint is called once to retrieve both the cobject (which contains
+ * the image base URL via extractArtworks) and the stella.av structured fields (extended
+ * metadata). If no cobject is found in the response, imageBase is attempted from ap[1]
+ * as a fallback (some response variants embed the image URL there).
+ *
+ * @param {string} identifier - Google Arts URL or bare asset ID
+ * @returns {{ imageBuffer, contentType, metadata }}
+ * @throws {Error} if the identifier cannot be parsed, the asset is inaccessible, or download fails.
+ */
+async function fetchByIdentifier(identifier) {
+  await seedCookies();
+
+  // Parse asset ID from /asset/<slug>/<id> path, or accept a bare ID directly.
+  let assetId;
+  const assetPathMatch = identifier.match(/\/asset\/[^/?#]+\/([^/?#]+)/i);
+  if (assetPathMatch) {
+    assetId = assetPathMatch[1];
+  } else if (/^[A-Za-z0-9_-]{6,}$/.test(identifier.trim())) {
+    assetId = identifier.trim();
+  } else {
+    throw new Error(`Cannot interpret "${identifier}" as a Google Arts asset ID or URL`);
+  }
+
+  let parsed;
+  try {
+    const response = await cookieClient.get(`${BASE_URL}/api/asset`, {
+      params: { assetId, hl: 'en', rt: 'j' },
+      headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
+      timeout: 15000,
+      responseType: 'text',
+    });
+    parsed = parseApiResponse(response.data);
+  } catch (err) {
+    throw new Error(`Failed to fetch Google Arts asset ${assetId}: ${err.message}`);
+  }
+
+  // Try to find the artwork's cobject in the response (gives imageBase, title, creator, color).
+  const artworks = extractArtworks(parsed);
+  const cobject = artworks[0] || null;
+
+  // Parse stella.ap / stella.av for extended metadata and title/creator fallbacks.
+  const ap = parsed?.[0]?.[0];
+  let extendedDetails = {};
+  if (Array.isArray(ap) && ap[0] === 'stella.ap') {
+    const av = ap[2];
+    if (Array.isArray(av) && av[0] === 'stella.av') {
+      const structured = parseStructuredFields(av[12]);
+      const rawDesc = Array.isArray(av[5]) ? av[5][1] : null;
+      extendedDetails = {
+        dateCreated:        av[3] || structured['Date Created'] || null,
+        medium:             structured['Type'] || null,
+        creatorNationality: structured['Creator Nationality'] || null,
+        dimensions:         structured['Physical Dimensions'] || null,
+        description:        typeof rawDesc === 'string' ? rawDesc.replace(/<[^>]+>/g, '').trim() || null : null,
+        title:              structured['Title'] || null,
+        creator:            structured['Creator'] || null,
+        repository:         structured['Repository'] || null,
+      };
+    }
+  }
+
+  // Determine image base URL: prefer cobject (reliable), fall back to ap[1].
+  let imageBase = cobject?.imageBase || null;
+  if (!imageBase && Array.isArray(ap) && ap[0] === 'stella.ap') {
+    const candidate = ap[1];
+    if (typeof candidate === 'string' && (candidate.includes('googleusercontent') || candidate.startsWith('//'))) {
+      imageBase = candidate.startsWith('//') ? `https:${candidate}` : candidate;
+    }
+  }
+  if (!imageBase) {
+    throw new Error(`Could not find image URL for Google Arts asset ${assetId}. The asset may not be publicly accessible or the API response format may have changed.`);
+  }
+
+  const imageUrl = `${imageBase}=w3840-h2160-c`;
+  const artworkUrl = cobject ? `${BASE_URL}${cobject.link}` : `${BASE_URL}/asset/-/${assetId}`;
+
+  const imageResponse = await axios.get(imageUrl, {
+    responseType: 'arraybuffer',
+    headers: HTTP_HEADERS,
+    timeout: 30000,
+  }).catch(err => { throw new Error(`Failed to download Google Arts image: ${err.message}`); });
+
+  return {
+    imageBuffer: Buffer.from(imageResponse.data),
+    contentType: imageResponse.headers['content-type'] || 'image/jpeg',
+    metadata: {
+      title:              cobject?.title || extendedDetails.title || null,
+      creator:            cobject?.creator || extendedDetails.creator || null,
+      repository:         cobject?.repository || extendedDetails.repository || null,
+      dateCreated:        extendedDetails.dateCreated || null,
+      medium:             extendedDetails.medium || null,
+      creatorNationality: extendedDetails.creatorNationality || null,
+      dimensions:         extendedDetails.dimensions || null,
+      description:        extendedDetails.description || null,
+      color:              cobject?.color || null,
+      artworkUrl,
+      source: 'Google Arts & Culture',
+    },
+  };
+}
+
+/**
+ * Returns true if this source can fetch the given identifier.
+ * Accepts Google Arts & Culture asset URLs (artsandculture.google.com/asset/...).
+ * Note: checked before google_art_wallpaper in SOURCE_MODULES to ensure specificity.
+ */
+function canHandleIdentifier(identifier) {
+  return /artsandculture\.google\.com\/asset\//i.test(identifier.trim());
+}
+
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, clearCookies, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };

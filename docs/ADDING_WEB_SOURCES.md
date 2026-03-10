@@ -16,10 +16,11 @@ Source modules are responsible only for fetching and filtering.
 ## Checklist
 
 1. Create `frame_art_manager/app/sources/<source_id>.js` following the contract below.
-2. Add the module to `SOURCE_MODULES` in `web_sources.js`.
+2. Add the module to `SOURCE_MODULES` in `web_sources.js` (order matters — more-specific `canHandleIdentifier` patterns should come first).
 3. Add a `BUILTIN_SOURCES` entry in `web_sources.js`.
 4. If the source has configurable media categories, export `settingsSchema` and `buildFetcherOptions`.
-5. Create `docs/art_sources/<SOURCE>.md` documenting the external API, selection strategy, and any limitations.
+5. If the source has stable per-artwork identifiers, export `fetchByIdentifier` and `canHandleIdentifier`.
+6. Create `docs/art_sources/<SOURCE>.md` documenting the external API, selection strategy, and any limitations.
 
 ---
 
@@ -93,6 +94,38 @@ const defaultMapping = {
 ```
 
 Both must be included in `module.exports`.
+
+### Recommended Exports: fetchByIdentifier and canHandleIdentifier
+
+Sources should export these two functions to support fetching a specific artwork by URL or ID
+from the Test pane. Implement them whenever the source has a stable per-artwork identifier
+(object ID, URL slug, etc.).
+
+```js
+/**
+ * Returns true if this source can fetch the given identifier string.
+ * Called by the route layer in declaration order; the first match wins.
+ * Keep patterns specific enough to avoid false positives with other sources.
+ */
+function canHandleIdentifier(identifier) {
+  // Example: accept numeric IDs and canonical collection URLs
+  const t = identifier.trim();
+  return /example\.org\/collection\/\d+/i.test(t) || /^\d+$/.test(t);
+}
+
+/**
+ * Fetch a specific artwork by URL or source-specific ID.
+ * Should return the same shape as fetchRandomArtwork.
+ * Throw a descriptive Error if the identifier is inaccessible or the download fails.
+ */
+async function fetchByIdentifier(identifier) {
+  // Parse the ID, call source API, download image, return { imageBuffer, contentType, metadata }
+}
+```
+
+If the source has no stable per-artwork identifier (e.g. identifiers are opaque or ephemeral),
+omit these exports. The Test pane will still work via `fetchRandomArtwork`; the specific-image
+field will simply not recognize this source's URLs.
 
 ### Optional Exports
 

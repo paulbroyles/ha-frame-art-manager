@@ -14631,6 +14631,7 @@ let webSourceMetadata = {};        // Cached per-source { fields, defaultMapping
 let webSourceSettingsSourceId = null; // Which source is currently open in the settings modal
 let webSourceImageProcessingSchema = {}; // Cached imageProcessingSchema from GET /config
 let webSourceTestOrientation = 'landscape'; // Simulated TV orientation for test fetches
+let webSourceSpecificImage = ''; // Optional specific image URL or ID for test fetches
 
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
 
@@ -15422,7 +15423,7 @@ function renderWebSourcesTestSection() {
 
   const testCache = webSourcesConfig?.testCache || null;
 
-  let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
+  let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
     <button type="button" id="web-source-test-fetch-btn" class="btn-secondary btn-small">Fetch Test Image</button>
     ${testCache ? `<button type="button" id="web-source-test-reprocess-btn" class="btn-secondary btn-small">Reprocess</button>` : ''}
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;">
@@ -15434,6 +15435,11 @@ function renderWebSourcesTestSection() {
         <input type="radio" name="ws-test-orientation" value="portrait" ${webSourceTestOrientation === 'portrait' ? 'checked' : ''}> Portrait
       </label>
     </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+    <input type="text" id="web-source-specific-image" placeholder="Specific image: Met Museum ID, URL, or direct image URL (optional)"
+           style="flex:1;min-width:0;padding:5px 8px;font-size:13px;border:1px solid var(--border-color,#ddd);border-radius:4px;background:var(--input-bg,#fff);color:var(--text-primary,#333);"
+           value="${escapeHtml(webSourceSpecificImage || '')}">
   </div>`;
 
   if (testCache) {
@@ -15518,6 +15524,9 @@ function renderWebSourcesTestSection() {
       if (radio.checked) webSourceTestOrientation = radio.value;
     });
   });
+  document.getElementById('web-source-specific-image')?.addEventListener('input', (e) => {
+    webSourceSpecificImage = e.target.value;
+  });
 }
 
 async function fetchTestWebSource() {
@@ -15528,7 +15537,7 @@ async function fetchTestWebSource() {
     const response = await fetch(`${API_BASE}/web-sources/test-fetch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tvOrientation: webSourceTestOrientation }),
+      body: JSON.stringify({ tvOrientation: webSourceTestOrientation, specificImage: webSourceSpecificImage || undefined }),
     });
     const data = await response.json();
     if (!data.success) throw new Error(data.error || 'Failed to fetch test image');
