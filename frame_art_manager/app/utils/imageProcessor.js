@@ -722,6 +722,29 @@ async function meanProfilePreProcessor(buffer, {
   // Top and bottom: scan using full-width row means.
   let cropTop    = incrementalScan(rowMeans, maxRows, 'top');
   let cropBottom = incrementalScan([...rowMeans].reverse(), maxRows, 'bottom');
+
+  // Bevel continuation: if the primary scan stopped early because a near-black outer bevel
+  // set refMean very low, continue scanning from the bevel end. The actual frame material
+  // (e.g. gold) starts just past the bevel, and the strong contrast between the frame and
+  // the dark background immediately inside the painting provides a clear stopping point —
+  // far more reliable than comparing to the global interiorMean.
+  const bevelThreshold = 20;
+  const initN = Math.min(5, Math.floor(maxRows / 2));
+  {
+    const topRefMean = rowMeans.slice(0, initN).reduce((s, v) => s + v, 0) / initN;
+    if (cropTop > 0 && topRefMean < bevelThreshold) {
+      const ext = incrementalScan(rowMeans.slice(cropTop), maxRows - cropTop, 'top-bevel-cont');
+      if (ext > 0) { console.log(`[mean_profile] top: bevel continuation +${ext}px → ${cropTop + ext}px total`); cropTop += ext; }
+    }
+  }
+  {
+    const revMeans = [...rowMeans].reverse();
+    const botRefMean = revMeans.slice(0, initN).reduce((s, v) => s + v, 0) / initN;
+    if (cropBottom > 0 && botRefMean < bevelThreshold) {
+      const ext = incrementalScan(revMeans.slice(cropBottom), maxRows - cropBottom, 'bottom-bevel-cont');
+      if (ext > 0) { console.log(`[mean_profile] bottom: bevel continuation +${ext}px → ${cropBottom + ext}px total`); cropBottom += ext; }
+    }
+  }
   const _tTB = Date.now();
 
   // Left and right: col means restricted to rows at the INNER EDGE of the detected frame
@@ -752,22 +775,6 @@ async function meanProfilePreProcessor(buffer, {
 
   let cropLeft  = colMeansDiscriminating ? incrementalScan(cornerColMeans, maxCols, 'left') : 0;
   let cropRight = colMeansDiscriminating ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right') : 0;
-
-  // Symmetry guard: frame borders should be roughly comparable in thickness across all
-  // four edges. Use the median of all four values as a reference; reject any edge whose
-  // crop is more than 4× the median (catches cases where one edge runs far into the
-  // painting while the others correctly detect nothing or a modest border).
-  {
-    const crops = [cropTop, cropBottom, cropLeft, cropRight].sort((a, b) => a - b);
-    const median = (crops[1] + crops[2]) / 2;
-    if (median > 0) {
-      const maxAllowed = median * 4;
-      if (cropTop    > maxAllowed) { console.log(`[mean_profile] top symmetry-rejected: ${cropTop}px > 4×median(${median.toFixed(0)})`);    cropTop    = 0; }
-      if (cropBottom > maxAllowed) { console.log(`[mean_profile] bottom symmetry-rejected: ${cropBottom}px > 4×median(${median.toFixed(0)})`); cropBottom = 0; }
-      if (cropLeft   > maxAllowed) { console.log(`[mean_profile] left symmetry-rejected: ${cropLeft}px > 4×median(${median.toFixed(0)})`);   cropLeft   = 0; }
-      if (cropRight  > maxAllowed) { console.log(`[mean_profile] right symmetry-rejected: ${cropRight}px > 4×median(${median.toFixed(0)})`);  cropRight  = 0; }
-    }
-  }
 
   // Cross-edge inference: if a parallel edge pair is detected but the perpendicular pair
   // is not (e.g. L and R detected but T and B = 0), infer the missing pair using the
@@ -867,6 +874,21 @@ async function meanProfilePreProcessor(buffer, {
         const inferred = inferEdge(estimate, n => Array.from({ length: n }, (_, i) => restrictedRowMean(height - 1 - i, cropLeft, cropRight)), 'bottom (L/R-backed)');
         if (inferred > cropBottom) { console.log(`[mean_profile] bottom: ${cropBottom}px → ${inferred}px (L/R-backed)`); cropBottom = inferred; }
       }
+    }
+  }
+
+  // Symmetry guard: applied after all inferences so it sees corrected values. Rejects any
+  // edge crop more than 4× the median of all four — catches runaway false detections that
+  // survive inference (e.g. one edge scanning deep into the painting while others are 0).
+  {
+    const crops = [cropTop, cropBottom, cropLeft, cropRight].sort((a, b) => a - b);
+    const median = (crops[1] + crops[2]) / 2;
+    if (median > 0) {
+      const maxAllowed = median * 4;
+      if (cropTop    > maxAllowed) { console.log(`[mean_profile] top symmetry-rejected: ${cropTop}px > 4×median(${median.toFixed(0)})`);    cropTop    = 0; }
+      if (cropBottom > maxAllowed) { console.log(`[mean_profile] bottom symmetry-rejected: ${cropBottom}px > 4×median(${median.toFixed(0)})`); cropBottom = 0; }
+      if (cropLeft   > maxAllowed) { console.log(`[mean_profile] left symmetry-rejected: ${cropLeft}px > 4×median(${median.toFixed(0)})`);   cropLeft   = 0; }
+      if (cropRight  > maxAllowed) { console.log(`[mean_profile] right symmetry-rejected: ${cropRight}px > 4×median(${median.toFixed(0)})`);  cropRight  = 0; }
     }
   }
 
