@@ -31,6 +31,11 @@ const sharp = require('sharp');
     ortObj.env.wasm.numThreads = 1;
     globalThis[ORT_SYMBOL] = ortObj;
     console.log('[imageProcessor] pre-loaded onnxruntime-web into globalThis[ORT_SYMBOL], wasmPaths:', wasmDistDir);
+
+    // Also stash sharp in globalThis so Patch 3 in transformers.web.js can retrieve it.
+    // transformers.web.js is ESM ("type":"module"), so require() is unavailable inside
+    // webpack module factories. Using globalThis is the only synchronous bridge.
+    globalThis.__nativeSharp = sharp;
   } catch (e) {
     console.warn('[imageProcessor] Could not pre-load onnxruntime-web:', e.message);
   }
