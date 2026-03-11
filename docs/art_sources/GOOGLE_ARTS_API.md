@@ -419,13 +419,18 @@ https:{cobject[3]}=<size_params>
 
 | Format | Description |
 |--------|-------------|
-| `=w3840-h2160-c` | 3840×2160, center-cropped (used in this project) |
-| `=w1920-h1080-c` | 1920×1080, center-cropped |
+| `=w4800` | Width 4800, height auto (aspect preserved) |
+| `=h2700` | Height 2700, width auto (aspect preserved) |
+| `=w3840-h2160` | Fit within 3840×2160, aspect preserved (no crop) |
+| `=w3840-h2160-c` | 3840×2160, center-cropped to exact dimensions |
 | `=s800` | 800px on longest side, aspect preserved |
-| `=w800-h600` | fit within 800×600, aspect preserved |
-| `=w800-h600-c` | 800×600, center-cropped |
 
-The image server (`lh3.googleusercontent.com`) accepts arbitrary dimensions. Appending `-c` enables center-cropping to the exact requested dimensions.
+The image server (`lh3.googleusercontent.com`) accepts arbitrary dimensions. Omitting `-c` returns the image at its original aspect ratio, scaled to fit within the requested bounds. Appending `-c` crops to the exact requested dimensions.
+
+**How this project downloads images**: Original aspect ratio is preserved (no `-c`). The download size is chosen based on `cobject[10][1]` (the artwork's aspect ratio) so the cover-crop anchor dimension is 25% above 4K resolution — enough for the frame-removal pipeline to trim a frame and still produce a native 4K result:
+- Image wider than 16:9 → `=h2700` (height anchor: 2160 × 1.25)
+- Image narrower than or equal to 16:9 → `=w4800` (width anchor: 3840 × 1.25)
+- Aspect ratio unknown → `=w4800` (safe default)
 
 ---
 

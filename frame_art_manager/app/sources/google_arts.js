@@ -332,6 +332,30 @@ function buildPtToken(offset) {
 
 const BASE_URL = 'https://artsandculture.google.com';
 
+// Download dimensions: 25% above 4K in the cover-crop anchor dimension so frame
+// removal can trim up to ~20% per side and still leave a native-4K image.
+// No -c suffix: Google preserves the original aspect ratio (fit-within, no crop).
+//   =h2700  (2160 × 1.25) — used when image is wider than 16:9 (height is anchor)
+//   =w4800  (3840 × 1.25) — used when image is narrower than 16:9 (width is anchor)
+const LANDSCAPE_RATIO = 16 / 9;
+
+/**
+ * Build a Google image-serving URL that downloads at original aspect ratio with
+ * enough resolution for the processing pipeline to cover-crop to native 4K after
+ * frame removal.
+ *
+ * @param {string} imageBase - Image base URL (no size suffix)
+ * @param {number|null} aspectRatio - width/height (from cobject metadata), or null if unknown
+ */
+function buildDownloadUrl(imageBase, aspectRatio) {
+  if (aspectRatio !== null && aspectRatio > LANDSCAPE_RATIO) {
+    // Wider than 16:9: height is the cover-crop anchor
+    return `${imageBase}=h2700`;
+  }
+  // Narrower/equal: width is the cover-crop anchor; also the safe default for unknown ratio
+  return `${imageBase}=w4800`;
+}
+
 const HTTP_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept-Language': 'en-US,en;q=0.9',
@@ -631,7 +655,7 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
     }
 
     const artwork = artworks[Math.floor(Math.random() * artworks.length)];
-    const imageUrl = `${artwork.imageBase}=w3840-h2160-c`;
+    const imageUrl = buildDownloadUrl(artwork.imageBase, artwork.aspectRatio);
     const artworkUrl = `${BASE_URL}${artwork.link}`;
 
     // Fetch extended asset details in parallel with image download
@@ -811,7 +835,7 @@ async function fetchByIdentifier(identifier) {
     throw new Error(`Could not find image URL for Google Arts asset ${assetId}. The asset may not be publicly accessible or the API response format may have changed.`);
   }
 
-  const imageUrl = `${imageBase}=w3840-h2160-c`;
+  const imageUrl = buildDownloadUrl(imageBase, cobject?.aspectRatio ?? null);
   const artworkUrl = cobject ? `${BASE_URL}${cobject.link}` : `${BASE_URL}/asset/-/${assetId}`;
 
   const imageResponse = await axios.get(imageUrl, {
