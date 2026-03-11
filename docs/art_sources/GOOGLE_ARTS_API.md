@@ -88,31 +88,86 @@ parsed[0][0] = stella.ap = [
 
 **Structured metadata fields (`stella.av[12]`):**
 
-A list of `[label, values, ...]` entries where each value entry is `[displayText, ?, linkedContent?]`. Labels vary by artwork and institution. Known labels:
+A list of `[label, values, ...]` entries where each value entry is `[displayText, ?, linkedContent?]`. Labels vary by artwork and institution — they are not a controlled vocabulary and differ across contributing museums.
+
+Each value entry structure:
+```
+[
+  [0]  "<displayText>"    // plain text label (always present)
+  [1]  null              // purpose unknown; always null in observed responses
+  [2]  [null, "<html>"]  // [1] = HTML string with <a href="/entity/mXXXXX"> links
+                         //       injected by Google for recognized entities;
+                         //       absent when no entities are linked
+]
+```
+
+The `<a href>` paths in `v[2][1]` use the same Freebase entity IDs as `MEDIUM_ENTITIES`
+(e.g. `/entity/m07mtr` = tempera). This is the most reliable mechanism for entity-level
+filtering: extract entity IDs from `v[2][1]` rather than parsing the display text.
+
+Known labels (confirmed via API inspection):
 
 | Label | Notes |
 |-------|-------|
 | `Title` | Artwork title (redundant with `av[2]`) |
 | `Creator` | Creator name (redundant with `av[6][0]`) |
+| `Creator Display Name` | Display form of creator name (may differ from `Creator`) |
 | `Creator Lifespan` | e.g. `"1497/8"` |
 | `Creator Nationality` | e.g. `"German"` |
 | `Creator Gender` | Often `"Unknown"` |
 | `Date Created` | Redundant with `av[3]` |
-| `Type` | Specific medium/technique, e.g. `"Oil on canvas"` — more precise than entity-based medium |
-| `Physical Dimensions` | e.g. `"w1345 x h2390 cm (without frame)"` |
-| `tag / style` | Semicolon-separated AI-generated tags (long, noisy) |
+| `Location Created` | e.g. `"Paris, France; or Le Mans, France"` |
+| `Type` | Museum's object classification — **not a controlled vocabulary**. Values vary by institution: `"Paintings"`, `"Folio"`, `"Bound Volume"`, `"book"`, `"Oil on canvas"`. Useful for filtering out unwanted object classes (e.g. book pages); see [Object Type Filtering](#object-type-filtering) below. |
+| `Medium` | Materials and technique as free prose: `"Tempera colors, gold leaf, gold paint, and ink on parchment"`. Individual media are entity-linked via `v[2][1]` HTML. Not always present — depends on museum cataloging. |
+| `Physical Dimensions` | e.g. `"Leaf: 18.9 × 13.2 cm (7 7/16 × 5 3/16 in.)"` — note the prefix (e.g. `"Leaf:"`, `"Codex:"`) can be a signal for book-format objects |
+| `Classification` | Museum-defined object classification, e.g. `"Manuscripts (Documents)"`. Highly museum-specific; not consistently present. |
+| `Culture` | Cultural origin, e.g. `"French"`, `"Flemish, Bruges and Ghent"` |
+| `Collection` | Internal museum collection name, e.g. `"MED - Manuscript Illuminations"`. Museum-specific. |
+| `Department` | Museum department, e.g. `"Medieval Art"`. Museum-specific. |
+| `tag / style` | Semicolon-separated AI-generated tags (long, noisy). **Not present on all artworks** — absent on confirmed manuscript examples. |
 | `Rights` | Provenance/acquisition info |
+| `External Link` | URL and label for the object on the museum's own website |
+| `Terms of Use` | License info (e.g. `"Open Content"`) and URL |
+| `Credit Line` | Museum credit line |
+| `Accession Number` | Museum catalog number |
+| `Number` | Alternate catalog/accession number |
+| `Fun Fact` | Occasionally present; short human-interest note |
+| `Provenance` | Object provenance history |
 | `Artist biographical information` | Long museum-specific text |
 | `Additional artwork information` | Long museum-specific text |
 
-Implemented as `parseStructuredFields(av[12])` in `sources/google_arts.js` — returns `{ label: joinedValues }`.
+Implemented as `parseStructuredFields(av[12])` in `sources/google_arts.js` — returns `{ label: joinedValues }` (display text only; entity links in `v[2][1]` are not currently extracted).
 
 **Fields extracted in this project** (`fetchAssetDetails`):
 - `dateCreated` ← `av[3]` or structured `"Date Created"`
-- `medium` ← structured `"Type"` (falls back to entity name if absent)
+- `type` ← structured `"Type"` (object classification; used for exclusion filtering)
+- `medium` ← structured `"Medium"` (free-prose materials description)
 - `creatorNationality` ← structured `"Creator Nationality"`
 - `dimensions` ← structured `"Physical Dimensions"`
 - `description` ← `av[5][1]` with HTML stripped
+
+---
+
+### Object Type Filtering
+
+The `Type` field is the most reliable signal for filtering out unwanted object categories
+(e.g. book pages, folios, manuscripts) because it reflects the museum's own classification
+of the physical object — independent of what materials were used.
+
+**Why `Type` and not `Medium`**: An illuminated manuscript and a panel painting can both
+use tempera. `Medium` (the materials list) is the same; `Type` is different ("Folio" vs
+"Paintings"). Medium entity filtering (`/api/entity/assets`) operates at the selection
+stage and cannot distinguish these cases.
+
+**Limitations**: `Type` is not a controlled vocabulary. Values differ across institutions:
+- Getty: `"Folio"`, Classification: `"Manuscripts (Documents)"`
+- Cleveland Museum: `"Bound Volume"`, Collection: `"MED - Manuscript Illuminations"`
+- National Museum of Women in the Arts: `"book"` (lowercase)
+
+The implemented approach matches case-insensitively against a user-configurable exclusion
+list (`settings.excludedTypes`), defaulting to: `folio`, `leaf`, `bound volume`,
+`manuscript`, `codex`, `book`. Asset details are fetched before the image download when
+this filter is active, so excluded artworks waste no bandwidth.
 
 **Dominant color** is in `cobject[8]` of the listing response (with `#` prefix) — no separate call needed.
 
