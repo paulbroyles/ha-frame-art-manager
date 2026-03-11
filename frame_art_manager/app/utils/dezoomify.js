@@ -6,7 +6,7 @@ const path = require('path');
 const os = require('os');
 
 // dezoomify-rs binary installed in the Dockerfile at /usr/local/bin/dezoomify-rs.
-// GitHub: https://github.com/nicokosi/dezoomify-rs — download dezoomify-rs-linux.tgz
+// GitHub: https://github.com/lovasoa/dezoomify-rs — download dezoomify-rs-linux.tgz
 const DEZOOMIFY_BINARY = '/usr/local/bin/dezoomify-rs';
 
 let _binaryChecked = false;

@@ -449,7 +449,7 @@ dezoomify-rs --max-width 4801 --compression 0 <artworkUrl> <outputFile>
 - `--max-width 4801`: fetches tiles at the zoom level nearest to but not below 4801px wide (one above the 4800px target, to avoid boundary rounding down)
 - `--compression 0`: disables dezoomify's own compression; the tiles are already JPEG
 
-**Binary**: `dezoomify-rs` v2.15.0, installed at `/usr/local/bin/dezoomify-rs` in the Docker image. Alpine Linux uses `gcompat` for glibc compatibility. Binary source: [dezoomify-rs releases](https://github.com/nicokosi/dezoomify-rs/releases/tag/v2.15.0) (`dezoomify-rs-linux.tgz`).
+**Binary**: `dezoomify-rs` v2.15.0, installed at `/usr/local/bin/dezoomify-rs` in the Docker image. Alpine Linux uses `gcompat` for glibc compatibility. Binary source: [dezoomify-rs releases](https://github.com/lovasoa/dezoomify-rs/releases/tag/v2.15.0) (`dezoomify-rs-linux.tgz`).
 
 **Fallback behavior**: If dezoomify-rs is not installed or fails, the original (potentially low-res) image is used. This is logged with a warning and the pipeline continues.
 
