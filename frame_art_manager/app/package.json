@@ -35,7 +35,9 @@
     "sharp": "^0.34.4",
     "simple-git": "^3.28.0",
     "tough-cookie": "^4.1.4",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "@huggingface/transformers": "^3.5.0",
+    "onnxruntime-node": "^1.22.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

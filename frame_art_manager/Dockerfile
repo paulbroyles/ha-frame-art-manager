@@ -15,6 +15,7 @@ RUN apk add --no-cache \
     make \
     g++ \
     jq \
+    gcompat \
     && git lfs install
 
 # Set working directory

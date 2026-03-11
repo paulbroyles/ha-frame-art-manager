@@ -1417,11 +1417,125 @@ async function meanProfilePreProcessor(buffer, {
   return _result;
 }
 
-// TODO (Option 3): ML-based frame segmentation
-// Use a pre-trained ONNX model (e.g., fine-tuned SAM or SegFormer) to identify
-// painting region vs. decorative frame — handles irregular and ornate frames.
-// Cost: ~50–200 MB model weights, onnxruntime-node dependency, startup latency.
-// See docs/ROADMAP.md for discussion.
+// ── ML segmentation pre-processor (RMBG-1.4) ─────────────────────────────────
+
+/**
+ * ML-based frame removal using RMBG-1.4 salient object segmentation.
+ *
+ * Uses @huggingface/transformers (Transformers.js v3) with the briaai/RMBG-1.4
+ * model — an ISNet-based salient object detector trained for foreground/background
+ * separation. Given a painting image the model masks the painting canvas as
+ * foreground and the decorative frame as background. We take the bounding box of
+ * the foreground mask and crop to it.
+ *
+ * Model: briaai/RMBG-1.4, quantized int8 (~44 MB).
+ * Cache: TRANSFORMERS_CACHE env var (defaults to /data/huggingface in the add-on).
+ * On first use the model is downloaded; subsequent calls use the cached ONNX file.
+ *
+ * @param {Buffer} buffer
+ * @param {object} [options]
+ * @param {number} [options.maxCropFraction=0.4]  Max fraction of image a single side may crop before the runaway guard discards that side's crop.
+ * @param {string} [options.label='']             Identifier for log messages.
+ */
+
+let _mlSegmenter = null;
+
+async function getMlSegmenter() {
+  if (_mlSegmenter) return _mlSegmenter;
+  const { pipeline, env } = await import('@huggingface/transformers');
+  env.cacheDir = process.env.TRANSFORMERS_CACHE || '/data/huggingface';
+  console.log('[imageProcessor] ml_segment: loading RMBG-1.4 pipeline (first use; may download ~44 MB model)...');
+  _mlSegmenter = await pipeline('image-segmentation', 'briaai/RMBG-1.4', {
+    device: 'cpu',
+    dtype:  'q8',
+  });
+  console.log('[imageProcessor] ml_segment: pipeline ready');
+  return _mlSegmenter;
+}
+
+async function mlSegmentPreProcessor(buffer, { maxCropFraction = 0.4, label = '' } = {}) {
+  const _t0 = Date.now();
+  const { RawImage } = await import('@huggingface/transformers');
+
+  // Pipeline load (singleton — near-zero cost after first call).
+  const segmenter = await getMlSegmenter();
+  const _tReady = Date.now();
+
+  // Decode to raw RGB for RawImage construction.
+  const { data, info } = await sharp(buffer)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const origW = info.width;
+  const origH = info.height;
+  const _tDecode = Date.now();
+
+  // Run RMBG-1.4 segmentation. Model resizes input to 1024×1024 internally and
+  // returns a grayscale mask at original image resolution (255 = foreground, 0 = background).
+  const rawImage  = new RawImage(new Uint8ClampedArray(data), origW, origH, 3);
+  const [result]  = await segmenter(rawImage, { threshold: 0.5 });
+  const mask      = result.mask;
+  const _tInfer   = Date.now();
+
+  // Find tight bounding box of the foreground region (mask pixel > 127).
+  const maskW = mask.width;
+  const maskH = mask.height;
+  let minX = maskW, minY = maskH, maxX = 0, maxY = 0;
+  for (let y = 0; y < maskH; y++) {
+    for (let x = 0; x < maskW; x++) {
+      if (mask.data[y * maskW + x] > 127) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  const _tScan = Date.now();
+
+  if (maxX <= minX || maxY <= minY) {
+    console.log(`[imageProcessor] ml_segment: no foreground detected — pipeline=${_tReady-_t0}ms decode=${_tDecode-_tReady}ms infer=${_tInfer-_tDecode}ms scan=${_tScan-_tInfer}ms total=${_tScan-_t0}ms${label ? ` — ${label}` : ''}`);
+    return buffer;
+  }
+
+  const cropTop    = minY;
+  const cropBottom = origH - maxY - 1;
+  const cropLeft   = minX;
+  const cropRight  = origW - maxX - 1;
+
+  // Runaway guard: if any single side crops more than maxCropFraction, zero it.
+  const safeTop    = cropTop    > origH * maxCropFraction ? 0 : cropTop;
+  const safeBottom = cropBottom > origH * maxCropFraction ? 0 : cropBottom;
+  const safeLeft   = cropLeft   > origW * maxCropFraction ? 0 : cropLeft;
+  const safeRight  = cropRight  > origW * maxCropFraction ? 0 : cropRight;
+
+  if (safeTop !== cropTop || safeBottom !== cropBottom || safeLeft !== cropLeft || safeRight !== cropRight) {
+    console.log(`[imageProcessor] ml_segment: runaway guard — raw: t=${cropTop} b=${cropBottom} l=${cropLeft} r=${cropRight} → safe: t=${safeTop} b=${safeBottom} l=${safeLeft} r=${safeRight}`);
+  }
+
+  const extractLeft = safeLeft;
+  const extractTop  = safeTop;
+  const extractW    = origW - safeLeft - safeRight;
+  const extractH    = origH - safeTop  - safeBottom;
+
+  if (extractW <= 0 || extractH <= 0) {
+    console.log('[imageProcessor] ml_segment: degenerate crop after runaway guard; returning unchanged');
+    return buffer;
+  }
+
+  if (safeTop === 0 && safeBottom === 0 && safeLeft === 0 && safeRight === 0) {
+    console.log(`[imageProcessor] ml_segment: no crop needed — pipeline=${_tReady-_t0}ms decode=${_tDecode-_tReady}ms infer=${_tInfer-_tDecode}ms scan=${_tScan-_tInfer}ms total=${_tScan-_t0}ms${label ? ` — ${label}` : ''}`);
+    return buffer;
+  }
+
+  const result2 = await sharp(buffer)
+    .extract({ left: extractLeft, top: extractTop, width: extractW, height: extractH })
+    .toBuffer();
+  const _tEnd = Date.now();
+
+  console.log(`[imageProcessor] ml_segment: removing top=${safeTop}px bottom=${safeBottom}px left=${safeLeft}px right=${safeRight}px — pipeline=${_tReady-_t0}ms decode=${_tDecode-_tReady}ms infer=${_tInfer-_tDecode}ms scan=${_tScan-_tInfer}ms extract=${_tEnd-_tScan}ms total=${_tEnd-_t0}ms${label ? ` — ${label}` : ''}`);
+  return result2;
+}
 
 const PRE_PROCESSORS = {
   trim:              trimPreProcessor,
@@ -1429,6 +1543,7 @@ const PRE_PROCESSORS = {
   region_compare:    regionComparePreProcessor,
   corner_consensus:  cornerConsensusPreProcessor,
   mean_profile:      meanProfilePreProcessor,
+  ml_segment:        mlSegmentPreProcessor,
 };
 
 // ── Dimension computation ─────────────────────────────────────────────────────
@@ -1549,7 +1664,7 @@ const IMAGE_PROCESSING_SCHEMA = {
     { value: 'region_compare',   label: 'Region Compare — detect frames by comparing edge strip to painting interior' },
     { value: 'variance_scan',    label: 'Variance Scan — detect frames by local edge variance (legacy)' },
     { value: 'trim',             label: 'Sharp Trim — background strip only (same as None; redundant with automatic Stage 1)' },
-    // TODO (Option 3): ML Segmentation — handles irregular/ornate frames; see docs/ROADMAP.md
+    { value: 'ml_segment',       label: 'ML Segmentation — RMBG-1.4 salient object model; handles irregular and ornate frames (downloads ~44 MB model on first use)' },
   ],
   cropEngines: [
     { value: 'sharp', label: 'Sharp (built-in)' },
