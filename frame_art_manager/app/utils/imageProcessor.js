@@ -1443,10 +1443,24 @@ let _mlSegmenter = null;
 async function getMlSegmenter() {
   if (_mlSegmenter) return _mlSegmenter;
 
-  // The Dockerfile patches @huggingface/transformers/package.json to remove the "node"
-  // conditional export, forcing Node.js to load the web bundle (transformers.web.js).
-  // The web bundle uses onnxruntime-web (WASM) instead of onnxruntime-node (native),
-  // which avoids the Alpine/musl glibc incompatibility entirely.
+  // Two-part workaround for @huggingface/transformers in Alpine/musl (no glibc):
+  //
+  // 1. The Dockerfile patches the package.json exports to load the web bundle
+  //    (transformers.web.js). Unlike the node bundle, the web bundle stubs out
+  //    onnxruntime-node so it never tries to dlopen the missing glibc binary.
+  //
+  // 2. The web bundle still checks IS_NODE_ENV (process.release.name === 'node')
+  //    at runtime and would try to use the empty onnxruntime-node stub — crashing
+  //    during inference. Transformers.js checks globalThis[Symbol.for('onnxruntime')]
+  //    BEFORE IS_NODE_ENV. Pre-populating it with onnxruntime-web bypasses IS_NODE_ENV
+  //    entirely and forces the WASM execution path.
+  const ORT_SYMBOL = Symbol.for('onnxruntime');
+  if (!(ORT_SYMBOL in globalThis)) {
+    const ortWeb = require('onnxruntime-web');
+    globalThis[ORT_SYMBOL] = ortWeb.default ?? ortWeb;
+    console.log('[imageProcessor] ml_segment: pre-loaded onnxruntime-web (WASM backend)');
+  }
+
   const { pipeline, env } = await import('@huggingface/transformers');
   env.cacheDir = process.env.TRANSFORMERS_CACHE || '/data/huggingface';
   console.log('[imageProcessor] ml_segment: loading RMBG-1.4 pipeline (first use; may download ~44 MB model)...');
