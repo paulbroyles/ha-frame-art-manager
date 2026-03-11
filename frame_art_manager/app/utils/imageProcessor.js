@@ -1439,30 +1439,14 @@ async function meanProfilePreProcessor(buffer, {
  */
 
 let _mlSegmenter = null;
-let _mlCrashHandlerInstalled = false;
 
 async function getMlSegmenter() {
   if (_mlSegmenter) return _mlSegmenter;
 
-  // @huggingface/transformers eagerly tries to load onnxruntime-node when running in Node.js,
-  // regardless of the requested device. On Alpine/musl the load fails and fires an
-  // unhandledRejection — even though the library catches the error internally and falls back
-  // to the WASM backend. Without a handler, Node.js crashes the process on unhandled rejections.
-  // We install a one-time handler that suppresses onnxruntime-node load failures specifically
-  // and re-throws everything else so real errors still crash the process.
-  if (!_mlCrashHandlerInstalled) {
-    _mlCrashHandlerInstalled = true;
-    process.on('unhandledRejection', (reason) => {
-      const code = reason?.code;
-      const msg  = String(reason?.message ?? '');
-      if ((code === 'MODULE_NOT_FOUND' || code === 'ERR_DLOPEN_FAILED') && msg.includes('onnxruntime')) {
-        console.warn('[imageProcessor] ml_segment: onnxruntime-node not available on this platform; WASM fallback will be used');
-        return;
-      }
-      throw reason; // all other unhandled rejections → uncaughtException → process crash (correct)
-    });
-  }
-
+  // The Dockerfile patches @huggingface/transformers/package.json to remove the "node"
+  // conditional export, forcing Node.js to load the web bundle (transformers.web.js).
+  // The web bundle uses onnxruntime-web (WASM) instead of onnxruntime-node (native),
+  // which avoids the Alpine/musl glibc incompatibility entirely.
   const { pipeline, env } = await import('@huggingface/transformers');
   env.cacheDir = process.env.TRANSFORMERS_CACHE || '/data/huggingface';
   console.log('[imageProcessor] ml_segment: loading RMBG-1.4 pipeline (first use; may download ~44 MB model)...');

@@ -24,13 +24,19 @@ WORKDIR /app
 # Copy package files
 COPY app/package*.json ./
 
-# Install Node dependencies, then remove onnxruntime-node's native binary.
-# The prebuilt binary requires glibc symbols (e.g. __vsnprintf_chk) absent from
-# Alpine/musl. Removing it causes a clean ENOENT on require(), which
-# @huggingface/transformers catches and handles by falling back to the WASM backend.
-# ERR_DLOPEN_FAILED (the alternative) is not cleanly catchable and crashes Node.
+# Install Node dependencies, then patch @huggingface/transformers so Node.js uses
+# the web bundle (transformers.web.js → onnxruntime-web WASM) instead of the node
+# bundle (transformers.node.cjs → onnxruntime-node native). The node bundle has no
+# WASM fallback path and its native binary requires glibc symbols absent on Alpine.
 RUN npm ci --only=production && \
-    find /app/node_modules -name "onnxruntime_binding.node" -delete 2>/dev/null; true
+    node -e " \
+        const fs = require('fs'); \
+        const p = '/app/node_modules/@huggingface/transformers/package.json'; \
+        const pkg = JSON.parse(fs.readFileSync(p, 'utf8')); \
+        delete pkg.exports['.'].node; \
+        fs.writeFileSync(p, JSON.stringify(pkg, null, 2)); \
+        console.log('Patched @huggingface/transformers exports: removed node condition'); \
+    "
 
 # Copy application files
 COPY app/ ./
