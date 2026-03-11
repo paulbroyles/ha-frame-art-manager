@@ -29,7 +29,7 @@ COPY app/package*.json ./
 # bundle (transformers.node.cjs → onnxruntime-node native). The node bundle has no
 # WASM fallback path and its native binary requires glibc symbols absent on Alpine.
 RUN npm ci --only=production && \
-    python3 -c "import json; p='/app/node_modules/@huggingface/transformers/package.json'; d=json.load(open(p)); d['exports']['.'].pop('node', None); json.dump(d, open(p,'w'), indent=2); print('Patched @huggingface/transformers: removed node export condition')"
+    python3 -c "import json; p='/app/node_modules/@huggingface/transformers/package.json'; d=json.load(open(p)); d['exports'].pop('node', None); json.dump(d, open(p,'w'), indent=2); print('Patched @huggingface/transformers: removed node export condition')"
 
 # Copy application files
 COPY app/ ./
