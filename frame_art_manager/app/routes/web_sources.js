@@ -566,6 +566,7 @@ router.post('/fetch-and-display', async (req, res) => {
       ? imageBuffer
       : await processWebSourceImage(imageBuffer, orientation, {
           preProcess: preProcessor !== 'none' ? preProcessor : null,
+          preProcessOptions: { label: artMetadata?.artworkUrl },
           cropEngine,
           cropEngineOptions: { strategy: sharpStrategy },
         });
@@ -723,7 +724,7 @@ router.post('/test-fetch', async (req, res) => {
     // Run Phase 1 + Phase 2 pre-processors separately so the output can be saved for visual comparison.
     let preprocessedBuffer = !alreadyProcessed ? await solidBorderStrip(imageBuffer) : imageBuffer;
     if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
-      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer);
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: artMetadata?.artworkUrl });
     }
 
     // Run the crop engine on the pre-processed buffer (pre-process already applied).
@@ -795,7 +796,7 @@ router.post('/test-reprocess', async (req, res) => {
 
     let preprocessedBuffer = !alreadyProcessed ? await solidBorderStrip(imageBuffer) : imageBuffer;
     if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
-      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer);
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: testCache.metadata?.artworkUrl });
     }
 
     const processedBuffer = alreadyProcessed

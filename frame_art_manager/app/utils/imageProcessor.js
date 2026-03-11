@@ -607,6 +607,7 @@ async function meanProfilePreProcessor(buffer, {
   contrastThreshold    = 20,
   refFraction          = 0.03,
   maxCropFraction      = 0.25,
+  label                = '',
 } = {}) {
   const _t0 = Date.now();
   const { data, info } = await sharp(buffer)
@@ -663,6 +664,7 @@ async function meanProfilePreProcessor(buffer, {
   const interiorMean = iSum / iN;
   const _tRowMeans = Date.now();
 
+  if (label) console.log(`[mean_profile] source: ${label}`);
   console.log(`[mean_profile] image ${width}×${height}, interiorMean=${interiorMean.toFixed(1)}, consistencyThreshold=${consistencyThreshold}, contrastThreshold=${contrastThreshold}`);
 
   // Scan values[] from index 0 inward. Extends while each new value is within
