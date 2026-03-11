@@ -3,6 +3,11 @@ const sharp = require('sharp');
 const { CookieJar } = require('tough-cookie');
 const { dezoomify } = require('../utils/dezoomify');
 
+// Object types to exclude by default during random selection.
+// Matched case-insensitively against the 'Type' structured field from /api/asset.
+// Add values here (or via the UI) as new unwanted types are encountered.
+const DEFAULT_EXCLUDED_TYPES = ['folio', 'leaf', 'bound volume', 'manuscript', 'codex', 'book'];
+
 // All art medium entities listed on artsandculture.google.com/category/medium,
 // identified by Google/Freebase Knowledge Graph IDs. Discovered via BFS through the
 // "related mediums" links returned by /api/entity for each medium.
@@ -569,7 +574,8 @@ async function fetchAssetDetails(assetId) {
 
   return {
     dateCreated:        av[3] || structured['Date Created'] || null,
-    medium:             structured['Type'] || null,
+    type:               structured['Type'] || null,
+    medium:             structured['Medium'] || null,
     creatorNationality: structured['Creator Nationality'] || null,
     dimensions:         structured['Physical Dimensions'] || null,
     description,
@@ -597,13 +603,17 @@ async function fetchAssetDetails(assetId) {
  * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all'] - Filter by aspect ratio.
  *   'landscape' = width > height (ratio > 1). 'portrait' = height > width (ratio < 1).
  *   Artworks with no ratio metadata are excluded when filtering is active.
+ * @param {string[]} [options.excludedTypes=[]] - Object types to skip, matched case-insensitively
+ *   against the 'Type' structured field from /api/asset. When non-empty, asset details are fetched
+ *   before the image download so excluded artworks never waste bandwidth.
  *
- * @returns {{ imageBuffer, contentType, metadata: { title, creator, medium, creatorNationality, repository, dateCreated, dimensions, description, color, artworkUrl, source } }}
+ * @returns {{ imageBuffer, contentType, metadata: { title, creator, type, medium, creatorNationality, repository, dateCreated, dimensions, description, color, artworkUrl, source } }}
  * @throws {Error} If the filter matches no known media, or on network/API failure.
  */
 async function fetchRandomArtwork(mediaFilter = null, options = {}) {
   await seedCookies();
-  const { aspectRatio = 'all' } = options;
+  const { aspectRatio = 'all', excludedTypes = [] } = options;
+  const excludedTypesLower = excludedTypes.map(t => t.toLowerCase());
 
   let candidates = MEDIUM_ENTITIES;
   if (mediaFilter && mediaFilter.length > 0) {
@@ -660,15 +670,26 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
     const imageUrl = buildDownloadUrl(artwork.imageBase, artwork.aspectRatio);
     const artworkUrl = `${BASE_URL}${artwork.link}`;
 
-    // Fetch extended asset details in parallel with image download
-    const [imageResponse, details] = await Promise.all([
-      axios.get(imageUrl, {
-        responseType: 'arraybuffer',
-        headers: HTTP_HEADERS,
-        timeout: 30000,
-      }).catch(err => { throw new Error(`Failed to download artwork image: ${err.message}`); }),
-      fetchAssetDetails(artwork.assetId),
-    ]);
+    // Start fetching asset details immediately. When type exclusion is active, await
+    // details before downloading the image so excluded artworks waste no bandwidth.
+    // Otherwise, image and details fetch concurrently for better performance.
+    const detailsPromise = fetchAssetDetails(artwork.assetId);
+    if (excludedTypesLower.length > 0) {
+      const earlyDetails = await detailsPromise;
+      const artworkType = (earlyDetails.type || '').toLowerCase();
+      if (excludedTypesLower.includes(artworkType)) {
+        console.warn(`[google_arts] Attempt ${attempt + 1}: skipping excluded type "${earlyDetails.type}" ("${artwork.title}")`);
+        continue;
+      }
+    }
+
+    const imageResponse = await axios.get(imageUrl, {
+      responseType: 'arraybuffer',
+      headers: HTTP_HEADERS,
+      timeout: 30000,
+    }).catch(err => { throw new Error(`Failed to download artwork image: ${err.message}`); });
+
+    const details = await detailsPromise;
 
     let imageBuffer = Buffer.from(imageResponse.data);
     const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
@@ -698,7 +719,8 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
         creator: artwork.creator,
         repository: artwork.repository,
         dateCreated: details.dateCreated || null,
-        medium: details.medium || entity.name,   // prefer specific type, fall back to category
+        type: details.type || null,
+        medium: details.medium || null,
         creatorNationality: details.creatorNationality || null,
         dimensions: details.dimensions || null,
         description: details.description || null,
@@ -717,7 +739,8 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
 const metadataFields = [
   { key: 'title',              label: 'Title',              description: 'Artwork title' },
   { key: 'creator',            label: 'Creator',            description: 'Artist or creator name' },
-  { key: 'medium',             label: 'Medium',             description: 'Material or technique (e.g. "Oil on canvas"), from /api/asset structured fields' },
+  { key: 'type',               label: 'Type',               description: 'Object type from the museum catalog (e.g. "Paintings", "Drawing", "Folio")' },
+  { key: 'medium',             label: 'Medium',             description: 'Materials and technique as described by the museum (e.g. "Tempera colors, gold leaf, and ink on parchment")' },
   { key: 'creatorNationality', label: 'Nationality',        description: 'Nationality of the artist' },
   { key: 'repository',         label: 'Repository',         description: 'Museum or holding institution' },
   { key: 'dateCreated',        label: 'Date Created',       description: 'Date or year the artwork was created' },
@@ -733,6 +756,7 @@ const metadataFields = [
 const defaultMapping = {
   title:              'title',
   creator:            'artist',
+  type:               null,
   medium:             'medium',
   creatorNationality: null,
   repository:         'museum',
@@ -747,21 +771,29 @@ const defaultMapping = {
 // Returned via GET /api/web-sources/config and consumed by the UI to render controls.
 const settingsSchema = {
   mediaCategories: MEDIUM_CATEGORIES,
+  defaultExcludedTypes: DEFAULT_EXCLUDED_TYPES,
 };
 
 /**
  * Convert stored source settings to fetcher call options.
  * Called by web_sources.js before invoking fetchRandomArtwork.
  *
- * settings.disabledMedia: string[] — names of media to exclude from selection.
- * Returns { mediaFilter: string[] } (enabled media only), or {} if no restriction.
+ * settings.disabledMedia: string[] — medium entity names to exclude from selection.
+ * settings.excludedTypes: string[] — Type field values to skip post-fetch (defaults to
+ *   DEFAULT_EXCLUDED_TYPES when absent, allowing new installs to get sensible defaults).
  */
 function buildFetcherOptions(settings) {
   const disabledMedia = settings?.disabledMedia;
-  if (!disabledMedia || disabledMedia.length === 0) return {};
-  const disabledSet = new Set(disabledMedia.map(m => m.toLowerCase()));
-  const enabledMedia = MEDIUM_ENTITIES.map(e => e.name).filter(n => !disabledSet.has(n.toLowerCase()));
-  return enabledMedia.length > 0 ? { mediaFilter: enabledMedia } : {};
+  const excludedTypes = settings?.excludedTypes ?? DEFAULT_EXCLUDED_TYPES;
+
+  let mediaFilter;
+  if (disabledMedia && disabledMedia.length > 0) {
+    const disabledSet = new Set(disabledMedia.map(m => m.toLowerCase()));
+    const enabledMedia = MEDIUM_ENTITIES.map(e => e.name).filter(n => !disabledSet.has(n.toLowerCase()));
+    if (enabledMedia.length > 0) mediaFilter = enabledMedia;
+  }
+
+  return { ...(mediaFilter ? { mediaFilter } : {}), excludedTypes };
 }
 
 /**
@@ -840,7 +872,8 @@ async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
       const rawDesc = Array.isArray(av[5]) ? av[5][1] : null;
       extendedDetails = {
         dateCreated:        av[3] || structured['Date Created'] || null,
-        medium:             structured['Type'] || null,
+        type:               structured['Type'] || null,
+        medium:             structured['Medium'] || null,
         creatorNationality: structured['Creator Nationality'] || null,
         dimensions:         structured['Physical Dimensions'] || null,
         description:        typeof rawDesc === 'string' ? rawDesc.replace(/<[^>]+>/g, '').trim() || null : null,
@@ -898,6 +931,7 @@ async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
       creator:            cobject?.creator || extendedDetails.creator || null,
       repository:         cobject?.repository || extendedDetails.repository || null,
       dateCreated:        extendedDetails.dateCreated || null,
+      type:               extendedDetails.type || null,
       medium:             extendedDetails.medium || null,
       creatorNationality: extendedDetails.creatorNationality || null,
       dimensions:         extendedDetails.dimensions || null,

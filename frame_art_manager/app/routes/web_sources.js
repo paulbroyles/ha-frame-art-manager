@@ -581,7 +581,7 @@ router.post('/fetch-and-display', async (req, res) => {
     const MAX_LOW_RES_ATTEMPTS = 3;
     let fetchResult;
     for (let attempt = 0; attempt < MAX_LOW_RES_ATTEMPTS; attempt++) {
-      fetchResult = await fetcher(fetcherOpts.mediaFilter, { aspectRatio });
+      fetchResult = await fetcher(fetcherOpts.mediaFilter, { aspectRatio, excludedTypes: fetcherOpts.excludedTypes || [] });
       if (!skipLowRes) break;
       const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
       const shortSide = Math.min(width, height);
@@ -750,7 +750,7 @@ router.post('/test-fetch', async (req, res) => {
       }
 
       const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
-      ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(fetcherOpts.mediaFilter, { aspectRatio }));
+      ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(fetcherOpts.mediaFilter, { aspectRatio, excludedTypes: fetcherOpts.excludedTypes || [] }));
     }
 
     const orientation = tvOrientation || 'landscape';

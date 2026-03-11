@@ -11399,3 +11399,51 @@ input[type="checkbox"]:checked + .toggle-text {
 .ws-media-item input[type="checkbox"] {
   cursor: pointer;
 }
+
+.ws-type-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+  min-height: 28px;
+}
+
+.ws-type-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #e8eaf0;
+  border-radius: 4px;
+  padding: 2px 6px 2px 8px;
+  font-size: 12px;
+  color: #333;
+}
+
+.ws-type-tag-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #888;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 1px;
+}
+
+.ws-type-tag-remove:hover {
+  color: #c0392b;
+}
+
+.ws-type-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.ws-type-input {
+  flex: 1;
+  max-width: 220px;
+  padding: 4px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 13px;
+}

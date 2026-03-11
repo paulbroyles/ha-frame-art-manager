@@ -15173,7 +15173,11 @@ function readWebSourceSettingsFromUI(sourceId) {
     document.querySelectorAll('#web-source-settings-body .ws-media-checkbox').forEach(cb => {
       if (!cb.checked) disabledMedia.push(cb.dataset.medium);
     });
-    return { disabledMedia };
+    const excludedTypes = [];
+    document.querySelectorAll('#ws-excluded-types-list .ws-type-tag').forEach(tag => {
+      excludedTypes.push(tag.dataset.type);
+    });
+    return { disabledMedia, excludedTypes };
   }
   if (sourceId === 'met_museum') {
     const disabledMedia = [];
@@ -15253,6 +15257,41 @@ function initWebSourceSettingsInteractions() {
     });
   });
 
+  // Excluded types: add via input, remove via × button
+  function addExcludedType(value) {
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed) return;
+    const list = body.querySelector('#ws-excluded-types-list');
+    if (!list) return;
+    if (list.querySelector(`.ws-type-tag[data-type="${CSS.escape(trimmed)}"]`)) return; // already present
+    const span = document.createElement('span');
+    span.className = 'ws-type-tag';
+    span.dataset.type = trimmed;
+    span.innerHTML = `${escapeHtml(trimmed)}<button type="button" class="ws-type-tag-remove" aria-label="Remove">×</button>`;
+    span.querySelector('.ws-type-tag-remove').addEventListener('click', () => span.remove());
+    list.appendChild(span);
+  }
+
+  body.querySelectorAll('#ws-excluded-types-list .ws-type-tag-remove').forEach(btn => {
+    btn.addEventListener('click', () => btn.closest('.ws-type-tag').remove());
+  });
+
+  body.querySelector('#ws-excluded-type-add')?.addEventListener('click', () => {
+    const input = body.querySelector('#ws-excluded-type-input');
+    addExcludedType(input.value);
+    input.value = '';
+    input.focus();
+  });
+
+  body.querySelector('#ws-excluded-type-input')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const input = body.querySelector('#ws-excluded-type-input');
+      addExcludedType(input.value);
+      input.value = '';
+    }
+  });
+
   body.querySelector('#ws-clear-cookies-btn')?.addEventListener('click', async function () {
     const sourceId = this.dataset.sourceId;
     this.disabled = true;
@@ -15281,6 +15320,7 @@ function initWebSourceSettingsInteractions() {
 function renderGoogleArtsSettings(schema, currentSettings) {
   const disabledSet = new Set((currentSettings.disabledMedia || []).map(m => m.toLowerCase()));
   const categories = schema.mediaCategories || [];
+  const excludedTypes = currentSettings.excludedTypes ?? schema.defaultExcludedTypes ?? [];
 
   let html = `<div style="padding:14px 16px;">
     <p style="margin:0 0 12px;font-size:13px;color:#555;">
@@ -15322,6 +15362,20 @@ function renderGoogleArtsSettings(schema, currentSettings) {
   }
 
   html += `</div></div>`;
+
+  const typeTags = excludedTypes.map(t =>
+    `<span class="ws-type-tag" data-type="${escapeHtml(t)}">${escapeHtml(t)}<button type="button" class="ws-type-tag-remove" aria-label="Remove">×</button></span>`
+  ).join('');
+  html += `<div class="ws-mapping-section">
+    <h4>Excluded Object Types</h4>
+    <p class="pool-health-description">Artworks whose <em>Type</em> field matches any of these values (case-insensitive) are skipped during random selection. Add values as you encounter unwanted object types.</p>
+    <div id="ws-excluded-types-list" class="ws-type-tags">${typeTags}</div>
+    <div class="ws-type-add-row">
+      <input type="text" id="ws-excluded-type-input" class="ws-type-input" placeholder="e.g. drawing">
+      <button type="button" id="ws-excluded-type-add" class="btn-secondary btn-small">Add</button>
+    </div>
+  </div>`;
+
   html += `<div class="ws-mapping-section">
     <h4>Session Cookies</h4>
     <p class="pool-health-description">Google Arts &amp; Culture uses session cookies to reduce rate limiting. Cookies are seeded automatically on the first fetch. If fetches are failing with 429 errors, clearing the cookie jar forces a fresh session.</p>
