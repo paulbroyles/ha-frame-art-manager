@@ -1443,29 +1443,27 @@ let _mlSegmenter = null;
 async function getMlSegmenter() {
   if (_mlSegmenter) return _mlSegmenter;
 
-  // Two-part workaround for @huggingface/transformers in Alpine/musl (no glibc):
+  // Alpine/musl workaround for @huggingface/transformers:
   //
-  // 1. The Dockerfile patches the package.json exports to load the web bundle
-  //    (transformers.web.js). Unlike the node bundle, the web bundle stubs out
-  //    onnxruntime-node so it never tries to dlopen the missing glibc binary.
+  // onnxruntime-node's prebuilt binaries require glibc symbols absent on Alpine/musl.
+  // Transformers.js checks globalThis[Symbol.for('onnxruntime')] BEFORE IS_NODE_ENV,
+  // so pre-populating it bypasses the onnxruntime-node path entirely.
   //
-  // 2. The web bundle still checks IS_NODE_ENV (process.release.name === 'node')
-  //    at runtime and would try to use the empty onnxruntime-node stub — crashing
-  //    during inference. Transformers.js checks globalThis[Symbol.for('onnxruntime')]
-  //    BEFORE IS_NODE_ENV. Pre-populating it with onnxruntime-web bypasses IS_NODE_ENV
-  //    entirely and forces the WASM execution path.
+  // IMPORTANT: require('onnxruntime-web') loads dist/ort.node.min.js — the Node.js
+  // native-first build with no working InferenceSession on Alpine/musl. Must use the
+  // WASM-only subpath: require('onnxruntime-web/wasm') → dist/ort.wasm.min.js.
   const ORT_SYMBOL = Symbol.for('onnxruntime');
   if (!(ORT_SYMBOL in globalThis)) {
-    const ortWeb = require('onnxruntime-web');
-    globalThis[ORT_SYMBOL] = ortWeb.default ?? ortWeb;
-    console.log('[imageProcessor] ml_segment: pre-loaded onnxruntime-web (WASM backend)');
+    const ortWasm = require('onnxruntime-web/wasm');
+    globalThis[ORT_SYMBOL] = ortWasm.default ?? ortWasm;
+    console.log('[imageProcessor] ml_segment: pre-loaded onnxruntime-web/wasm (pure WASM backend)');
   }
 
   const { pipeline, env } = await import('@huggingface/transformers');
   env.cacheDir = process.env.TRANSFORMERS_CACHE || '/data/huggingface';
   console.log('[imageProcessor] ml_segment: loading RMBG-1.4 pipeline (first use; may download ~44 MB model)...');
   _mlSegmenter = await pipeline('image-segmentation', 'briaai/RMBG-1.4', {
-    device: 'cpu',
+    device: 'wasm',
     dtype:  'q8',
   });
   console.log('[imageProcessor] ml_segment: pipeline ready');
