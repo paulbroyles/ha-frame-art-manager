@@ -46,9 +46,29 @@ Skips frame detection (Phase 2) entirely. The automatic solid-border strip (Phas
 
    *Why refMean rather than running std dev*: Running std dev accumulates every row's mean and becomes less sensitive as the band grows. Deviation from a fixed refMean stays sharp at any band depth, which matters for wide frames.
 
+   **Supplementary T/B stopping signals** (in addition to the main deviation check):
+
+   - **`rowVariance` check**: For each row, compute within-row luminance variance (mean squared deviation from the row mean). Establish a reference variance from the first 5 frame rows. If `refVar ≥ 5` (non-trivial), fire when the current row's variance exceeds `refVar × 8`. Catches rows with abnormally high internal variation relative to the outer frame band.
+
+   - **`rowMAD` check** *(primary supplementary signal)*: For each row, compute the mean absolute difference between horizontally adjacent pixels — `mean |pix(x,y) - pix(x+1,y)|`. This measures horizontal sharpness. Fires when row MAD exceeds `madAbsThreshold = 9` **or** (when `refMAD ≥ 0.5`) when row MAD exceeds `refMAD × 8`.
+
+     *Key discriminating property*: Smooth cloudy gradients — including textured frame material with spatial color variation — have low pixel-to-pixel differences even when overall row variance is high. Geometric patterns (rugs, carpets, patterned floors) have sharp pixel-to-pixel jumps at design boundaries, producing high MAD. This signal correctly identifies structured painting content even when its row mean happens to be near the frame reference.
+
+     *Example*: "The Alling Children" (Eddy, 1839) has a bottom rug whose row means are close to the frame reference (`refMean ≈ 43`), causing the luminance scan to underdetect. But the rug's geometric design produces `rowMAD ≈ 10–13` (above threshold) while the frame material has `rowMAD ≈ 2–7`. The MAD check correctly stops the scan at the frame/rug boundary.
+
+   **T/B bevel continuation variance gate**: After the bevel continuation classifier (`columnPercentileScan`) proposes an extension, check the within-row variance of the rows at the immediate extension boundary before accepting it. Check only `extCheckN = min(5, extSimple)` rows (the first rows after the current crop boundary), not the full extension. If their mean variance exceeds `bevelExtVarThreshold = 1000`, reject the extension.
+
+   *Why check only the first 5 rows*: The extension often includes both a transition zone (high-variance painting content at the boundary) and deeper background rows that may be uniformly dark (low variance). Averaging the full extension dilutes the boundary signal, causing genuinely wrong extensions to pass. Checking only the 5 rows immediately adjacent to the crop boundary isolates the transition zone and gives a reliable detection.
+
 3. **Left/right — col medians in corner bands**: Column medians are computed using thin strips of rows at the *inner boundary* of the detected top/bottom frame bands (not the frame rows themselves). Frame rows are uniform across all columns (all wood, all gold) and provide no left/right discrimination. Interior-edge rows contain frame material at left/right column positions and painting content at center positions, making the signal discriminating.
 
    *Why median instead of mean*: Wood grain frames contain occasional bright grain rows that inflate the mean luminance of a column, causing the incremental scan to see them as outliers and stopping prematurely. The median is robust to these isolated bright rows. A range guard skips left/right detection if the column medians are flat across all columns (non-discriminating).
+
+   **Supplementary L/R stopping signal — `colBandMAD`**: For each column, compute the mean absolute difference between vertically adjacent pixels within the corner band rows. Passed to the L/R incrementalScan as a supplementary stopping signal, using the same MAD check logic as for T/B.
+
+   **Adaptive consistency threshold for near-black frames**: When the outermost edge columns have a very dark reference mean, the default `consistencyThreshold = 35` extends the consistent range up to `refMean + 35`, which can encompass moderately dark painting backgrounds (luminance 20–45) and cause the scan to overshoot by hundreds of pixels. The threshold is adaptively tightened: `threshold = min(consistencyThreshold, max(15, refMean × 2))`. For near-black references (e.g., `refMean = 9`), this gives `threshold ≈ 18`, keeping the consistent range within the true frame material and stopping the scan when the painting background first diverges. Unaffected for normal frames: `refMean ≥ 18` produces a threshold of `min(35, 36+) = 35` — no change.
+
+   *Material-consistency rationale*: All four sides of a picture frame are made from the same material. When the T/B scan establishes that the frame is near-black (e.g., a dark stained wood frame), the L/R scan should apply the same tighter band when scanning the same material. A near-black frame that transitions to even moderately dark painting content represents a real frame/painting boundary — the adaptive threshold catches it.
 
 4. **Symmetry guard**: After all four edges are scanned, compute the median of the four crop values. Reject any edge whose crop exceeds 4× that median. This catches runaway detections on one edge while the others correctly stop short.
 
@@ -75,6 +95,8 @@ Skips frame detection (Phase 2) entirely. The automatic solid-border strip (Phas
 - Solid uniform borders
 - Textured frames: wood grain, gold leaf, canvas — row means are consistent across the frame even when each row is internally varied
 - Wood frames with dark outer bevels — T/B-backed secondary inference avoids the bevel contamination problem
+- Dark frames meeting structured painting content (rugs, geometric floors) — rowMAD supplementary signal catches boundary even when row means are similar
+- Near-black frames meeting dark painting backgrounds — adaptive L/R threshold tightens the consistent range proportionally to the reference, stopping at the true boundary
 - Asymmetric detection — missing edges are inferred from detected perpendicular edges
 - Per-edge independent detection with cross-edge consistency checks
 
@@ -83,6 +105,7 @@ Skips frame detection (Phase 2) entirely. The automatic solid-border strip (Phas
 - Paintings with a consistent-colored band at the edge whose mean differs from the interior — contrast check provides protection but isn't perfect
 - Multi-layer frames where outer and inner layers have very different mean luminance (scan stops at the first layer boundary)
 - Frames with a very narrow outer bevel at a completely different luminance than the main frame body — the bevel sets `refMean` and the main frame appears as outliers, stopping the scan prematurely. The T/B-backed secondary inference addresses this for L/R detection (see above). A future fix for T/B detection would be analogous.
+- Paintings with near-black frames AND near-black painting backgrounds where the background is also below the adaptive threshold — the adaptive threshold cannot distinguish frame from painting if both have luminance < `refMean × 2`. The `colBandMAD` signal provides a secondary check but only helps when there is measurable vertical texture difference between frame and painting content.
 
 **Parameters**:
 
@@ -254,6 +277,7 @@ Images used to develop and validate the pipeline. Useful for regression testing.
 |---|---|---|---|---|
 | #435765 | Met Museum | https://www.metmuseum.org/art/collection/search/435765 | Wide wood-grain frame with dark outer bevel | Used to develop T/B-backed secondary inference and the dark outer bevel fix. Expected: T=56px, B=56px, L≈98px, R≈89px (right slightly under due to angled frame boundary). |
 | #435766 | Met Museum | https://www.metmuseum.org/art/collection/search/435766 | Gold/gilded frame | Confirmed working correctly with mean_profile prior to #435765 work. |
+| The Alling Children (Eddy, 1839) | Google Arts & Culture | https://artsandculture.google.com/asset/the-alling-children-oliver-tarbell-eddy/JwH5kBlpDwKbBA | Thin dark wood frame, trapezoidal (wider at top), painting has dark interior background | Stress test: bottom frame has high row variance (frame material has tonal variation) but low rowMAD (cloudy gradient), while the rug below has high rowMAD (geometric pattern). L/R frame is near-black (refMean≈9) meeting a dark painting interior — without adaptive threshold, the right scan would overshoot to 821px. Used to develop rowMAD supplementary signal, T/B bevel continuation variance gate, and adaptive L/R threshold. Expected: T≈16px, B≈19px, L≈64px, R≈35–45px. |
 
 ---
 

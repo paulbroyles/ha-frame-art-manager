@@ -643,6 +643,41 @@ async function meanProfilePreProcessor(buffer, {
     return sum / width;
   }
 
+  // Within-row luminance variance: mean squared deviation from the row mean.
+  function rowVariance(y, mean) {
+    let sumSq = 0;
+    for (let x = 0; x < width; x++) {
+      const d = pixelLum((y * width + x) * channels) - mean;
+      sumSq += d * d;
+    }
+    return sumSq / width;
+  }
+
+  // Mean absolute difference between horizontally adjacent pixels (horizontal gradient mean).
+  // Captures spatial sharpness: smooth cloudy gradients (frame material) have small
+  // pixel-to-pixel differences even when overall variance is high, while structured
+  // geometric patterns (rugs, carpets) have large pixel-to-pixel jumps at design boundaries.
+  function rowMAD(y) {
+    let sum = 0;
+    for (let x = 1; x < width; x++) {
+      sum += Math.abs(pixelLum((y * width + x) * channels) - pixelLum((y * width + x - 1) * channels));
+    }
+    return sum / (width - 1);
+  }
+
+  // Mean absolute difference between vertically adjacent pixels within the corner bands,
+  // for a given column. Measures vertical sharpness/texture within the band.
+  function colBandMAD(x, bands) {
+    let sum = 0, count = 0;
+    for (const [y0, y1] of bands) {
+      for (let y = y0 + 1; y < y1; y++) {
+        sum += Math.abs(pixelLum((y * width + x) * channels) - pixelLum(((y - 1) * width + x) * channels));
+        count++;
+      }
+    }
+    return count > 0 ? sum / count : 0;
+  }
+
   function colMeanInBands(x, bands) {
     let sum = 0, n = 0;
     for (const [y0, y1] of bands) {
@@ -681,6 +716,8 @@ async function meanProfilePreProcessor(buffer, {
   const maxCols = Math.floor(width  * maxCropFraction);
 
   const rowMeans = Array.from({ length: height }, (_, y) => rowMean(y));
+  const rowVariances = rowMeans.map((m, y) => rowVariance(y, m));
+  const rowMADs = Array.from({ length: height }, (_, y) => rowMAD(y));
 
   // Interior reference: center 50% block.
   // Also accumulates R/G/B for a chromaticity color reference used to detect
@@ -727,7 +764,7 @@ async function meanProfilePreProcessor(buffer, {
   // stopping at the sharper frame/painting boundary (typically ±40–80 jump).
   // Requires a minimum band size (5), a natural stopping point (runaway guard),
   // and a contrast check against interiorMean.
-  function incrementalScan(values, maxN, label, thresholdOverride = null, contrastOverride = null) {
+  function incrementalScan(values, maxN, label, thresholdOverride = null, contrastOverride = null, varValues = null, madValues = null) {
     if (maxN < 5 || values.length < 5) return 0;
     // Reference mean from the first few values (outermost edge — always frame material
     // after solidBorderStrip). More robust than running stdDev for wood grain frames.
@@ -743,11 +780,44 @@ async function meanProfilePreProcessor(buffer, {
     // In that situation a stricter threshold reduces false positives from borderline
     // column means whose stopping deviation is just barely above consistencyThreshold.
     const threshold = thresholdOverride ?? consistencyThreshold;
+    // Variance-based supplementary stopping condition (relative check).
+    // Fires when a row's variance is much higher than the edge reference — catches cases
+    // where edge is uniform and painting content is much more varied.
+    const varMultiplier = 8;
+    const refVar = varValues ? varValues.slice(0, initN).reduce((s, v) => s + v, 0) / initN : 0;
+    const varCheckActive = varValues !== null && refVar >= 5;
+    // MAD-based supplementary stopping condition.
+    // Mean Absolute Difference between adjacent pixels captures spatial sharpness:
+    // smooth cloudy gradients (frame material) have low MAD even with high overall variance,
+    // while structured geometric patterns (rugs, carpets) have high MAD at design boundaries.
+    // This distinguishes "high variance from smooth gradients" (frame) from
+    // "high variance from sharp geometric transitions" (painting pattern content).
+    const refMAD = madValues ? madValues.slice(0, initN).reduce((s, v) => s + v, 0) / initN : 0;
+    const madCheckActive = madValues !== null;
+    if (varValues) console.log(`[mean_profile] ${label}: varProfile(0-${Math.min(24, maxN)-1})=[${varValues.slice(0, Math.min(25, maxN)).map(v => Math.round(v)).join(',')}]`);
+    if (madValues) console.log(`[mean_profile] ${label}: madProfile(0-${Math.min(24, maxN)-1})=[${madValues.slice(0, Math.min(25, maxN)).map(v => v.toFixed(1)).join(',')}]`);
     let lastGoodIdx = initN - 1, consecutiveOutliers = 0;
     let stopIdx = -1, stopDev = 0;
     for (let i = initN; i < Math.min(maxN, values.length); i++) {
       const dev = Math.abs(values[i] - refMean);
-      if (dev < threshold) {
+      const varOutlier = varCheckActive && varValues[i] > refVar * varMultiplier;
+      // MAD outlier: row has sharper pixel-to-pixel transitions than the edge reference or
+      // an absolute ceiling, indicating structured painting content rather than frame material.
+      //   Relative check (refMAD × 8): catches smooth-edged frames where painting content
+      //     has proportionally much higher spatial sharpness (e.g. near-black canvas edge →
+      //     dark painting background with moderate texture). Gate at refMAD ≥ 0.5 avoids
+      //     applying to truly featureless edges where threshold would be near zero.
+      //   Absolute check (madAbsThreshold=9): catches cases where refMAD is already elevated
+      //     (frame itself is textured/cloudy) and painting content has clearly higher sharpness
+      //     (e.g. gray-brown cloudy frame edge → structured geometric rug pattern). Three
+      //     consecutive outliers required (hysteresis) — one or two partial rows as the scan
+      //     crosses an uneven frame boundary are tolerated.
+      const madAbsThreshold = 9;
+      const madOutlier = madCheckActive && (
+        madValues[i] > madAbsThreshold ||
+        (refMAD >= 0.5 && madValues[i] > refMAD * varMultiplier)
+      );
+      if (dev < threshold && !varOutlier && !madOutlier) {
         consecutiveOutliers = 0;
         lastGoodIdx = i;
       } else {
@@ -780,7 +850,9 @@ async function meanProfilePreProcessor(buffer, {
     // supplies a pre-computed contrast scalar (e.g. outer-edge chroma distance) directly.
     const effectiveContrast = contrastOverride !== null ? contrastOverride : contrast;
     const passed = effectiveContrast > contrastThreshold;
-    console.log(`[mean_profile] ${label}: crop=${crop}px, refMean=${refMean.toFixed(1)}, bandMean=${bandMean.toFixed(1)}, contrast=${contrast.toFixed(1)}${contrastOverride !== null ? ` chromaContrast=${contrastOverride.toFixed(1)}` : ''} (need >${contrastThreshold}) → ${passed ? 'CROP' : 'REJECTED (low contrast)'}`);
+    const bandVar = varCheckActive ? varValues.slice(0, crop).reduce((s, v) => s + v, 0) / crop : null;
+    const bandMAD = madCheckActive ? madValues.slice(0, crop).reduce((s, v) => s + v, 0) / crop : null;
+    console.log(`[mean_profile] ${label}: crop=${crop}px, refMean=${refMean.toFixed(1)}, bandMean=${bandMean.toFixed(1)}, contrast=${contrast.toFixed(1)}${contrastOverride !== null ? ` chromaContrast=${contrastOverride.toFixed(1)}` : ''}${varCheckActive ? ` refVar=${refVar.toFixed(1)} bandVar=${bandVar.toFixed(1)}` : ''}${madCheckActive ? ` refMAD=${refMAD.toFixed(1)} bandMAD=${bandMAD.toFixed(1)}` : ''} (need >${contrastThreshold}) → ${passed ? 'CROP' : 'REJECTED (low contrast)'}`);
     return passed ? crop : 0;
   }
 
@@ -979,8 +1051,11 @@ async function meanProfilePreProcessor(buffer, {
   }
 
   // Top and bottom: scan using full-width row means.
-  let cropTop    = detectionMode !== 'color' ? incrementalScan(rowMeans, maxRows, 'top') : 0;
-  let cropBottom = detectionMode !== 'color' ? incrementalScan([...rowMeans].reverse(), maxRows, 'bottom') : 0;
+  // Pass rowVariances as supplementary signal: rows with high within-row variance are
+  // painting content (structured patterns), not frame material, even if their mean is close
+  // to the edge reference. The reversed variance array mirrors the reversed means array.
+  let cropTop    = detectionMode !== 'color' ? incrementalScan(rowMeans, maxRows, 'top', null, null, rowVariances, rowMADs) : 0;
+  let cropBottom = detectionMode !== 'color' ? incrementalScan([...rowMeans].reverse(), maxRows, 'bottom', null, null, [...rowVariances].reverse(), [...rowMADs].reverse()) : 0;
 
   // Supplementary color-based T/B scan: detects frames with distinct color but low
   // luminance contrast (e.g. thin gold frames near interior brightness). Runs only when
@@ -1047,6 +1122,12 @@ async function meanProfilePreProcessor(buffer, {
   // refMean for the right ext scan by ~12 units and causes it to miss the frame boundary.
   let cropTopForBand    = cropTop;
   let cropBottomForBand = cropBottom;
+  // Variance threshold for bevel continuation: if the extension rows have painting-level
+  // within-row variance, reject the extension. Frame material (gold, wood) has moderate
+  // variance (≤ 700); painting content (structured backgrounds, patterned content) has
+  // high variance (1000+). This prevents bevel continuation from extending past a thin
+  // dark canvas edge into dark painting background or patterned content just inside it.
+  const bevelExtVarThreshold = 1000;
   {
     const topRefMean = rowMeans.slice(0, initN).reduce((s, v) => s + v, 0) / initN;
     if (cropTop > 0 && topRefMean < bevelThreshold && detectionMode !== 'color') {
@@ -1057,19 +1138,29 @@ async function meanProfilePreProcessor(buffer, {
       // Size guard: implausibly large extension means the classifier hit painting content.
       if (extSimple > Math.round(height * bevelMaxExtFrac)) {
         console.log(`[mean_profile] top: bevel continuation rejected (extSimple=${extSimple}px > ${Math.round(height * bevelMaxExtFrac)}px limit, no clear frame boundary)`);
-      } else {
-        cropTopForBand = cropTop + extSimple;
-        // Pass 2 (adaptiveRef): finds the actual frame/painting boundary for the crop.
-        const ext = columnPercentileScan(cropTop, scanN, +1, 'top-bevel-cont-adaptive', bevelMinEdgeLum, true);
-        // Ratio guard + size guard on bestExt: if the adaptive pass returns more than 3×
-        // the non-adaptive result, it has likely latched onto painting content rather than
-        // the true frame boundary (the adaptive reference search found a bright painting
-        // region instead of bright frame material). Fall back to stable extSimple in that
-        // case. Also cap by the absolute size limit to catch remaining outliers.
-        const bevelLimit = Math.round(height * bevelMaxExtFrac);
-        const rawBest = Math.max(extSimple, ext);
-        const bestExt = (rawBest > extSimple * 3 || rawBest > bevelLimit) ? extSimple : rawBest;
-        if (bestExt > 0) { console.log(`[mean_profile] top: bevel continuation simple=${extSimple}px adaptive=${ext}px → using ${bestExt}px → ${cropTop + bestExt}px total`); cropTop += bestExt; }
+      } else if (extSimple > 0) {
+        // Variance gate: check only the first few rows immediately past the current crop
+        // boundary. If those rows are painting content (high variance), the bevel extension
+        // is wrong. Checking the full extension would be diluted by low-variance rows deeper
+        // in a uniform dark background, masking the true boundary signal.
+        const extCheckN = Math.min(5, extSimple);
+        const extVarMean = rowVariances.slice(cropTop, cropTop + extCheckN).reduce((s, v) => s + v, 0) / extCheckN;
+        if (extVarMean > bevelExtVarThreshold) {
+          console.log(`[mean_profile] top: bevel continuation rejected (extVarMean=${extVarMean.toFixed(0)} > ${bevelExtVarThreshold} — painting content)`);
+        } else {
+          cropTopForBand = cropTop + extSimple;
+          // Pass 2 (adaptiveRef): finds the actual frame/painting boundary for the crop.
+          const ext = columnPercentileScan(cropTop, scanN, +1, 'top-bevel-cont-adaptive', bevelMinEdgeLum, true);
+          // Ratio guard + size guard on bestExt: if the adaptive pass returns more than 3×
+          // the non-adaptive result, it has likely latched onto painting content rather than
+          // the true frame boundary (the adaptive reference search found a bright painting
+          // region instead of bright frame material). Fall back to stable extSimple in that
+          // case. Also cap by the absolute size limit to catch remaining outliers.
+          const bevelLimit = Math.round(height * bevelMaxExtFrac);
+          const rawBest = Math.max(extSimple, ext);
+          const bestExt = (rawBest > extSimple * 3 || rawBest > bevelLimit) ? extSimple : rawBest;
+          if (bestExt > 0) { console.log(`[mean_profile] top: bevel continuation simple=${extSimple}px adaptive=${ext}px → using ${bestExt}px → ${cropTop + bestExt}px total`); cropTop += bestExt; }
+        }
       }
     }
   }
@@ -1082,13 +1173,21 @@ async function meanProfilePreProcessor(buffer, {
       // Size guard: implausibly large extension means the classifier hit painting content.
       if (extSimple > Math.round(height * bevelMaxExtFrac)) {
         console.log(`[mean_profile] bottom: bevel continuation rejected (extSimple=${extSimple}px > ${Math.round(height * bevelMaxExtFrac)}px limit, no clear frame boundary)`);
-      } else {
-        cropBottomForBand = cropBottom + extSimple;
-        const ext = columnPercentileScan(height - 1 - cropBottom, scanN, -1, 'bottom-bevel-cont-adaptive', bevelMinEdgeLum, true);
-        const bevelLimit = Math.round(height * bevelMaxExtFrac);
-        const rawBest = Math.max(extSimple, ext);
-        const bestExt = (rawBest > extSimple * 3 || rawBest > bevelLimit) ? extSimple : rawBest;
-        if (bestExt > 0) { console.log(`[mean_profile] bottom: bevel continuation simple=${extSimple}px adaptive=${ext}px → using ${bestExt}px → ${cropBottom + bestExt}px total`); cropBottom += bestExt; }
+      } else if (extSimple > 0) {
+        // Variance gate: reject extension if the extended rows have painting-level variance.
+        const extCheckN = Math.min(5, extSimple);
+        const extStart = height - cropBottom - extSimple;
+        const extVarMean = rowVariances.slice(extStart, extStart + extCheckN).reduce((s, v) => s + v, 0) / extCheckN;
+        if (extVarMean > bevelExtVarThreshold) {
+          console.log(`[mean_profile] bottom: bevel continuation rejected (extVarMean=${extVarMean.toFixed(0)} > ${bevelExtVarThreshold} — painting content)`);
+        } else {
+          cropBottomForBand = cropBottom + extSimple;
+          const ext = columnPercentileScan(height - 1 - cropBottom, scanN, -1, 'bottom-bevel-cont-adaptive', bevelMinEdgeLum, true);
+          const bevelLimit = Math.round(height * bevelMaxExtFrac);
+          const rawBest = Math.max(extSimple, ext);
+          const bestExt = (rawBest > extSimple * 3 || rawBest > bevelLimit) ? extSimple : rawBest;
+          if (bestExt > 0) { console.log(`[mean_profile] bottom: bevel continuation simple=${extSimple}px adaptive=${ext}px → using ${bestExt}px → ${cropBottom + bestExt}px total`); cropBottom += bestExt; }
+        }
       }
     }
   }
@@ -1111,12 +1210,15 @@ async function meanProfilePreProcessor(buffer, {
   // Use col median (not mean) for L/R detection: robust against isolated bright grain
   // columns within a dark wood frame that inflate the mean and cause early scan termination.
   const cornerColMeans = Array.from({ length: width }, (_, x) => colMedianInBands(x, cornerBands));
+  const cornerColBandMADs = Array.from({ length: width }, (_, x) => colBandMAD(x, cornerBands));
   // Parallel chroma profile for color-based L/R detection: median chromaticity distance
   // per column within the same corner bands. Only computed for colour images.
   const cornerColChromaScores = channels >= 3
     ? Array.from({ length: width }, (_, x) => colChromaMedianInBands(x, cornerBands))
     : null;
   const _tColMedians = Date.now();
+  console.log(`[mean_profile] colMeansProfile(0-${Math.min(24, maxCols)-1})=[${cornerColMeans.slice(0, Math.min(25, maxCols)).map(v => v.toFixed(1)).join(',')}]`);
+  console.log(`[mean_profile] colBandMADProfile(0-${Math.min(24, maxCols)-1})=[${cornerColBandMADs.slice(0, Math.min(25, maxCols)).map(v => v.toFixed(1)).join(',')}]`);
 
   // Guard: if col medians are nearly flat across all columns the bands are still
   // non-discriminating — skip left/right rather than produce false positives.
@@ -1138,11 +1240,22 @@ async function meanProfilePreProcessor(buffer, {
   //      typically < 15px. A result of 3%+ is almost always dark painting content. This
   //      mirrors the bevel continuation size guard and is similarly calibrated.
   const strictLR = cropTopForBand === 0 && cropBottomForBand === 0;
-  const lrThreshold = strictLR ? 45 : null;
   const lrMaxCrop = strictLR ? Math.round(width * 0.03) : Infinity;
   if (strictLR) console.log(`[mean_profile] L/R: no T/B bands detected — strict mode (threshold=45, maxCrop=${lrMaxCrop}px)`);
-  let cropLeft  = (colMeansDiscriminating && detectionMode !== 'color') ? incrementalScan(cornerColMeans, maxCols, 'left', lrThreshold) : 0;
-  let cropRight = (colMeansDiscriminating && detectionMode !== 'color') ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right', lrThreshold) : 0;
+  // Adaptive consistency threshold for L/R: when the outer frame reference is near-black
+  // (refMean < half the default consistencyThreshold), tighten the threshold proportionally.
+  // Near-black frames transitioning to even moderately dark painting backgrounds benefit
+  // from a narrower band. Gold/bright frames are unaffected (formula hits the 35 cap).
+  const initColRefN = Math.min(5, Math.floor(maxCols / 2));
+  const leftEdgeRefMean  = cornerColMeans.slice(0, initColRefN).reduce((s, v) => s + v, 0) / initColRefN;
+  const rightEdgeRefMean = cornerColMeans.slice(-initColRefN).reduce((s, v) => s + v, 0) / initColRefN;
+  const lrThresholdLeft  = strictLR ? 45 : Math.min(consistencyThreshold, Math.max(15, Math.round(leftEdgeRefMean  * 2)));
+  const lrThresholdRight = strictLR ? 45 : Math.min(consistencyThreshold, Math.max(15, Math.round(rightEdgeRefMean * 2)));
+  if (!strictLR && (lrThresholdLeft !== consistencyThreshold || lrThresholdRight !== consistencyThreshold)) {
+    console.log(`[mean_profile] L/R: adaptive threshold — left refMean=${leftEdgeRefMean.toFixed(1)} → threshold=${lrThresholdLeft}, right refMean=${rightEdgeRefMean.toFixed(1)} → threshold=${lrThresholdRight}`);
+  }
+  let cropLeft  = (colMeansDiscriminating && detectionMode !== 'color') ? incrementalScan(cornerColMeans, maxCols, 'left', lrThresholdLeft, null, null, cornerColBandMADs) : 0;
+  let cropRight = (colMeansDiscriminating && detectionMode !== 'color') ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right', lrThresholdRight, null, null, [...cornerColBandMADs].reverse()) : 0;
   if (cropLeft  > lrMaxCrop) { console.log(`[mean_profile] left: strict-mode size cap — ${cropLeft}px > ${lrMaxCrop}px limit → 0`);  cropLeft  = 0; }
   if (cropRight > lrMaxCrop) { console.log(`[mean_profile] right: strict-mode size cap — ${cropRight}px > ${lrMaxCrop}px limit → 0`); cropRight = 0; }
 
