@@ -14754,6 +14754,8 @@ function renderWebSourcesGlobalSettings() {
   const currentPreProc  = webSourcesConfig?.imageProcessing?.preProcessor  || 'variance_scan';
   const currentStrategy = webSourcesConfig?.imageProcessing?.sharpStrategy || 'attention';
   const currentDetMode  = webSourcesConfig?.imageProcessing?.detectionMode || 'combined';
+  const currentSkipLowRes   = webSourcesConfig?.imageProcessing?.skipLowRes   ?? false;
+  const currentMinResolution = webSourcesConfig?.imageProcessing?.minResolution ?? 1080;
   if (preProcessors.length > 0 || strategies.length > 0) {
     const processingHtml = `
       <div class="ws-global-setting" style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color,#e0e0e0);">
@@ -14778,6 +14780,20 @@ function renderWebSourcesGlobalSettings() {
             ${strategies.map(s => `<option value="${s.value}" ${currentStrategy === s.value ? 'selected' : ''}>${escapeHtml(s.label)}</option>`).join('')}
           </select>
         ` : ''}
+        <label class="ws-global-label" style="margin-top:16px;display:block;">Minimum Resolution</label>
+        <p class="pool-health-description">Skip images whose shorter side is below this threshold (pixels) and fetch a different one. Uses up to 3 attempts. Useful for sources that occasionally serve very small images.</p>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:4px;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <input type="checkbox" id="ws-skip-low-res-toggle" ${currentSkipLowRes ? 'checked' : ''}>
+            <span>Skip low-resolution images</span>
+          </label>
+        </div>
+        <div id="ws-min-resolution-row" style="display:${currentSkipLowRes ? 'flex' : 'none'};align-items:center;gap:8px;margin-top:8px;">
+          <label for="ws-min-resolution-input" style="white-space:nowrap;">Minimum short side:</label>
+          <input type="number" id="ws-min-resolution-input" class="ws-select" style="width:100px;"
+            min="360" max="3840" step="1" value="${currentMinResolution}">
+          <span style="opacity:0.7;">px</span>
+        </div>
       </div>`;
     container.insertAdjacentHTML('beforeend', processingHtml);
 
@@ -14840,6 +14856,50 @@ function renderWebSourcesGlobalSettings() {
         }
       } catch (error) {
         console.error('Error updating crop strategy:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    });
+
+    document.getElementById('ws-skip-low-res-toggle')?.addEventListener('change', async (e) => {
+      const skipLowRes = e.target.checked;
+      document.getElementById('ws-min-resolution-row').style.display = skipLowRes ? 'flex' : 'none';
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ skipLowRes }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
+          showToast(skipLowRes ? 'Low-res skip enabled' : 'Low-res skip disabled');
+        } else {
+          throw new Error(data.error || 'Failed to update setting');
+        }
+      } catch (error) {
+        console.error('Error updating skip low-res setting:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    });
+
+    document.getElementById('ws-min-resolution-input')?.addEventListener('change', async (e) => {
+      const minResolution = parseInt(e.target.value, 10);
+      if (!Number.isFinite(minResolution) || minResolution < 1) return;
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ minResolution }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
+          showToast('Minimum resolution updated');
+        } else {
+          throw new Error(data.error || 'Failed to update setting');
+        }
+      } catch (error) {
+        console.error('Error updating minimum resolution:', error);
         showToast(`Error: ${error.message}`, 'error');
       }
     });

@@ -1,5 +1,7 @@
 const axios = require('axios');
+const sharp = require('sharp');
 const { CookieJar } = require('tough-cookie');
+const { dezoomify } = require('../utils/dezoomify');
 
 // All art medium entities listed on artsandculture.google.com/category/medium,
 // identified by Google/Freebase Knowledge Graph IDs. Discovered via BFS through the
@@ -668,8 +670,25 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
       fetchAssetDetails(artwork.assetId),
     ]);
 
-    const imageBuffer = Buffer.from(imageResponse.data);
+    let imageBuffer = Buffer.from(imageResponse.data);
     const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
+
+    // Check if the downloaded image can cover the TV's 4K target without upscaling.
+    // The target depends on orientation: portrait filter → portrait TV (2160×3840);
+    // otherwise → landscape TV (3840×2160). Cover-fit requires imageW >= targetW AND
+    // imageH >= targetH. If either is short, dezoomify-rs can fetch tiles at higher zoom.
+    const [targetW, targetH] = aspectRatio === 'portrait' ? [2160, 3840] : [3840, 2160];
+    const { width: dlW, height: dlH } = await sharp(imageBuffer).metadata();
+    if (dlW < targetW || dlH < targetH) {
+      console.log(`[google_arts] Image is ${dlW}×${dlH} (below ${targetW}×${targetH} target); attempting dezoomify for ${artworkUrl}`);
+      const dezoomedBuffer = await dezoomify(artworkUrl, { maxWidth: 4801 });
+      if (dezoomedBuffer) {
+        imageBuffer = dezoomedBuffer;
+        console.log(`[google_arts] dezoomify succeeded for ${artworkUrl}`);
+      } else {
+        console.log(`[google_arts] dezoomify unavailable or failed; using ${dlW}×${dlH} image`);
+      }
+    }
 
     return {
       imageBuffer,
@@ -771,7 +790,7 @@ async function clearCookies() {
  * @returns {{ imageBuffer, contentType, metadata }}
  * @throws {Error} if the identifier cannot be parsed, the asset is inaccessible, or download fails.
  */
-async function fetchByIdentifier(identifier) {
+async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
   await seedCookies();
 
   // Parse asset ID from /asset/<slug>/<id> path, or accept a bare ID directly.
@@ -844,9 +863,27 @@ async function fetchByIdentifier(identifier) {
     timeout: 30000,
   }).catch(err => { throw new Error(`Failed to download Google Arts image: ${err.message}`); });
 
+  let imageBuffer = Buffer.from(imageResponse.data);
+  const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
+
+  // Dezoomify fallback: if the direct download can't cover the TV's 4K target without
+  // upscaling, try fetching higher-resolution tiles from the artwork page.
+  const [targetW, targetH] = tvOrientation === 'portrait' ? [2160, 3840] : [3840, 2160];
+  const { width: dlW, height: dlH } = await sharp(imageBuffer).metadata();
+  if (dlW < targetW || dlH < targetH) {
+    console.log(`[google_arts] fetchByIdentifier: ${dlW}×${dlH} is below ${targetW}×${targetH}; attempting dezoomify for ${artworkUrl}`);
+    const dezoomedBuffer = await dezoomify(artworkUrl, { maxWidth: 4801 });
+    if (dezoomedBuffer) {
+      imageBuffer = dezoomedBuffer;
+      console.log(`[google_arts] dezoomify succeeded for ${artworkUrl}`);
+    } else {
+      console.log(`[google_arts] dezoomify unavailable or failed; using ${dlW}×${dlH} image`);
+    }
+  }
+
   return {
-    imageBuffer: Buffer.from(imageResponse.data),
-    contentType: imageResponse.headers['content-type'] || 'image/jpeg',
+    imageBuffer,
+    contentType,
     metadata: {
       title:              cobject?.title || extendedDetails.title || null,
       creator:            cobject?.creator || extendedDetails.creator || null,

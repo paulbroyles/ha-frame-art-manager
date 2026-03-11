@@ -3,6 +3,7 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
 const axios = require('axios');
+const sharp = require('sharp');
 const { processWebSourceImage, solidBorderStrip, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA } = require('../utils/imageProcessor');
 
 // Source modules — each must export fetchRandomArtwork, metadataFields, and defaultMapping.
@@ -141,6 +142,8 @@ async function readWebSourcesConfig(frameArtPath) {
   if (!config.perTvCache) config.perTvCache = {};
   if (!config.imageProcessing) config.imageProcessing = { preProcessor: 'corner_consensus', cropEngine: 'sharp', sharpStrategy: 'attention' };
   if (!config.imageProcessing.preProcessor) config.imageProcessing.preProcessor = 'corner_consensus';
+  if (!Object.prototype.hasOwnProperty.call(config.imageProcessing, 'skipLowRes')) config.imageProcessing.skipLowRes = false;
+  if (!config.imageProcessing.minResolution) config.imageProcessing.minResolution = 1080;
 
   // Ensure all builtin sources are present (add any missing ones with defaults)
   for (const [id, def] of Object.entries(BUILTIN_SOURCES)) {
@@ -336,7 +339,7 @@ router.get('/config', async (req, res) => {
 // PUT /api/web-sources/image-processing
 router.put('/image-processing', async (req, res) => {
   try {
-    const { preProcessor, cropEngine, sharpStrategy, detectionMode } = req.body;
+    const { preProcessor, cropEngine, sharpStrategy, detectionMode, skipLowRes, minResolution } = req.body;
     const validPreProcessors  = IMAGE_PROCESSING_SCHEMA.preProcessors.map(p => p.value);
     const validEngines        = IMAGE_PROCESSING_SCHEMA.cropEngines.map(e => e.value);
     const validStrategies     = IMAGE_PROCESSING_SCHEMA.sharpStrategies.map(s => s.value);
@@ -353,11 +356,19 @@ router.put('/image-processing', async (req, res) => {
     if (detectionMode && !validDetectionModes.includes(detectionMode)) {
       return res.status(400).json({ error: `detectionMode must be one of: ${validDetectionModes.join(', ')}` });
     }
+    if (skipLowRes !== undefined && typeof skipLowRes !== 'boolean') {
+      return res.status(400).json({ error: 'skipLowRes must be a boolean' });
+    }
+    if (minResolution !== undefined && (typeof minResolution !== 'number' || minResolution < 1 || !Number.isFinite(minResolution))) {
+      return res.status(400).json({ error: 'minResolution must be a positive number' });
+    }
     const webSources = await readWebSourcesConfig(req.frameArtPath);
-    if (preProcessor)  webSources.imageProcessing.preProcessor  = preProcessor;
-    if (cropEngine)    webSources.imageProcessing.cropEngine    = cropEngine;
-    if (sharpStrategy) webSources.imageProcessing.sharpStrategy = sharpStrategy;
-    if (detectionMode) webSources.imageProcessing.detectionMode = detectionMode;
+    if (preProcessor  !== undefined) webSources.imageProcessing.preProcessor  = preProcessor;
+    if (cropEngine    !== undefined) webSources.imageProcessing.cropEngine    = cropEngine;
+    if (sharpStrategy !== undefined) webSources.imageProcessing.sharpStrategy = sharpStrategy;
+    if (detectionMode !== undefined) webSources.imageProcessing.detectionMode = detectionMode;
+    if (skipLowRes    !== undefined) webSources.imageProcessing.skipLowRes    = skipLowRes;
+    if (minResolution !== undefined) webSources.imageProcessing.minResolution = minResolution;
     await writeWebSourcesConfig(req.frameArtPath, webSources);
     res.json({ success: true, imageProcessing: webSources.imageProcessing });
   } catch (error) {
@@ -562,7 +573,24 @@ router.post('/fetch-and-display', async (req, res) => {
     }
 
     const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
-    const fetchResult = await fetcher(fetcherOpts.mediaFilter, { aspectRatio });
+
+    // Fetch, with optional retry when the image is below the minimum resolution threshold.
+    // skipLowRes is off by default; when on, images whose short side is < minResolution
+    // are discarded and the fetcher is called again (up to MAX_LOW_RES_ATTEMPTS times).
+    const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
+    const MAX_LOW_RES_ATTEMPTS = 3;
+    let fetchResult;
+    for (let attempt = 0; attempt < MAX_LOW_RES_ATTEMPTS; attempt++) {
+      fetchResult = await fetcher(fetcherOpts.mediaFilter, { aspectRatio });
+      if (!skipLowRes) break;
+      const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
+      const shortSide = Math.min(width, height);
+      if (shortSide >= minResolution) break;
+      console.warn(`[web_sources] Skipping low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_LOW_RES_ATTEMPTS})`);
+      if (attempt === MAX_LOW_RES_ATTEMPTS - 1) {
+        console.warn(`[web_sources] All ${MAX_LOW_RES_ATTEMPTS} attempts returned low-res images; using last result`);
+      }
+    }
     const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
     const orientation = tvOrientation || 'landscape';
@@ -640,9 +668,13 @@ router.delete('/cache/:deviceId', async (req, res) => {
  *   - Numeric string (assumed to be a Met Museum object ID)
  *   - Any other HTTP(S) URL (downloaded directly; metadata is minimal)
  *
- * Returns { chosenSourceId, imageBuffer, contentType, artMetadata } or throws.
+ * @param {string} specificImage
+ * @param {object} [options]
+ * @param {'landscape'|'portrait'} [options.tvOrientation] - TV orientation, passed to source
+ *   modules that need it for resolution decisions (e.g. dezoomify threshold selection).
+ * @returns {{ chosenSourceId, imageBuffer, contentType, artMetadata }}
  */
-async function fetchSpecificImage(specificImage) {
+async function fetchSpecificImage(specificImage, { tvOrientation } = {}) {
   const trimmed = specificImage.trim();
 
   // Ask each source module if it can handle this identifier. Modules are checked
@@ -650,7 +682,7 @@ async function fetchSpecificImage(specificImage) {
   // before google_art_wallpaper for the shared artsandculture.google.com domain) win.
   for (const [sourceId, mod] of Object.entries(SOURCE_MODULES)) {
     if (mod.canHandleIdentifier?.(trimmed)) {
-      const result = await mod.fetchByIdentifier(trimmed);
+      const result = await mod.fetchByIdentifier(trimmed, { tvOrientation });
       return { chosenSourceId: sourceId, ...result, artMetadata: result.metadata };
     }
   }
@@ -692,7 +724,7 @@ router.post('/test-fetch', async (req, res) => {
 
     if (specificImage && specificImage.trim()) {
       // Fetch a specific image rather than a random one from an enabled source.
-      ({ chosenSourceId, imageBuffer, contentType, artMetadata } = await fetchSpecificImage(specificImage));
+      ({ chosenSourceId, imageBuffer, contentType, artMetadata } = await fetchSpecificImage(specificImage, { tvOrientation }));
       // If source could not be determined (direct URL), fall back to first enabled source for
       // processing pipeline metadata (alreadyProcessed flag, effectiveMapping).
       if (!chosenSourceId) {

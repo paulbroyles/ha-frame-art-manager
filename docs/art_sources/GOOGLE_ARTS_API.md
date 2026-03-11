@@ -432,6 +432,27 @@ The image server (`lh3.googleusercontent.com`) accepts arbitrary dimensions. Omi
 - Image narrower than or equal to 16:9 → `=w4800` (width anchor: 3840 × 1.25)
 - Aspect ratio unknown → `=w4800` (safe default)
 
+### Dezoomify Fallback
+
+Some artworks are served at very low resolution via the normal image-serving API. Example: asset `UAGGV52Hyuddqw` (*The Celestial Virgin and Child*) downloads at only 883×1200 despite being displayed in a high-resolution zoomable viewer on its artwork page.
+
+When the downloaded image cannot cover the TV's 4K target without upscaling (i.e., `imageW < targetW || imageH < targetH`, where the target is 3840×2160 for landscape or 2160×3840 for portrait), `sources/google_arts.js` calls `dezoomify-rs` as a fallback.
+
+**dezoomify-rs** auto-detects the deep-zoom tile protocol used by Google Arts & Culture and fetches tiles at the smallest zoom level that satisfies a `--max-width` constraint. This gives a high-resolution image from the same tile server used by the browser's interactive viewer — no additional authentication required.
+
+**Invocation:**
+```
+dezoomify-rs --max-width 4801 --compression 0 <artworkUrl> <outputFile>
+```
+
+- `artworkUrl`: the artwork page URL (e.g., `https://artsandculture.google.com/asset/slug/assetId`)
+- `--max-width 4801`: fetches tiles at the zoom level nearest to but not below 4801px wide (one above the 4800px target, to avoid boundary rounding down)
+- `--compression 0`: disables dezoomify's own compression; the tiles are already JPEG
+
+**Binary**: `dezoomify-rs` v2.15.0, installed at `/usr/local/bin/dezoomify-rs` in the Docker image. Alpine Linux uses `gcompat` for glibc compatibility. Binary source: [dezoomify-rs releases](https://github.com/nicokosi/dezoomify-rs/releases/tag/v2.15.0) (`dezoomify-rs-linux.tgz`).
+
+**Fallback behavior**: If dezoomify-rs is not installed or fails, the original (potentially low-res) image is used. This is logged with a warning and the pipeline continues.
+
 ---
 
 ## Pagination Token (`pt`) Format
