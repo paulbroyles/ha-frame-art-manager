@@ -1445,8 +1445,10 @@ async function getMlSegmenter() {
   const { pipeline, env } = await import('@huggingface/transformers');
   env.cacheDir = process.env.TRANSFORMERS_CACHE || '/data/huggingface';
   console.log('[imageProcessor] ml_segment: loading RMBG-1.4 pipeline (first use; may download ~44 MB model)...');
+  // device: 'wasm' uses the WebAssembly ONNX backend — no native binaries,
+  // works on Alpine/musl without glibc. Slower than native but platform-portable.
   _mlSegmenter = await pipeline('image-segmentation', 'briaai/RMBG-1.4', {
-    device: 'cpu',
+    device: 'wasm',
     dtype:  'q8',
   });
   console.log('[imageProcessor] ml_segment: pipeline ready');
