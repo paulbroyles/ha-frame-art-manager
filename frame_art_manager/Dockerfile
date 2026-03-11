@@ -17,6 +17,7 @@ RUN apk add --no-cache \
     jq \
     curl \
     gcompat \
+    libc6-compat \
     && git lfs install
 
 # Install dezoomify-rs for high-resolution image downloads from tile-based sources
