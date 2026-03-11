@@ -14749,12 +14749,14 @@ function renderWebSourcesGlobalSettings() {
 
   // Image processing settings
   const preProcessors   = webSourceImageProcessingSchema.preProcessors  || [];
+  const cropEngines     = webSourceImageProcessingSchema.cropEngines     || [];
   const strategies      = webSourceImageProcessingSchema.sharpStrategies || [];
   const detectionModes  = webSourceImageProcessingSchema.detectionModes  || [];
   const currentPreProc  = webSourcesConfig?.imageProcessing?.preProcessor  || 'variance_scan';
+  const currentEngine   = webSourcesConfig?.imageProcessing?.cropEngine   || 'sharp';
   const currentStrategy = webSourcesConfig?.imageProcessing?.sharpStrategy || 'attention';
   const currentDetMode  = webSourcesConfig?.imageProcessing?.detectionMode || 'combined';
-  if (preProcessors.length > 0 || strategies.length > 0) {
+  if (preProcessors.length > 0 || cropEngines.length > 0 || strategies.length > 0) {
     const processingHtml = `
       <div class="ws-global-setting" style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color,#e0e0e0);">
         ${preProcessors.length > 0 ? `
@@ -14771,12 +14773,21 @@ function renderWebSourcesGlobalSettings() {
             ${detectionModes.map(m => `<option value="${m.value}" ${currentDetMode === m.value ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
           </select>
         ` : ''}
-        ${strategies.length > 0 ? `
-          <label class="ws-global-label" style="margin-top:16px;display:block;">Crop Strategy</label>
-          <p class="pool-health-description">How to select which portion of an image to keep when cropping to fit the TV's 16:9 aspect ratio.</p>
-          <select id="ws-crop-strategy-select" class="ws-select">
-            ${strategies.map(s => `<option value="${s.value}" ${currentStrategy === s.value ? 'selected' : ''}>${escapeHtml(s.label)}</option>`).join('')}
+        ${cropEngines.length > 0 ? `
+          <label class="ws-global-label" style="margin-top:16px;display:block;">Crop Engine</label>
+          <p class="pool-health-description">Which engine to use when cropping the image to fit the TV's aspect ratio.</p>
+          <select id="ws-crop-engine-select" class="ws-select">
+            ${cropEngines.map(e => `<option value="${e.value}" ${currentEngine === e.value ? 'selected' : ''}>${escapeHtml(e.label)}</option>`).join('')}
           </select>
+        ` : ''}
+        ${strategies.length > 0 ? `
+          <div id="ws-sharp-strategy-row" style="margin-top:16px;${currentEngine !== 'sharp' ? 'display:none;' : ''}">
+            <label class="ws-global-label" style="display:block;">Crop Strategy <span style="font-weight:normal;opacity:0.6;">(Sharp only)</span></label>
+            <p class="pool-health-description">How to select which portion of an image to keep when cropping to fit the TV's 16:9 aspect ratio.</p>
+            <select id="ws-crop-strategy-select" class="ws-select">
+              ${strategies.map(s => `<option value="${s.value}" ${currentStrategy === s.value ? 'selected' : ''}>${escapeHtml(s.label)}</option>`).join('')}
+            </select>
+          </div>
         ` : ''}
       </div>`;
     container.insertAdjacentHTML('beforeend', processingHtml);
@@ -14819,6 +14830,29 @@ function renderWebSourcesGlobalSettings() {
         }
       } catch (error) {
         console.error('Error updating detection mode:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    });
+
+    document.getElementById('ws-crop-engine-select')?.addEventListener('change', async (e) => {
+      const cropEngine = e.target.value;
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cropEngine }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
+          const strategyRow = document.getElementById('ws-sharp-strategy-row');
+          if (strategyRow) strategyRow.style.display = cropEngine === 'sharp' ? '' : 'none';
+          showToast('Crop engine updated');
+        } else {
+          throw new Error(data.error || 'Failed to update setting');
+        }
+      } catch (error) {
+        console.error('Error updating crop engine:', error);
         showToast(`Error: ${error.message}`, 'error');
       }
     });
