@@ -817,16 +817,25 @@ async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
     throw new Error(`Failed to fetch Google Arts asset ${assetId}: ${err.message}`);
   }
 
-  // Try to find the artwork's cobject in the response (gives imageBase, title, creator, color).
+  // Try to find the artwork's cobject in the response (gives color and aspectRatio).
+  // Filter by assetId: extractArtworks does a DFS that may return cobjects for related
+  // artworks first, so artworks[0] may not correspond to the requested asset.
   const artworks = extractArtworks(parsed);
-  const cobject = artworks[0] || null;
+  const cobject = artworks.find(a => a.assetId === assetId) || null;
 
-  // Parse stella.ap / stella.av for extended metadata and title/creator fallbacks.
+  // Parse stella.ap / stella.av for image URL, extended metadata, and title/creator fallbacks.
   const ap = parsed?.[0]?.[0];
+  let imageBase = null;
   let extendedDetails = {};
   if (Array.isArray(ap) && ap[0] === 'stella.ap') {
     const av = ap[2];
     if (Array.isArray(av) && av[0] === 'stella.av') {
+      // av[4] is the primary image URL for the requested asset. Unlike cobject.imageBase,
+      // this always corresponds to the requested assetId (not a related artwork).
+      const rawImageUrl = av[4];
+      if (typeof rawImageUrl === 'string' && rawImageUrl) {
+        imageBase = rawImageUrl.startsWith('//') ? `https:${rawImageUrl}` : rawImageUrl;
+      }
       const structured = parseStructuredFields(av[12]);
       const rawDesc = Array.isArray(av[5]) ? av[5][1] : null;
       extendedDetails = {
@@ -840,14 +849,12 @@ async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
         repository:         structured['Repository'] || null,
       };
     }
-  }
-
-  // Determine image base URL: prefer cobject (reliable), fall back to ap[1].
-  let imageBase = cobject?.imageBase || null;
-  if (!imageBase && Array.isArray(ap) && ap[0] === 'stella.ap') {
-    const candidate = ap[1];
-    if (typeof candidate === 'string' && (candidate.includes('googleusercontent') || candidate.startsWith('//'))) {
-      imageBase = candidate.startsWith('//') ? `https:${candidate}` : candidate;
+    // Secondary fallback: ap[1] sometimes contains the image URL directly
+    if (!imageBase) {
+      const candidate = ap[1];
+      if (typeof candidate === 'string' && (candidate.includes('googleusercontent') || candidate.startsWith('//'))) {
+        imageBase = candidate.startsWith('//') ? `https:${candidate}` : candidate;
+      }
     }
   }
   if (!imageBase) {
@@ -855,7 +862,9 @@ async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
   }
 
   const imageUrl = buildDownloadUrl(imageBase, cobject?.aspectRatio ?? null);
-  const artworkUrl = cobject ? `${BASE_URL}${cobject.link}` : `${BASE_URL}/asset/-/${assetId}`;
+  // artworkUrl is always derived from the parsed assetId (not cobject.link, which may point
+  // to a different artwork if the matching cobject wasn't found in the response).
+  const artworkUrl = `${BASE_URL}/asset/-/${assetId}`;
 
   const imageResponse = await axios.get(imageUrl, {
     responseType: 'arraybuffer',
