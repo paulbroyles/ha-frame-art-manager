@@ -16,12 +16,21 @@ const sharp = require('sharp');
   const ORT_SYMBOL = Symbol.for('onnxruntime');
   if (ORT_SYMBOL in globalThis) return;
   try {
-    // Use dist/ort.node.min.js (the default Node.js entry) — loads WASM via
-    // file: URLs (Node.js compatible). The /wasm subpath (dist/ort.wasm.min.js)
-    // is the browser build that uses blob: URLs, which Node.js rejects.
+    // Use dist/ort.node.min.js (the default Node.js entry). The /wasm subpath
+    // (dist/ort.wasm.min.js) is a browser build that uses blob: URLs which Node.js
+    // rejects. ort.node.min.js uses dynamic import() for the WASM backend file
+    // (ort-wasm-simd-threaded.mjs), but resolves it via https: by default in
+    // onnxruntime-web v1.22.0-dev. Setting env.wasm.wasmPaths to a file: URL
+    // forces it to load from the local dist/ directory instead.
     const ortWeb = require('onnxruntime-web');
-    globalThis[ORT_SYMBOL] = ortWeb.default ?? ortWeb;
-    console.log('[imageProcessor] pre-loaded onnxruntime-web into globalThis[ORT_SYMBOL]');
+    const ortObj = ortWeb.default ?? ortWeb;
+    const wasmDistDir = require('url').pathToFileURL(
+      require('path').dirname(require.resolve('onnxruntime-web')) + require('path').sep
+    ).href;
+    ortObj.env.wasm.wasmPaths = wasmDistDir;
+    ortObj.env.wasm.numThreads = 1;
+    globalThis[ORT_SYMBOL] = ortObj;
+    console.log('[imageProcessor] pre-loaded onnxruntime-web into globalThis[ORT_SYMBOL], wasmPaths:', wasmDistDir);
   } catch (e) {
     console.warn('[imageProcessor] Could not pre-load onnxruntime-web:', e.message);
   }
