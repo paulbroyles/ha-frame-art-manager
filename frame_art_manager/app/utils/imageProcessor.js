@@ -2,6 +2,31 @@
 
 const sharp = require('sharp');
 
+// Alpine/musl workaround: pre-populate globalThis[ORT_SYMBOL] synchronously at module
+// load time so that @huggingface/transformers' top-level code (which runs when the module
+// is first imported, even via mlSegmentPreProcessor's RawImage import) takes the
+// ORT_SYMBOL branch instead of the IS_NODE_ENV → onnxruntime-node (glibc) branch.
+//
+// Must be synchronous: async functions that import @huggingface/transformers (including
+// mlSegmentPreProcessor itself) may trigger module evaluation before getMlSegmenter runs.
+//
+// Companion Dockerfile patch adds 'wasm' to supportedDevices in the ORT_SYMBOL branch
+// of transformers.web.js, since that branch sets ONNX but leaves supportedDevices=[].
+(function initOrtSymbol() {
+  const ORT_SYMBOL = Symbol.for('onnxruntime');
+  if (ORT_SYMBOL in globalThis) return;
+  try {
+    // Must use the /wasm subpath (dist/ort.wasm.min.js) — the default entry
+    // (dist/ort.node.min.js) is the native-first Node.js build with no working
+    // InferenceSession on Alpine/musl.
+    const ortWasm = require('onnxruntime-web/wasm');
+    globalThis[ORT_SYMBOL] = ortWasm.default ?? ortWasm;
+    console.log('[imageProcessor] pre-loaded onnxruntime-web/wasm into globalThis[ORT_SYMBOL]');
+  } catch (e) {
+    console.warn('[imageProcessor] Could not pre-load onnxruntime-web/wasm:', e.message);
+  }
+}());
+
 // ── Target dimensions ─────────────────────────────────────────────────────────
 
 const LANDSCAPE_TARGET = { w: 3840, h: 2160 };
@@ -1443,22 +1468,7 @@ let _mlSegmenter = null;
 async function getMlSegmenter() {
   if (_mlSegmenter) return _mlSegmenter;
 
-  // Alpine/musl workaround for @huggingface/transformers:
-  //
-  // onnxruntime-node's prebuilt binaries require glibc symbols absent on Alpine/musl.
-  // Transformers.js checks globalThis[Symbol.for('onnxruntime')] BEFORE IS_NODE_ENV,
-  // so pre-populating it bypasses the onnxruntime-node path entirely.
-  //
-  // IMPORTANT: require('onnxruntime-web') loads dist/ort.node.min.js — the Node.js
-  // native-first build with no working InferenceSession on Alpine/musl. Must use the
-  // WASM-only subpath: require('onnxruntime-web/wasm') → dist/ort.wasm.min.js.
-  const ORT_SYMBOL = Symbol.for('onnxruntime');
-  if (!(ORT_SYMBOL in globalThis)) {
-    const ortWasm = require('onnxruntime-web/wasm');
-    globalThis[ORT_SYMBOL] = ortWasm.default ?? ortWasm;
-    console.log('[imageProcessor] ml_segment: pre-loaded onnxruntime-web/wasm (pure WASM backend)');
-  }
-
+  // ORT_SYMBOL is pre-populated at module load time (see top of file).
   const { pipeline, env } = await import('@huggingface/transformers');
   env.cacheDir = process.env.TRANSFORMERS_CACHE || '/data/huggingface';
   console.log('[imageProcessor] ml_segment: loading RMBG-1.4 pipeline (first use; may download ~44 MB model)...');
