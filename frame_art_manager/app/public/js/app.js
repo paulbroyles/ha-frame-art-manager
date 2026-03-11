@@ -15590,17 +15590,21 @@ function renderWebSourcesTestSection() {
     const m = testCache.metadata || {};
     const fetched = testCache.fetchedAt ? new Date(testCache.fetchedAt).toLocaleString() : '';
 
-    // Artwork metadata rows
-    const metaRows = [
-      ['Source', m.source],
-      ['Title', m.title],
-      ['Creator', m.creator],
-      ['Medium', m.medium],
-      ['Attribution', m.attribution],
-      ['Fetched', fetched],
-    ].filter(([, v]) => v).map(([k, v]) =>
-      `<tr><td style="font-weight:600;padding:3px 12px 3px 0;white-space:nowrap;">${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`
-    ).join('');
+    // Artwork metadata rows — built from source's declared metadataFields so all
+    // available fields are shown, with any undeclared extras appended afterward.
+    const sourceFields = webSourceMetadata[testCache.sourceId]?.fields || [];
+    const declaredKeys = new Set(['artworkUrl', ...sourceFields.map(f => f.key)]);
+    const declaredRows = sourceFields
+      .filter(f => m[f.key] != null && m[f.key] !== '')
+      .map(f => [f.label, String(m[f.key])]);
+    const extraRows = Object.entries(m)
+      .filter(([k, v]) => !declaredKeys.has(k) && v != null && v !== '')
+      .map(([k, v]) => [k, String(v)]);
+    const metaRows = [...declaredRows, ...extraRows, fetched ? ['Fetched', fetched] : null]
+      .filter(Boolean)
+      .map(([k, v]) =>
+        `<tr><td style="font-weight:600;padding:3px 12px 3px 0;white-space:nowrap;">${escapeHtml(k)}</td><td>${escapeHtml(String(v))}</td></tr>`
+      ).join('');
 
     const artworkLinkRow = testCache.artworkUrl
       ? `<tr><td style="font-weight:600;padding:3px 12px 3px 0;">Artwork</td><td><a href="${escapeHtml(testCache.artworkUrl)}" target="_blank" rel="noopener">${escapeHtml(testCache.artworkUrl)}</a></td></tr>`
