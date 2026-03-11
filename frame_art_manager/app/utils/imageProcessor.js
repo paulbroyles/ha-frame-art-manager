@@ -16,14 +16,14 @@ const sharp = require('sharp');
   const ORT_SYMBOL = Symbol.for('onnxruntime');
   if (ORT_SYMBOL in globalThis) return;
   try {
-    // Must use the /wasm subpath (dist/ort.wasm.min.js) — the default entry
-    // (dist/ort.node.min.js) is the native-first Node.js build with no working
-    // InferenceSession on Alpine/musl.
-    const ortWasm = require('onnxruntime-web/wasm');
-    globalThis[ORT_SYMBOL] = ortWasm.default ?? ortWasm;
-    console.log('[imageProcessor] pre-loaded onnxruntime-web/wasm into globalThis[ORT_SYMBOL]');
+    // Use dist/ort.node.min.js (the default Node.js entry) — loads WASM via
+    // file: URLs (Node.js compatible). The /wasm subpath (dist/ort.wasm.min.js)
+    // is the browser build that uses blob: URLs, which Node.js rejects.
+    const ortWeb = require('onnxruntime-web');
+    globalThis[ORT_SYMBOL] = ortWeb.default ?? ortWeb;
+    console.log('[imageProcessor] pre-loaded onnxruntime-web into globalThis[ORT_SYMBOL]');
   } catch (e) {
-    console.warn('[imageProcessor] Could not pre-load onnxruntime-web/wasm:', e.message);
+    console.warn('[imageProcessor] Could not pre-load onnxruntime-web:', e.message);
   }
 }());
 
