@@ -972,10 +972,14 @@ async function meanProfilePreProcessor(buffer, {
         cropTopForBand = cropTop + extSimple;
         // Pass 2 (adaptiveRef): finds the actual frame/painting boundary for the crop.
         const ext = columnPercentileScan(cropTop, scanN, +1, 'top-bevel-cont-adaptive', bevelMinEdgeLum, true);
-        // Apply size guard to bestExt too: if the adaptive pass returns an implausibly large
-        // result (classifier hit painting content), fall back to the stable extSimple.
+        // Ratio guard + size guard on bestExt: if the adaptive pass returns more than 3×
+        // the non-adaptive result, it has likely latched onto painting content rather than
+        // the true frame boundary (the adaptive reference search found a bright painting
+        // region instead of bright frame material). Fall back to stable extSimple in that
+        // case. Also cap by the absolute size limit to catch remaining outliers.
         const bevelLimit = Math.round(height * bevelMaxExtFrac);
-        const bestExt = Math.max(extSimple, ext) > bevelLimit ? extSimple : Math.max(extSimple, ext);
+        const rawBest = Math.max(extSimple, ext);
+        const bestExt = (rawBest > extSimple * 3 || rawBest > bevelLimit) ? extSimple : rawBest;
         if (bestExt > 0) { console.log(`[mean_profile] top: bevel continuation simple=${extSimple}px adaptive=${ext}px → using ${bestExt}px → ${cropTop + bestExt}px total`); cropTop += bestExt; }
       }
     }
@@ -993,7 +997,8 @@ async function meanProfilePreProcessor(buffer, {
         cropBottomForBand = cropBottom + extSimple;
         const ext = columnPercentileScan(height - 1 - cropBottom, scanN, -1, 'bottom-bevel-cont-adaptive', bevelMinEdgeLum, true);
         const bevelLimit = Math.round(height * bevelMaxExtFrac);
-        const bestExt = Math.max(extSimple, ext) > bevelLimit ? extSimple : Math.max(extSimple, ext);
+        const rawBest = Math.max(extSimple, ext);
+        const bestExt = (rawBest > extSimple * 3 || rawBest > bevelLimit) ? extSimple : rawBest;
         if (bestExt > 0) { console.log(`[mean_profile] bottom: bevel continuation simple=${extSimple}px adaptive=${ext}px → using ${bestExt}px → ${cropBottom + bestExt}px total`); cropBottom += bestExt; }
       }
     }
@@ -1046,6 +1051,41 @@ async function meanProfilePreProcessor(buffer, {
   let cropRight = colMeansDiscriminating ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right', lrThreshold) : 0;
   if (cropLeft  > lrMaxCrop) { console.log(`[mean_profile] left: strict-mode size cap — ${cropLeft}px > ${lrMaxCrop}px limit → 0`);  cropLeft  = 0; }
   if (cropRight > lrMaxCrop) { console.log(`[mean_profile] right: strict-mode size cap — ${cropRight}px > ${lrMaxCrop}px limit → 0`); cropRight = 0; }
+
+  // L/R bevel continuation: analogous to T/B bevel continuation, using rowPercentileScan.
+  // Triggered when the initial scan's refMean (outermost column medians in the corner bands)
+  // is below bevelThreshold, meaning the scan stopped in a dark outer transition zone rather
+  // than the main frame body. Not applied in strictLR mode: that mode is already conservative
+  // and bevel extension could amplify false positives from unreliable edge-row bands.
+  const bevelLimitLR = Math.round(width * bevelMaxExtFrac);
+  const initColN = Math.min(5, Math.floor(maxCols / 2));
+  const leftRefMean  = cornerColMeans.slice(0, initColN).reduce((s, v) => s + v, 0) / initColN;
+  const rightRefMean = cornerColMeans.slice(-initColN).reduce((s, v) => s + v, 0) / initColN;
+  if (cropLeft > 0 && leftRefMean < bevelThreshold && !strictLR) {
+    const maxBevelExtLR = Math.round(width * 0.12);
+    const scanN = Math.min(maxCols - cropLeft, maxBevelExtLR);
+    // Non-adaptive only: cropLeft positions us just inside the outer bevel, so the first
+    // columns inward are already main frame body — adaptiveRef risks latching onto painting
+    // content (which is brighter than interiorMean + contrastThreshold).
+    const ext = rowPercentileScan(cropLeft, scanN, +1, 'left-bevel-cont', bevelMinEdgeLum, false);
+    if (ext > bevelLimitLR) {
+      console.log(`[mean_profile] left: bevel continuation rejected (ext=${ext}px > ${bevelLimitLR}px limit, no clear frame boundary)`);
+    } else if (ext > 0) {
+      console.log(`[mean_profile] left: bevel continuation → +${ext}px → ${cropLeft + ext}px total`);
+      cropLeft += ext;
+    }
+  }
+  if (cropRight > 0 && rightRefMean < bevelThreshold && !strictLR) {
+    const maxBevelExtLR = Math.round(width * 0.12);
+    const scanN = Math.min(maxCols - cropRight, maxBevelExtLR);
+    const ext = rowPercentileScan(width - 1 - cropRight, scanN, -1, 'right-bevel-cont', bevelMinEdgeLum, false);
+    if (ext > bevelLimitLR) {
+      console.log(`[mean_profile] right: bevel continuation rejected (ext=${ext}px > ${bevelLimitLR}px limit, no clear frame boundary)`);
+    } else if (ext > 0) {
+      console.log(`[mean_profile] right: bevel continuation → +${ext}px → ${cropRight + ext}px total`);
+      cropRight += ext;
+    }
+  }
 
   // Cross-edge inference: if a parallel edge pair is detected but the perpendicular pair
   // is not (e.g. L and R detected but T and B = 0), infer the missing pair using the
@@ -1115,7 +1155,6 @@ async function meanProfilePreProcessor(buffer, {
     if (tbBackedNeeded || lrMirrorNeeded) {
       const colMeansAll = Array.from({ length: width }, (_, x) => colMeanInBands(x, [[0, height]]));
       const revMeansAll = [...colMeansAll].reverse();
-      const revMedians  = [...cornerColMeans].reverse();
 
       const inferEdgeLR = (isLeft, detected, est, label) => {
         const bandSlice = isLeft ? colMeansAll.slice(0, est) : revMeansAll.slice(0, est);
@@ -1125,12 +1164,14 @@ async function meanProfilePreProcessor(buffer, {
           console.log(`[mean_profile] ${label}: est=${est}px REJECTED (contrast=${contrast.toFixed(1)} ≤ ${contrastThreshold})`);
           return detected;
         }
-        // Extend outward from x=est using restricted-band medians.
-        const extVals = (isLeft ? cornerColMeans : revMedians).slice(est, maxCols);
-        const ext     = extVals.length >= 5 ? incrementalScan(extVals, extVals.length, `${label} ext`) : 0;
-        const total   = est + ext;
-        console.log(`[mean_profile] ${label}: est=${est}px + ext=${ext}px → ${total}px (bandMean=${bandMean.toFixed(1)}, contrast=${contrast.toFixed(1)})`);
-        return total > detected ? total : detected;
+        // Use the estimate directly. A previous extension step was removed because it
+        // produced large false positives when dark painting content near the frame edge
+        // had the same luminance as actual frame material — the scan ran hundreds of pixels
+        // into the painting. In all tested cases where inference produced correct results,
+        // the extension contributed 0px. The estimate from a parallel/mirror edge is
+        // sufficient; color-based validation (future work) is the correct next step.
+        console.log(`[mean_profile] ${label}: est=${est}px → ${est}px (bandMean=${bandMean.toFixed(1)}, contrast=${contrast.toFixed(1)})`);
+        return est > detected ? est : detected;
       };
 
       if (tbBackedNeeded) {
