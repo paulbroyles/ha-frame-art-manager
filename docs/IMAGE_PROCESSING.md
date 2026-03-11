@@ -192,6 +192,66 @@ Delegates to Sharp's built-in `trim()`. Removes edge pixels that match the corne
 
 ---
 
+### ML Segmentation (`ml_segment`)
+
+Uses [briaai/RMBG-1.4](https://huggingface.co/briaai/RMBG-1.4), a salient object segmentation model, to find the painting subject and crop away everything outside its bounding box.
+
+**Model**: RMBG-1.4 (`q8` quantized, ~44 MB). Downloaded once to `/data/huggingface` on first use. Pipeline is a singleton — loaded once per add-on process and reused.
+
+**Algorithm**:
+
+1. Decode image to raw RGB.
+2. Run RMBG-1.4 inference — model resizes to 1024×1024 internally and returns a foreground mask at the original image resolution (255 = foreground, 0 = background).
+3. Find the tight bounding box of all foreground pixels.
+4. Apply a runaway guard: if any single edge would remove more than `maxCropFraction` (default 40%), that edge is zeroed (not cropped).
+5. Extract the bounded region.
+
+**Runtime environment (Alpine/musl)**: onnxruntime-node ships glibc binaries that crash on Alpine. The add-on uses `onnxruntime-web` (WASM backend) via three Dockerfile patches:
+- **Patch 1**: Removes the `"node"` export condition from `@huggingface/transformers/package.json`, forcing the web bundle (`transformers.web.js`) to be loaded.
+- **Patch 2**: Injects `wasm` and `cpu` into `supportedDevices` in the web bundle's ORT_SYMBOL branch (which sets `ONNX` but leaves `supportedDevices` empty).
+- **Patch 3**: Replaces the `sharp (ignored)` webpack mock in the web bundle with `module.exports = globalThis.__nativeSharp`, bridging the real sharp instance into the ESM bundle.
+
+Additionally, `imageProcessor.js` pre-populates `globalThis[Symbol.for('onnxruntime')]` at module load time (synchronous IIFE), ensuring the web bundle takes the ORT_SYMBOL path rather than the IS_NODE_ENV → onnxruntime-node path during module evaluation.
+
+**Performance** (tested on ~4MB JPEGs, single-threaded WASM):
+
+| Phase | Time |
+|---|---|
+| First use (pipeline load + model download) | ~60–90s |
+| Subsequent calls (pipeline cached) | ~11s/image |
+| WASM inference | ~10.5s |
+| Decode + mask scan | ~0.3s |
+
+**Fundamental limitation — salient object vs. canvas boundary**: RMBG-1.4 is a foreground subject detector, not a frame/canvas boundary detector. Given a painting with a wide gold frame, the model detects the *painting subject* (figures, landscape, etc.) as foreground and the frame as background. This is useful for cropping to the subject, but it is not the same as detecting where the canvas ends. For most museum-sourced art:
+- The detected foreground is *smaller* than the canvas (subject doesn't extend to canvas edges) → overcropping
+- The model cannot distinguish the canvas boundary from the frame boundary
+- Test results on 5 Met Museum images: 4/5 overcropped, 1/5 acceptable
+
+**When to use**: Not recommended for general frame removal. Consider using as a crop engine (`ml_rmbg`) instead — see below.
+
+**Parameters**:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `maxCropFraction` | 0.40 | Hard cap per edge; edges exceeding this fraction are zeroed |
+
+---
+
+### Model Options Evaluated
+
+No purpose-built frame/canvas detection model was found on HuggingFace as of 2026-03. Models evaluated:
+
+| Model | Size (q4) | Approach | Verdict |
+|---|---|---|---|
+| [briaai/RMBG-1.4](https://huggingface.co/briaai/RMBG-1.4) | ~44 MB q8 | Salient object segmentation | **In use** — overcropping issue; better as crop engine focal point |
+| [Xenova/clipseg-rd64-refined](https://huggingface.co/Xenova/clipseg-rd64-refined) | ~139 MB q | Text-prompted segmentation (CLIP-based) | Would need a prompt like "painting canvas" or "artwork without frame"; not purpose-built |
+| [Xenova/grounding-dino-tiny](https://huggingface.co/Xenova/grounding-dino-tiny) | ~151 MB q4f16 | Text-prompted bounding box detection | Same prompt challenge; returns a bounding box (no per-pixel mask) |
+| [Xenova/slimsam-50-uniform](https://huggingface.co/Xenova/slimsam-50-uniform) | ~35 MB q | Segment Anything variant | Requires a user-provided point or bounding box prompt; not autonomous |
+
+None of these are trained on frame/canvas boundaries. A fine-tuned model with a dataset of framed vs. unframed museum images would be needed for production-quality results. The statistical algorithms (Corner Consensus, Mean Profile) remain more reliable for well-defined frame materials.
+
+---
+
 ## Crop Engines
 
 Crop engines run after Phase 2. They receive a clean image buffer and fit it to the TV's 4K resolution.
@@ -206,7 +266,7 @@ The engine must scale down if needed and crop to the target dimensions. It must 
 
 ---
 
-### Sharp (`sharp`) — the only current engine
+### Sharp (`sharp`)
 
 Uses Sharp's `resize()` with `fit: 'cover'`. The `position` option controls where the crop anchor lands.
 
@@ -217,6 +277,32 @@ Uses Sharp's `resize()` with `fit: 'cover'`. The `position` option controls wher
 | `attention` | Saliency-based — favors faces and high-contrast subjects. Best for paintings, especially portraits and figurative work. **(recommended)** |
 | `entropy` | Maximizes Shannon entropy — favors complex, textured regions |
 | `centre` | Crops from the geometric center — predictable, no analysis |
+
+---
+
+### ML Focal Crop (`ml_rmbg`)
+
+Uses RMBG-1.4 foreground segmentation to find the **centroid of the painting subject** and uses that point as the focal anchor for a cover-fit crop. This is a better use of RMBG-1.4's capabilities than the `ml_segment` pre-processor: instead of using the model to detect canvas boundaries (which it cannot reliably do), it uses the model to identify *where* the subject is, then cover-crops with subject-centered framing.
+
+**Algorithm**:
+
+1. Run RMBG-1.4 segmentation to get the foreground mask.
+2. Compute the centroid of all foreground pixels as normalized (0–1) coordinates `(focalX, focalY)`.
+3. Cover-fit scale: compute `scale = max(targetW / inputW, targetH / inputH)` so the image fully covers the target.
+4. Within the scaled image, compute the crop window centered on the focal point, clamped to image bounds.
+5. Extract and return.
+
+If the mask is empty or ML inference fails, falls back to Sharp with `fallbackStrategy` (default: `attention`).
+
+**When to use**: Prefer `ml_rmbg` over sharp `attention` when images have strong subjects that are off-center, or when sharp's saliency heuristics produce poor results. Like all ML inference, this is ~11s/image (single-threaded WASM) — use only if processing latency is acceptable.
+
+**Model**: Same as `ml_segment` — briaai/RMBG-1.4 (`q8`, ~44 MB, downloaded once on first use). The pipeline singleton is shared — `ml_rmbg` and `ml_segment` use the same loaded model.
+
+**Parameters**:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `fallbackStrategy` | `'attention'` | Sharp strategy to use if ML fails or mask is empty |
 
 ---
 
@@ -279,4 +365,6 @@ Notable observations:
 
 **Raw buffer pipeline**: Pass raw pixel data (`{ data, info }`) between phases instead of encoding/decoding between each phase. This would save ~240ms per image (the Phase 1 encode + Phase 2 decode round-trip). The pre-processor interface would need a parallel raw-buffer path while keeping the current `async (buffer, options) → Buffer` interface for compatibility.
 
-**Option 3 — ML segmentation**: See `docs/ROADMAP.md`. Using ONNX Runtime + a fine-tuned segmentation model (SAM or SegFormer) to handle irregular and ornate frames that defeat variance-based approaches.
+**ML segmentation pipeline (current status)**: RMBG-1.4 is fully operational on Alpine/musl via WASM backend (three Dockerfile patches + module-level IIFE). It is available as both a pre-processor (`ml_segment`) and a crop engine (`ml_rmbg`). Performance is ~11s/image (single-threaded WASM, pipeline cached after first call). Quality as a frame detector is poor — the model overcropped 4/5 test images. Quality as a crop focal-point engine is more promising and worth testing.
+
+**Better ML model for frame detection**: No purpose-built model exists. A fine-tuned model trained on museum images with frame/canvas boundary annotations would be required. Candidate architectures: SegFormer-B0 or MobileViT (small enough for WASM). CLIPSeg and Grounding DINO can detect canvases via text prompts but are not trained for accuracy on this task. See the Model Options table in the ML Segmentation pre-processor section above.

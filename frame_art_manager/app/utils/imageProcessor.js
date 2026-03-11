@@ -73,9 +73,86 @@ async function sharpCropEngine(buffer, inputW, inputH, targetW, targetH, { strat
     .toBuffer();
 }
 
+/**
+ * ML-based crop engine using RMBG-1.4 foreground segmentation.
+ *
+ * Computes the centroid of the foreground mask and uses it as the focal point
+ * for a cover-fit crop, comparable to sharp's 'attention' strategy but using
+ * ML-detected subject position instead of saliency heuristics.
+ *
+ * Falls back to sharpCropEngine (options.fallbackStrategy) if:
+ *   - The ML segmenter fails or is unavailable
+ *   - No foreground pixels are detected (empty mask)
+ *
+ * Performance: ~11s per image (single-threaded WASM, pipeline cached after first load).
+ * Model: briaai/RMBG-1.4, ~44 MB (downloaded once to /data/huggingface on first use).
+ *
+ * options.fallbackStrategy: 'attention' | 'entropy' | 'centre' (default: 'attention')
+ */
+async function mlCropEngine(buffer, inputW, inputH, targetW, targetH, { fallbackStrategy = 'attention' } = {}) {
+  if (targetW === inputW && targetH === inputH) return buffer;
+
+  let focalX = 0.5;
+  let focalY = 0.5;
+  let usedMl = false;
+
+  try {
+    const { RawImage } = await import('@huggingface/transformers');
+    const segmenter = await getMlSegmenter();
+
+    const { data, info } = await sharp(buffer).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const rawImage = new RawImage(new Uint8ClampedArray(data), info.width, info.height, 3);
+    const [result] = await segmenter(rawImage, { threshold: 0.5 });
+    const mask = result.mask;
+
+    // Compute centroid of foreground pixels as normalized (0–1) coordinates.
+    let sumX = 0, sumY = 0, count = 0;
+    for (let y = 0; y < mask.height; y++) {
+      for (let x = 0; x < mask.width; x++) {
+        if (mask.data[y * mask.width + x] > 127) {
+          sumX += x / mask.width;
+          sumY += y / mask.height;
+          count++;
+        }
+      }
+    }
+
+    if (count > 0) {
+      focalX = sumX / count;
+      focalY = sumY / count;
+      usedMl = true;
+      console.log(`[imageProcessor] ml_rmbg crop: focal=(${focalX.toFixed(3)}, ${focalY.toFixed(3)}) foreground=${count}px`);
+    } else {
+      console.log('[imageProcessor] ml_rmbg crop: empty mask — falling back to sharp attention');
+    }
+  } catch (e) {
+    console.warn('[imageProcessor] ml_rmbg crop: ML failed, falling back to sharp attention:', e.message);
+  }
+
+  if (!usedMl) {
+    return sharpCropEngine(buffer, inputW, inputH, targetW, targetH, { strategy: fallbackStrategy });
+  }
+
+  // Cover-fit scale: scale image so it covers the target dimensions, then
+  // extract a window centered on the focal point (clamped to image bounds).
+  const scale   = Math.max(targetW / inputW, targetH / inputH);
+  const scaledW = Math.round(inputW * scale);
+  const scaledH = Math.round(inputH * scale);
+
+  const idealLeft = Math.round(focalX * scaledW - targetW / 2);
+  const idealTop  = Math.round(focalY * scaledH - targetH / 2);
+  const cropLeft  = Math.max(0, Math.min(idealLeft, scaledW - targetW));
+  const cropTop   = Math.max(0, Math.min(idealTop,  scaledH - targetH));
+
+  return sharp(buffer)
+    .resize(scaledW, scaledH)
+    .extract({ left: cropLeft, top: cropTop, width: targetW, height: targetH })
+    .toBuffer();
+}
+
 const CROP_ENGINES = {
-  sharp: sharpCropEngine,
-  // Future: ml: mlCropEngine
+  sharp:    sharpCropEngine,
+  ml_rmbg:  mlCropEngine,
 };
 
 // ── Pre-processors ────────────────────────────────────────────────────────────
@@ -1708,7 +1785,8 @@ const IMAGE_PROCESSING_SCHEMA = {
     { value: 'ml_segment',       label: 'ML Segmentation — RMBG-1.4 salient object model; handles irregular and ornate frames (downloads ~44 MB model on first use)' },
   ],
   cropEngines: [
-    { value: 'sharp', label: 'Sharp (built-in)' },
+    { value: 'sharp',   label: 'Sharp (built-in)' },
+    { value: 'ml_rmbg', label: 'ML Focal Crop — RMBG-1.4 detects foreground centroid as focal point; cover-fits around subject (downloads ~44 MB model on first use; slow — several seconds per image)' },
   ],
   sharpStrategies: [
     { value: 'attention', label: 'Attention — focus on faces and salient regions (recommended for paintings)' },
