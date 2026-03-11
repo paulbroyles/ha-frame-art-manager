@@ -1465,7 +1465,7 @@ async function getMlSegmenter() {
   env.cacheDir = process.env.TRANSFORMERS_CACHE || '/data/huggingface';
   console.log('[imageProcessor] ml_segment: loading RMBG-1.4 pipeline (first use; may download ~44 MB model)...');
   _mlSegmenter = await pipeline('image-segmentation', 'briaai/RMBG-1.4', {
-    device: 'wasm',
+    device: 'cpu',
     dtype:  'q8',
   });
   console.log('[imageProcessor] ml_segment: pipeline ready');
