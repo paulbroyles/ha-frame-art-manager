@@ -722,14 +722,14 @@ router.post('/test-fetch', async (req, res) => {
     }
 
     const orientation = tvOrientation || 'landscape';
-    const { preProcessor, cropEngine, sharpStrategy } = webSources.imageProcessing;
+    const { preProcessor, cropEngine, sharpStrategy, detectionMode } = webSources.imageProcessing;
     const alreadyProcessed = !!SOURCE_MODULES[chosenSourceId]?.alreadyProcessed;
     const activePreProcessor = (!alreadyProcessed && preProcessor !== 'none') ? preProcessor : null;
 
     // Run Phase 1 + Phase 2 pre-processors separately so the output can be saved for visual comparison.
     let preprocessedBuffer = !alreadyProcessed ? await solidBorderStrip(imageBuffer) : imageBuffer;
     if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
-      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: artMetadata?.artworkUrl });
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: artMetadata?.artworkUrl, detectionMode });
     }
 
     // Run the crop engine on the pre-processed buffer (pre-process already applied).
@@ -794,14 +794,14 @@ router.post('/test-reprocess', async (req, res) => {
     const imageBuffer = await fs.readFile(path.join(cacheDir, testCache.rawFilename));
     const ext = path.extname(testCache.rawFilename).slice(1);
 
-    const { preProcessor, cropEngine, sharpStrategy } = webSources.imageProcessing;
+    const { preProcessor, cropEngine, sharpStrategy, detectionMode } = webSources.imageProcessing;
     const alreadyProcessed = !!SOURCE_MODULES[testCache.sourceId]?.alreadyProcessed;
     const activePreProcessor = (!alreadyProcessed && preProcessor !== 'none') ? preProcessor : null;
     const orientation = testCache.orientation || 'landscape';
 
     let preprocessedBuffer = !alreadyProcessed ? await solidBorderStrip(imageBuffer) : imageBuffer;
     if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
-      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: testCache.metadata?.artworkUrl });
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: testCache.metadata?.artworkUrl, detectionMode });
     }
 
     const processedBuffer = alreadyProcessed
