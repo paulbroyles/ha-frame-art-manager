@@ -56,7 +56,9 @@ async function dezoomify(artworkUrl, { maxWidth = 4801 } = {}) {
       execFile(
         DEZOOMIFY_BINARY,
         ['--max-width', String(maxWidth), '--compression', '0', artworkUrl, tmpFile],
-        { timeout: 120000 },
+        // LD_PRELOAD scoped to this subprocess: provides __res_init stub for Alpine glibc compat.
+        // The stub is compiled in the Dockerfile at /usr/local/lib/libres_stub.so.
+        { timeout: 120000, env: { ...process.env, LD_PRELOAD: '/usr/local/lib/libres_stub.so' } },
         (err, _stdout, stderr) => {
           if (err) reject(new Error(`dezoomify-rs failed: ${(stderr || err.message).trim()}`));
           else resolve();
