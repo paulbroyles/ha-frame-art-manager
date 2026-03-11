@@ -336,10 +336,11 @@ router.get('/config', async (req, res) => {
 // PUT /api/web-sources/image-processing
 router.put('/image-processing', async (req, res) => {
   try {
-    const { preProcessor, cropEngine, sharpStrategy } = req.body;
-    const validPreProcessors = IMAGE_PROCESSING_SCHEMA.preProcessors.map(p => p.value);
-    const validEngines       = IMAGE_PROCESSING_SCHEMA.cropEngines.map(e => e.value);
-    const validStrategies    = IMAGE_PROCESSING_SCHEMA.sharpStrategies.map(s => s.value);
+    const { preProcessor, cropEngine, sharpStrategy, detectionMode } = req.body;
+    const validPreProcessors  = IMAGE_PROCESSING_SCHEMA.preProcessors.map(p => p.value);
+    const validEngines        = IMAGE_PROCESSING_SCHEMA.cropEngines.map(e => e.value);
+    const validStrategies     = IMAGE_PROCESSING_SCHEMA.sharpStrategies.map(s => s.value);
+    const validDetectionModes = IMAGE_PROCESSING_SCHEMA.detectionModes.map(m => m.value);
     if (preProcessor  && !validPreProcessors.includes(preProcessor)) {
       return res.status(400).json({ error: `preProcessor must be one of: ${validPreProcessors.join(', ')}` });
     }
@@ -349,10 +350,14 @@ router.put('/image-processing', async (req, res) => {
     if (sharpStrategy && !validStrategies.includes(sharpStrategy)) {
       return res.status(400).json({ error: `sharpStrategy must be one of: ${validStrategies.join(', ')}` });
     }
+    if (detectionMode && !validDetectionModes.includes(detectionMode)) {
+      return res.status(400).json({ error: `detectionMode must be one of: ${validDetectionModes.join(', ')}` });
+    }
     const webSources = await readWebSourcesConfig(req.frameArtPath);
     if (preProcessor)  webSources.imageProcessing.preProcessor  = preProcessor;
     if (cropEngine)    webSources.imageProcessing.cropEngine    = cropEngine;
     if (sharpStrategy) webSources.imageProcessing.sharpStrategy = sharpStrategy;
+    if (detectionMode) webSources.imageProcessing.detectionMode = detectionMode;
     await writeWebSourcesConfig(req.frameArtPath, webSources);
     res.json({ success: true, imageProcessing: webSources.imageProcessing });
   } catch (error) {
@@ -561,12 +566,12 @@ router.post('/fetch-and-display', async (req, res) => {
     const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
     const orientation = tvOrientation || 'landscape';
-    const { preProcessor, cropEngine, sharpStrategy } = webSources.imageProcessing;
+    const { preProcessor, cropEngine, sharpStrategy, detectionMode } = webSources.imageProcessing;
     const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
       ? imageBuffer
       : await processWebSourceImage(imageBuffer, orientation, {
           preProcess: preProcessor !== 'none' ? preProcessor : null,
-          preProcessOptions: { label: artMetadata?.artworkUrl },
+          preProcessOptions: { label: artMetadata?.artworkUrl, detectionMode },
           cropEngine,
           cropEngineOptions: { strategy: sharpStrategy },
         });

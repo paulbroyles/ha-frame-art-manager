@@ -608,6 +608,7 @@ async function meanProfilePreProcessor(buffer, {
   refFraction          = 0.03,
   maxCropFraction      = 0.25,
   label                = '',
+  detectionMode        = 'combined', // 'luminance' | 'color' | 'combined'
 } = {}) {
   const _t0 = Date.now();
   const { data, info } = await sharp(buffer)
@@ -619,6 +620,21 @@ async function meanProfilePreProcessor(buffer, {
 
   function pixelLum(b) {
     return 0.299 * data[b] + 0.587 * data[b + 1] + 0.114 * data[b + 2];
+  }
+
+  // Chromaticity distance: how different is this pixel's color (hue) from the interior?
+  // Uses normalized RGB so brightness differences don't inflate the score — a dark corner
+  // of the same hue as the interior scores near 0, while a gold frame scores 30–60.
+  // Scaled by 255 to match the luminance-distance range; contrastThreshold (20) applies.
+  // Defined after interiorChR/G/B below; hoisted via function-scoped closure.
+  function pixelChromaDist(offset) {
+    if (channels < 3) return 0;
+    const r = data[offset], g = data[offset + 1], b = data[offset + 2];
+    const tot = r + g + b + 0.001;
+    const dr = r / tot - interiorChR;
+    const dg = g / tot - interiorChG;
+    const db = b / tot - interiorChB;
+    return Math.sqrt(dr * dr + dg * dg + db * db) * 255;
   }
 
   function rowMean(y) {
@@ -649,19 +665,57 @@ async function meanProfilePreProcessor(buffer, {
     return vals.length % 2 === 0 ? (vals[mid - 1] + vals[mid]) / 2 : vals[mid];
   }
 
+  // Median chromaticity distance (from interior) for a column within specified row bands.
+  // Used for color-based L/R detection: detects gold/colored frames with low lum contrast.
+  function colChromaMedianInBands(x, bands) {
+    const vals = [];
+    for (const [y0, y1] of bands) {
+      for (let y = y0; y < y1; y++) { vals.push(pixelChromaDist((y * width + x) * channels)); }
+    }
+    if (vals.length === 0) return 0;
+    vals.sort((a, b) => a - b);
+    return vals[Math.floor(vals.length / 2)];
+  }
+
   const maxRows = Math.floor(height * maxCropFraction);
   const maxCols = Math.floor(width  * maxCropFraction);
 
   const rowMeans = Array.from({ length: height }, (_, y) => rowMean(y));
 
   // Interior reference: center 50% block.
-  let iSum = 0, iN = 0;
+  // Also accumulates R/G/B for a chromaticity color reference used to detect
+  // color-distinct frames (e.g. gold) that have low luminance contrast.
+  let iSum = 0, iSumR = 0, iSumG = 0, iSumB = 0, iN = 0;
   const iy0 = Math.round(height * 0.25), iy1 = Math.round(height * 0.75);
   const ix0 = Math.round(width  * 0.25), ix1 = Math.round(width  * 0.75);
   for (let y = iy0; y < iy1; y++) {
-    for (let x = ix0; x < ix1; x++) { iSum += pixelLum((y * width + x) * channels); iN++; }
+    for (let x = ix0; x < ix1; x++) {
+      const off = (y * width + x) * channels;
+      iSum += pixelLum(off);
+      if (channels >= 3) { iSumR += data[off]; iSumG += data[off + 1]; iSumB += data[off + 2]; }
+      iN++;
+    }
   }
   const interiorMean = iSum / iN;
+  // Interior chromaticity: normalized RGB removes brightness, leaving hue/color signal.
+  // Scaling by 255 puts chromaDist values in the same range as luminance distances so
+  // contrastThreshold (20) applies directly to both.
+  const iColorR = channels >= 3 ? iSumR / iN : 128;
+  const iColorG = channels >= 3 ? iSumG / iN : 128;
+  const iColorB = channels >= 3 ? iSumB / iN : 128;
+  const iColorTot = iColorR + iColorG + iColorB + 0.001;
+  const interiorChR = iColorR / iColorTot;
+  const interiorChG = iColorG / iColorTot;
+  const interiorChB = iColorB / iColorTot;
+  // Color row profile: mean chromaticity distance per row, sampled every 4 columns for speed.
+  // Computed after interiorChR/G/B since pixelChromaDist reads those values.
+  const rowChromaScores = channels >= 3
+    ? Array.from({ length: height }, (_, y) => {
+        let sum = 0, n = 0;
+        for (let x = 0; x < width; x += 4) { sum += pixelChromaDist((y * width + x) * channels); n++; }
+        return n > 0 ? sum / n : 0;
+      })
+    : null;
   const _tRowMeans = Date.now();
 
   if (label) console.log(`[mean_profile] source: ${label}`);
@@ -673,7 +727,7 @@ async function meanProfilePreProcessor(buffer, {
   // stopping at the sharper frame/painting boundary (typically ±40–80 jump).
   // Requires a minimum band size (5), a natural stopping point (runaway guard),
   // and a contrast check against interiorMean.
-  function incrementalScan(values, maxN, label, thresholdOverride = null) {
+  function incrementalScan(values, maxN, label, thresholdOverride = null, contrastOverride = null) {
     if (maxN < 5 || values.length < 5) return 0;
     // Reference mean from the first few values (outermost edge — always frame material
     // after solidBorderStrip). More robust than running stdDev for wood grain frames.
@@ -721,8 +775,12 @@ async function meanProfilePreProcessor(buffer, {
     // whose values trend toward interior; refMean reflects the actual frame color.
     const bandMean = values.slice(0, crop).reduce((s, v) => s + v, 0) / crop;
     const contrast = Math.abs(refMean - interiorMean);
-    const passed = contrast > contrastThreshold;
-    console.log(`[mean_profile] ${label}: crop=${crop}px, refMean=${refMean.toFixed(1)}, bandMean=${bandMean.toFixed(1)}, contrast(refMean)=${contrast.toFixed(1)} (need >${contrastThreshold}), stopped at ${stopIdx} dev=${stopDev.toFixed(1)} → ${passed ? 'CROP' : 'REJECTED (low contrast)'}`);
+    // contrastOverride: for non-luminance profiles (e.g. chroma scans) where refMean
+    // is not a luminance value and |refMean - interiorMean| is meaningless. The override
+    // supplies a pre-computed contrast scalar (e.g. outer-edge chroma distance) directly.
+    const effectiveContrast = contrastOverride !== null ? contrastOverride : contrast;
+    const passed = effectiveContrast > contrastThreshold;
+    console.log(`[mean_profile] ${label}: crop=${crop}px, refMean=${refMean.toFixed(1)}, bandMean=${bandMean.toFixed(1)}, contrast=${contrast.toFixed(1)}${contrastOverride !== null ? ` chromaContrast=${contrastOverride.toFixed(1)}` : ''} (need >${contrastThreshold}) → ${passed ? 'CROP' : 'REJECTED (low contrast)'}`);
     return passed ? crop : 0;
   }
 
@@ -921,8 +979,39 @@ async function meanProfilePreProcessor(buffer, {
   }
 
   // Top and bottom: scan using full-width row means.
-  let cropTop    = incrementalScan(rowMeans, maxRows, 'top');
-  let cropBottom = incrementalScan([...rowMeans].reverse(), maxRows, 'bottom');
+  let cropTop    = detectionMode !== 'color' ? incrementalScan(rowMeans, maxRows, 'top') : 0;
+  let cropBottom = detectionMode !== 'color' ? incrementalScan([...rowMeans].reverse(), maxRows, 'bottom') : 0;
+
+  // Supplementary color-based T/B scan: detects frames with distinct color but low
+  // luminance contrast (e.g. thin gold frames near interior brightness). Runs only when
+  // the luminance scan returned 0. Uses rowChromaScores (mean chromaticity distance per
+  // row) with a tighter loop threshold (15, calibrated to the 0-50 chroma range) and a
+  // contrastOverride (outer-edge chroma score) for the final acceptance gate.
+  // The chroma-distance approach is inherently robust against dark painting edges:
+  // those have near-zero chroma distance (same hue as interior) so the acceptance
+  // gate (edgeChromaScore > contrastThreshold) naturally rejects them.
+  // Supplementary color-based T/B scan. chromaGate is stricter than contrastThreshold
+  // to avoid false detections on warm-toned painting edges (chroma 15–25); gold frames
+  // typically score 30–60 and comfortably exceed the gate.
+  if (rowChromaScores && detectionMode !== 'luminance') {
+    const chromaInitN = Math.min(5, Math.floor(maxRows / 2));
+    const chromaGate = contrastThreshold * 1.5; // 30 when contrastThreshold=20
+    if (cropTop === 0) {
+      const topEdgeChroma = rowChromaScores.slice(0, chromaInitN).reduce((s, v) => s + v, 0) / chromaInitN;
+      if (topEdgeChroma > chromaGate) {
+        const colorCrop = incrementalScan(rowChromaScores, maxRows, 'top-color', 15, topEdgeChroma);
+        if (colorCrop > 0) { console.log(`[mean_profile] top: color scan detected ${colorCrop}px (chromaEdge=${topEdgeChroma.toFixed(1)})`); cropTop = colorCrop; }
+      }
+    }
+    if (cropBottom === 0) {
+      const botChromaRev = [...rowChromaScores].reverse();
+      const botEdgeChroma = botChromaRev.slice(0, chromaInitN).reduce((s, v) => s + v, 0) / chromaInitN;
+      if (botEdgeChroma > chromaGate) {
+        const colorCrop = incrementalScan(botChromaRev, maxRows, 'bottom-color', 15, botEdgeChroma);
+        if (colorCrop > 0) { console.log(`[mean_profile] bottom: color scan detected ${colorCrop}px (chromaEdge=${botEdgeChroma.toFixed(1)})`); cropBottom = colorCrop; }
+      }
+    }
+  }
 
   // Bevel continuation: if the primary scan stopped because a near-black outer bevel set
   // refMean very low, continue from the bevel end using per-column midpoint classification
@@ -960,7 +1049,7 @@ async function meanProfilePreProcessor(buffer, {
   let cropBottomForBand = cropBottom;
   {
     const topRefMean = rowMeans.slice(0, initN).reduce((s, v) => s + v, 0) / initN;
-    if (cropTop > 0 && topRefMean < bevelThreshold) {
+    if (cropTop > 0 && topRefMean < bevelThreshold && detectionMode !== 'color') {
       const maxBevelExt = Math.round(height * 0.12);
       const scanN = Math.min(maxRows - cropTop, maxBevelExt);
       // Pass 1 (no adaptiveRef): stable result used to anchor the L/R band.
@@ -986,7 +1075,7 @@ async function meanProfilePreProcessor(buffer, {
   }
   {
     const botRefMean = rowMeans.slice(height - initN).reduce((s, v) => s + v, 0) / initN;
-    if (cropBottom > 0 && botRefMean < bevelThreshold) {
+    if (cropBottom > 0 && botRefMean < bevelThreshold && detectionMode !== 'color') {
       const maxBevelExt = Math.round(height * 0.12);
       const scanN = Math.min(maxRows - cropBottom, maxBevelExt);
       const extSimple = columnPercentileScan(height - 1 - cropBottom, scanN, -1, 'bottom-bevel-cont', bevelMinEdgeLum, false);
@@ -1022,6 +1111,11 @@ async function meanProfilePreProcessor(buffer, {
   // Use col median (not mean) for L/R detection: robust against isolated bright grain
   // columns within a dark wood frame that inflate the mean and cause early scan termination.
   const cornerColMeans = Array.from({ length: width }, (_, x) => colMedianInBands(x, cornerBands));
+  // Parallel chroma profile for color-based L/R detection: median chromaticity distance
+  // per column within the same corner bands. Only computed for colour images.
+  const cornerColChromaScores = channels >= 3
+    ? Array.from({ length: width }, (_, x) => colChromaMedianInBands(x, cornerBands))
+    : null;
   const _tColMedians = Date.now();
 
   // Guard: if col medians are nearly flat across all columns the bands are still
@@ -1047,10 +1141,34 @@ async function meanProfilePreProcessor(buffer, {
   const lrThreshold = strictLR ? 45 : null;
   const lrMaxCrop = strictLR ? Math.round(width * 0.03) : Infinity;
   if (strictLR) console.log(`[mean_profile] L/R: no T/B bands detected — strict mode (threshold=45, maxCrop=${lrMaxCrop}px)`);
-  let cropLeft  = colMeansDiscriminating ? incrementalScan(cornerColMeans, maxCols, 'left', lrThreshold) : 0;
-  let cropRight = colMeansDiscriminating ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right', lrThreshold) : 0;
+  let cropLeft  = (colMeansDiscriminating && detectionMode !== 'color') ? incrementalScan(cornerColMeans, maxCols, 'left', lrThreshold) : 0;
+  let cropRight = (colMeansDiscriminating && detectionMode !== 'color') ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right', lrThreshold) : 0;
   if (cropLeft  > lrMaxCrop) { console.log(`[mean_profile] left: strict-mode size cap — ${cropLeft}px > ${lrMaxCrop}px limit → 0`);  cropLeft  = 0; }
   if (cropRight > lrMaxCrop) { console.log(`[mean_profile] right: strict-mode size cap — ${cropRight}px > ${lrMaxCrop}px limit → 0`); cropRight = 0; }
+
+  // Supplementary color-based L/R scan: analogous to the T/B chroma scan above.
+  // Runs only when the luminance scan returned 0 (or was suppressed by strictLR).
+  // Not applied in strictLR mode: the corner bands are edge-row fallbacks that don't
+  // reliably represent frame material, so color distance would be unreliable too.
+  if (cornerColChromaScores && !strictLR && detectionMode !== 'luminance') {
+    const chromaColInitN = Math.min(5, Math.floor(maxCols / 2));
+    const chromaGateLR = contrastThreshold * 1.5; // same stricter gate as T/B color scan
+    if (cropLeft === 0) {
+      const leftEdgeChroma = cornerColChromaScores.slice(0, chromaColInitN).reduce((s, v) => s + v, 0) / chromaColInitN;
+      if (leftEdgeChroma > chromaGateLR) {
+        const colorCrop = incrementalScan(cornerColChromaScores, maxCols, 'left-color', 15, leftEdgeChroma);
+        if (colorCrop > 0) { console.log(`[mean_profile] left: color scan detected ${colorCrop}px (chromaEdge=${leftEdgeChroma.toFixed(1)})`); cropLeft = colorCrop; }
+      }
+    }
+    if (cropRight === 0) {
+      const rightChromaRev = [...cornerColChromaScores].reverse();
+      const rightEdgeChroma = rightChromaRev.slice(0, chromaColInitN).reduce((s, v) => s + v, 0) / chromaColInitN;
+      if (rightEdgeChroma > chromaGateLR) {
+        const colorCrop = incrementalScan(rightChromaRev, maxCols, 'right-color', 15, rightEdgeChroma);
+        if (colorCrop > 0) { console.log(`[mean_profile] right: color scan detected ${colorCrop}px (chromaEdge=${rightEdgeChroma.toFixed(1)})`); cropRight = colorCrop; }
+      }
+    }
+  }
 
   // L/R bevel continuation: analogous to T/B bevel continuation, using rowPercentileScan.
   // Triggered when the initial scan's refMean (outermost column medians in the corner bands)
@@ -1061,7 +1179,7 @@ async function meanProfilePreProcessor(buffer, {
   const initColN = Math.min(5, Math.floor(maxCols / 2));
   const leftRefMean  = cornerColMeans.slice(0, initColN).reduce((s, v) => s + v, 0) / initColN;
   const rightRefMean = cornerColMeans.slice(-initColN).reduce((s, v) => s + v, 0) / initColN;
-  if (cropLeft > 0 && leftRefMean < bevelThreshold && !strictLR) {
+  if (cropLeft > 0 && leftRefMean < bevelThreshold && !strictLR && detectionMode !== 'color') {
     const maxBevelExtLR = Math.round(width * 0.12);
     const scanN = Math.min(maxCols - cropLeft, maxBevelExtLR);
     // Non-adaptive only: cropLeft positions us just inside the outer bevel, so the first
@@ -1075,7 +1193,7 @@ async function meanProfilePreProcessor(buffer, {
       cropLeft += ext;
     }
   }
-  if (cropRight > 0 && rightRefMean < bevelThreshold && !strictLR) {
+  if (cropRight > 0 && rightRefMean < bevelThreshold && !strictLR && detectionMode !== 'color') {
     const maxBevelExtLR = Math.round(width * 0.12);
     const scanN = Math.min(maxCols - cropRight, maxBevelExtLR);
     const ext = rowPercentileScan(width - 1 - cropRight, scanN, -1, 'right-bevel-cont', bevelMinEdgeLum, false);
@@ -1084,6 +1202,48 @@ async function meanProfilePreProcessor(buffer, {
     } else if (ext > 0) {
       console.log(`[mean_profile] right: bevel continuation → +${ext}px → ${cropRight + ext}px total`);
       cropRight += ext;
+    }
+  }
+
+  // Color continuity extension: after any primary scan stops, look ahead in the chroma
+  // profile for persisting frame-colored pixels. Addresses undercrop cases where sparse
+  // frame material (e.g. a sliver of gold) dilutes the row/col mean below the consistency
+  // threshold — the mean stops, but the actual frame hasn't ended yet.
+  //
+  // The frameBandChroma gate (contrastThreshold/2 = 10) ensures this only runs when the
+  // detected frame already has a color signal; dark/neutral frames (chroma ≈ 0) are skipped.
+  // The hysteresis of 3 tolerates brief gaps in a gold frame without overshooting.
+  // Capped at 15 rows/cols to limit false extension into painting content.
+  if (detectionMode !== 'luminance') {
+    const chromaContGate = contrastThreshold / 2; // 10 when contrastThreshold=20
+    const maxLookahead   = 15;
+    const contHyst       = 3;
+
+    function chromaLookahead(chromaArr, cropN, label) {
+      if (cropN === 0 || !chromaArr || chromaArr.length <= cropN) return 0;
+      const frameBandChroma = chromaArr.slice(0, cropN).reduce((s, v) => s + v, 0) / cropN;
+      if (frameBandChroma <= chromaContGate) return 0;
+      let ext = 0, gap = 0;
+      const limit = Math.min(maxLookahead, chromaArr.length - cropN);
+      for (let i = 0; i < limit; i++) {
+        if (chromaArr[cropN + i] > chromaContGate) {
+          ext = i + 1; gap = 0;
+        } else {
+          gap++;
+          if (gap >= contHyst) break;
+        }
+      }
+      if (ext > 0) console.log(`[mean_profile] ${label}: chroma continuity +${ext}px → ${cropN + ext}px`);
+      return ext;
+    }
+
+    if (rowChromaScores) {
+      cropTop    += chromaLookahead(rowChromaScores, cropTop, 'top');
+      cropBottom += chromaLookahead([...rowChromaScores].reverse(), cropBottom, 'bottom');
+    }
+    if (cornerColChromaScores && !strictLR) {
+      cropLeft   += chromaLookahead(cornerColChromaScores, cropLeft, 'left');
+      cropRight  += chromaLookahead([...cornerColChromaScores].reverse(), cropRight, 'right');
     }
   }
 
@@ -1155,13 +1315,25 @@ async function meanProfilePreProcessor(buffer, {
     if (tbBackedNeeded || lrMirrorNeeded) {
       const colMeansAll = Array.from({ length: width }, (_, x) => colMeanInBands(x, [[0, height]]));
       const revMeansAll = [...colMeansAll].reverse();
+      // Parallel chroma profile for color-augmented inference contrast check.
+      // Full-height column chroma medians: since thin frames are diluted in full-height lum
+      // means, color may provide a better signal when the frame has a distinct hue.
+      const colChromaAll = channels >= 3
+        ? Array.from({ length: width }, (_, x) => colChromaMedianInBands(x, [[0, height]]))
+        : null;
+      const revChromaAll = colChromaAll ? [...colChromaAll].reverse() : null;
 
       const inferEdgeLR = (isLeft, detected, est, label) => {
         const bandSlice = isLeft ? colMeansAll.slice(0, est) : revMeansAll.slice(0, est);
         const bandMean  = bandSlice.reduce((s, v) => s + v, 0) / est;
-        const contrast  = Math.abs(bandMean - interiorMean);
+        const lumContrast = Math.abs(bandMean - interiorMean);
+        // Color contrast: mean chroma distance of the band from interior.
+        // For thin frames diluted by full-height means, color may pass where lum fails.
+        const chromaSlice = colChromaAll ? (isLeft ? colChromaAll.slice(0, est) : revChromaAll.slice(0, est)) : null;
+        const chromaContrast = chromaSlice ? chromaSlice.reduce((s, v) => s + v, 0) / est : 0;
+        const contrast = Math.max(lumContrast, chromaContrast);
         if (contrast <= contrastThreshold) {
-          console.log(`[mean_profile] ${label}: est=${est}px REJECTED (contrast=${contrast.toFixed(1)} ≤ ${contrastThreshold})`);
+          console.log(`[mean_profile] ${label}: est=${est}px REJECTED (lumContrast=${lumContrast.toFixed(1)}, chromaContrast=${chromaContrast.toFixed(1)} ≤ ${contrastThreshold})`);
           return detected;
         }
         // Use the estimate directly. A previous extension step was removed because it
@@ -1386,6 +1558,11 @@ const IMAGE_PROCESSING_SCHEMA = {
     { value: 'attention', label: 'Attention — focus on faces and salient regions (recommended for paintings)' },
     { value: 'entropy',   label: 'Entropy — focus on high-detail, textured regions' },
     { value: 'centre',    label: 'Center — crop from the geometric center' },
+  ],
+  detectionModes: [
+    { value: 'combined',  label: 'Combined (default) — luminance + color analysis' },
+    { value: 'luminance', label: 'Luminance only — row/column mean brightness; no color scans' },
+    { value: 'color',     label: 'Color only — chromaticity distance; no luminance scans' },
   ],
 };
 
