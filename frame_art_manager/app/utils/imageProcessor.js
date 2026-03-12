@@ -1459,14 +1459,22 @@ async function meanProfilePreProcessor(buffer, {
     const maxLookahead   = Math.round(Math.min(width, height) * 0.05);
     const contHyst       = 3;
 
-    function chromaLookahead(chromaArr, cropN, label) {
+    // lumGate: a position is only "frame-like" if its luminance also differs from the
+    // interior. This prevents extending into painting content that happens to have high
+    // chroma (e.g. warm-toned paintings) — genuine frame material is typically distinct
+    // from the painting's interior luminance.
+    const lumGate = contrastThreshold * 0.5; // 10 when contrastThreshold=20
+
+    function chromaLookahead(chromaArr, lumArr, cropN, label) {
       if (cropN === 0 || !chromaArr || chromaArr.length <= cropN) return 0;
       const frameBandChroma = chromaArr.slice(0, cropN).reduce((s, v) => s + v, 0) / cropN;
       if (frameBandChroma <= chromaContGate) return 0;
       let ext = 0, gap = 0;
       const limit = Math.min(maxLookahead, chromaArr.length - cropN);
       for (let i = 0; i < limit; i++) {
-        if (chromaArr[cropN + i] > chromaContGate) {
+        const chromaOk = chromaArr[cropN + i] > chromaContGate;
+        const lumOk = !lumArr || Math.abs(lumArr[cropN + i] - interiorMean) > lumGate;
+        if (chromaOk && lumOk) {
           ext = i + 1; gap = 0;
         } else {
           gap++;
@@ -1478,12 +1486,12 @@ async function meanProfilePreProcessor(buffer, {
     }
 
     if (rowChromaScores) {
-      cropTop    += chromaLookahead(rowChromaScores, cropTop, 'top');
-      cropBottom += chromaLookahead([...rowChromaScores].reverse(), cropBottom, 'bottom');
+      cropTop    += chromaLookahead(rowChromaScores, rowMeans, cropTop, 'top');
+      cropBottom += chromaLookahead([...rowChromaScores].reverse(), [...rowMeans].reverse(), cropBottom, 'bottom');
     }
     if (cornerColChromaScores && !strictLR) {
-      cropLeft   += chromaLookahead(cornerColChromaScores, cropLeft, 'left');
-      cropRight  += chromaLookahead([...cornerColChromaScores].reverse(), cropRight, 'right');
+      cropLeft   += chromaLookahead(cornerColChromaScores, cornerColMeans, cropLeft, 'left');
+      cropRight  += chromaLookahead([...cornerColChromaScores].reverse(), [...cornerColMeans].reverse(), cropRight, 'right');
     }
   }
 
