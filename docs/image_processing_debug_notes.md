@@ -1,8 +1,21 @@
 # Image Processing Debug Notes
 
-Working notes from test session ~2026-03-11. Not permanent documentation — for reference when implementing fixes.
+Working notes from test sessions ~2026-03-11 through ~2026-03-12. Not permanent documentation — for reference when implementing fixes.
 
-## Test image set
+## Primary test images (four-image regression suite)
+
+These four Met Museum images are used together as a balanced regression suite. They cover a range of frame types and edge cases that have proven difficult to get right simultaneously.
+
+| ID     | Frame type | Key challenge |
+|--------|------------|---------------|
+| **435765** | Thick ornate gilded frame, multi-layer with bevel | Outer edge is very dark (near-black border before gold bevel begins), so primary luminance scan only gets 5–16px. Bevel continuation extends left well (+89px via rowPercentileScan), but T/B must be inferred via cross-side cascading, causing mild overcrop there. Right bevel fails (only 10% participation). Actual frame is ~100–150px. Representative of museum masterwork portraits in heavy period frames. |
+| **436103** | Extremely thin white/light border, barely visible | Opposite extreme: almost no frame. Tests that the algorithm doesn't overcrop when there is essentially nothing to remove. StrictLR mode fires (T/B < 10px → threshold=45, maxCrop=92px). Chroma continuity brings all sides to ~20px. Key regression test — if this image overcropping it means extension logic is too aggressive. |
+| **437878** | Moderate frame, clean luminance signal | Intermediate case that consistently yields good results. Good sanity check that core detection hasn't regressed. Minimal bevel complication. |
+| **437936** | Dark-stained wood frame, warm-toned brown | Wood grain creates coherent horizontal edges that defeated spatial coherence check (now disabled for L/R). Frame color (warm brown) overlaps with some painting content colors. Bevel-cont fails (only 10–15% participation). Primary scan gets 12–20px; chroma continuity adds 15px; some frame still remains after processing. Representative of carved/stained wood museum frames. |
+
+**Coverage gaps to fill:** larger/deeper ornate frames (multi-layer gilding going 200px+), dark frames against dark paintings, frames with strong color contrast (red lacquer, black), no-frame paintings, and paintings with heavy varnish yellowing that mimics gold frame color.
+
+## Earlier test image set (2026-03-11)
 
 | ID     | Expected | Actual result | Notes |
 |--------|----------|---------------|-------|
