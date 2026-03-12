@@ -1880,7 +1880,8 @@ async function tileColorPreProcessor(buffer, {
  * baseline, each side could independently extend further using color continuity
  * to handle frames that are wider on one side (e.g. heavier bottom frame).
  */
-async function symmetricScanPreProcessor(buffer, {
+// Internal implementation: returns { buffer, stopReason } so adaptive_scan can act on the result.
+async function _symmetricScanCore(buffer, {
   maxCropFrac        = 0.30,
   tileSize           = 8,
   colorThreshold     = 30,   // RGB distance gate for per-sample agreement
@@ -2069,15 +2070,72 @@ async function symmetricScanPreProcessor(buffer, {
   console.log(`[symmetric_scan] consensusΔ profile(0-${deltaLog.length - 1})=[${deltaLog.join(',')}]`);
   console.log(`[symmetric_scan] boundary=${boundaryDepth}t (stop=${stopReason}) → top=${cropPxV}px bot=${cropPxV}px left=${cropPxH}px right=${cropPxH}px — compute=${_tCompute - _t0}ms`);
 
-  if (boundaryDepth === 0) return buffer;
+  if (boundaryDepth === 0) return { buffer, stopReason };
 
   const extractW = origW - cropPxH * 2;
   const extractH = origH - cropPxV * 2;
-  if (extractW <= 0 || extractH <= 0) return buffer;
+  if (extractW <= 0 || extractH <= 0) return { buffer, stopReason };
 
-  return sharp(buffer)
+  const cropped = await sharp(buffer)
     .extract({ left: cropPxH, top: cropPxV, width: extractW, height: extractH })
     .toBuffer();
+  return { buffer: cropped, stopReason };
+}
+
+async function symmetricScanPreProcessor(buffer, options = {}) {
+  return (await _symmetricScanCore(buffer, options)).buffer;
+}
+
+/**
+ * Adaptive scan: runs symmetric_scan and falls back to a second pre-processor when
+ * symmetric_scan cannot find a confident crop.
+ *
+ * Fallback policy by stop reason:
+ *   diversity / agreement → symmetric_scan found a crop; return it directly
+ *   entryRun              → frame undetectable by symmetric_scan; invoke fallback
+ *   maxDepth              → scan ran wild (likely bright/uniform background); return unchanged
+ */
+async function adaptiveScanPreProcessor(buffer, {
+  fallback          = 'corner_consensus', // pre-processor name to use as fallback
+  fallbackOptions   = {},                 // options forwarded to the fallback
+  // symmetric_scan options (all with same defaults):
+  maxCropFrac        = 0.30,
+  tileSize           = 8,
+  colorThreshold     = 30,
+  minAgreeFrac       = 0.70,
+  minPaintRun        = 2,
+  maxEntryRun        = 5,
+  baseSamples        = 5,
+  shiftThreshold     = 20,
+  minShiftFrac       = 0.50,
+  diversityThreshold = 25,
+} = {}) {
+  const scanOpts = {
+    maxCropFrac, tileSize, colorThreshold, minAgreeFrac,
+    minPaintRun, maxEntryRun, baseSamples, shiftThreshold,
+    minShiftFrac, diversityThreshold,
+  };
+  const { buffer: result, stopReason } = await _symmetricScanCore(buffer, scanOpts);
+
+  if (stopReason === 'diversity' || stopReason === 'agreement') {
+    return result;
+  }
+
+  if (stopReason === 'maxDepth') {
+    console.log('[adaptive_scan] symmetric_scan hit maxDepth (likely bright/uniform background) — returning unchanged');
+    return buffer;
+  }
+
+  // stop=entryRun: symmetric_scan found no anchor; try fallback
+  console.log(`[adaptive_scan] symmetric_scan stop=${stopReason} — invoking fallback: ${fallback}`);
+  // PRE_PROCESSORS is defined below; accessed at call-time so the reference resolves correctly.
+  // eslint-disable-next-line no-use-before-define
+  const fallbackFn = PRE_PROCESSORS[fallback];
+  if (!fallbackFn || fallback === 'adaptive_scan') {
+    console.log(`[adaptive_scan] fallback '${fallback}' unavailable or circular — returning unchanged`);
+    return buffer;
+  }
+  return fallbackFn(buffer, fallbackOptions);
 }
 
 const PRE_PROCESSORS = {
@@ -2088,6 +2146,7 @@ const PRE_PROCESSORS = {
   mean_profile:      meanProfilePreProcessor,
   tile_color:        tileColorPreProcessor,
   symmetric_scan:    symmetricScanPreProcessor,
+  adaptive_scan:     adaptiveScanPreProcessor,
 };
 
 // ── Dimension computation ─────────────────────────────────────────────────────
@@ -2208,6 +2267,7 @@ const IMAGE_PROCESSING_SCHEMA = {
     { value: 'region_compare',   label: 'Region Compare — detect frames by comparing edge strip to painting interior' },
     { value: 'tile_color',       label: 'Tile Color — detect frames using 2D tile color continuity; tracks color along frame material and stops at abrupt changes' },
     { value: 'symmetric_scan',   label: 'Symmetric Scan — detect frames by checking that all four edges agree in color at each depth; handles multi-layer frames naturally' },
+    { value: 'adaptive_scan',    label: 'Adaptive Scan — symmetric scan with automatic fallback to a second pre-processor when no confident crop is found' },
     { value: 'variance_scan',    label: 'Variance Scan — detect frames by local edge variance (legacy)' },
     { value: 'trim',             label: 'Sharp Trim — background strip only (same as None; redundant with automatic Stage 1)' },
     // TODO (Option 3): ML Segmentation — handles irregular/ornate frames; see docs/ROADMAP.md
