@@ -780,15 +780,27 @@ async function meanProfilePreProcessor(buffer, {
   const interiorChR = iColorR / iColorTot;
   const interiorChG = iColorG / iColorTot;
   const interiorChB = iColorB / iColorTot;
-  // Color row profile: mean chromaticity distance per row, sampled every 4 columns for speed.
-  // Computed after interiorChR/G/B since pixelChromaDist reads those values.
-  const rowChromaScores = channels >= 3
-    ? Array.from({ length: height }, (_, y) => {
-        let sum = 0, n = 0;
-        for (let x = 0; x < width; x += 4) { sum += pixelChromaDist((y * width + x) * channels); n++; }
-        return n > 0 ? sum / n : 0;
-      })
-    : null;
+  // Color row profile: mean and within-row variance of chromaticity distance per row,
+  // sampled every 4 columns for speed. Computed after interiorChR/G/B.
+  // rowChromaScores: mean chroma per row (scalar)
+  // rowChromaVars: within-row variance of chroma per row — low variance = uniform color
+  //   (frame-like); high variance = complex content (painting-like).
+  const { rowChromaScores, rowChromaVars } = channels >= 3
+    ? (() => {
+        const scores = [], vars = [];
+        for (let y = 0; y < height; y++) {
+          let sum = 0, sumSq = 0, n = 0;
+          for (let x = 0; x < width; x += 4) {
+            const c = pixelChromaDist((y * width + x) * channels);
+            sum += c; sumSq += c * c; n++;
+          }
+          const mean = n > 0 ? sum / n : 0;
+          scores.push(mean);
+          vars.push(n > 0 ? sumSq / n - mean * mean : 0);
+        }
+        return { rowChromaScores: scores, rowChromaVars: vars };
+      })()
+    : { rowChromaScores: null, rowChromaVars: null };
   const _tRowMeans = Date.now();
 
   if (label) console.log(`[mean_profile] source: ${label}`);
@@ -1338,6 +1350,24 @@ async function meanProfilePreProcessor(buffer, {
   const cornerColChromaScores = channels >= 3
     ? Array.from({ length: width }, (_, x) => colChromaMedianInBands(x, cornerBands))
     : null;
+
+  // Within-column chroma variance across corner-band rows, for L/R chroma continuity gate.
+  // Low variance = column pixels have uniform color (frame-like).
+  // High variance = column pixels span many colors (painting-like).
+  // Only computed for the scan range to keep cost low.
+  function colChromaVar(x, bands) {
+    let sum = 0, sumSq = 0, n = 0;
+    for (const [y0, y1] of bands) {
+      for (let y = y0; y < y1; y++) {
+        const c = pixelChromaDist((y * width + x) * channels);
+        sum += c; sumSq += c * c; n++;
+      }
+    }
+    const mean = n > 0 ? sum / n : 0;
+    return n > 0 ? sumSq / n - mean * mean : 0;
+  }
+  const leftChromaVars  = channels >= 3 ? Array.from({ length: maxCols }, (_, i) => colChromaVar(i, cornerBands)) : null;
+  const rightChromaVars = channels >= 3 ? Array.from({ length: maxCols }, (_, i) => colChromaVar(width - 1 - i, cornerBands)) : null;
   const _tColMedians = Date.now();
   console.log(`[mean_profile] colMeansProfile(0-${Math.min(24, maxCols)-1})=[${cornerColMeans.slice(0, Math.min(25, maxCols)).map(v => v.toFixed(1)).join(',')}]`);
   console.log(`[mean_profile] colBandMADProfile(0-${Math.min(24, maxCols)-1})=[${cornerColBandMADs.slice(0, Math.min(25, maxCols)).map(v => v.toFixed(1)).join(',')}]`);
@@ -1454,28 +1484,34 @@ async function meanProfilePreProcessor(buffer, {
   // The hysteresis of 3 tolerates brief gaps in a gold frame without overshooting.
   // Cap is 5% of the shorter image dimension to accommodate thick ornate frames.
   //
-  // Chroma coherence: frame material forms straight color bands — consecutive rows/cols
-  // have similar chroma. Painting content has varying colors across rows/cols. We require
-  // each position's chroma to be within chromaCohereTol of the previous extended position.
-  // This distinguishes uniform gold frames from warm-toned paintings (which vary across rows).
+  // Within-row/column chroma variance gate: frame material has UNIFORM color across its
+  // width (straight color bands → low within-row chroma variance). Painting content has
+  // VARIED colors across its width (complex scene → high within-row chroma variance).
+  // We stop extending when variance exceeds chromaVarThreshold. The gate is only active
+  // when the detected frame band itself has low variance (confirming it's uniform); if
+  // the frame band has high variance, the gate is suppressed (ornate frame with complex
+  // decoration — the mean/hysteresis checks are the only guards).
   if (detectionMode !== 'luminance') {
-    const chromaContGate  = contrastThreshold / 2; // 10 when contrastThreshold=20
-    const maxLookahead    = Math.round(Math.min(width, height) * 0.05);
-    const contHyst        = 3;
-    const chromaCohereTol = 25; // adjacent positions must be within 25 chroma units of each other
+    const chromaContGate    = contrastThreshold / 2; // 10 when contrastThreshold=20
+    const maxLookahead      = Math.round(Math.min(width, height) * 0.05);
+    const contHyst          = 3;
+    const chromaVarThreshold = 500; // within-row/col chroma variance: frame < 500, painting > 500
 
-    function chromaLookahead(chromaArr, cropN, label) {
+    function chromaLookahead(chromaArr, chromaVarArr, cropN, label) {
       if (cropN === 0 || !chromaArr || chromaArr.length <= cropN) return 0;
       const frameBandChroma = chromaArr.slice(0, cropN).reduce((s, v) => s + v, 0) / cropN;
       if (frameBandChroma <= chromaContGate) return 0;
-      let ext = 0, gap = 0, lastExtChroma = null;
+      const frameBandVar = chromaVarArr ? chromaVarArr.slice(0, cropN).reduce((s, v) => s + v, 0) / cropN : null;
+      const varGateActive = frameBandVar !== null && frameBandVar < chromaVarThreshold * 2;
+      const extVarProfile = chromaVarArr ? chromaVarArr.slice(cropN, cropN + 5).map(v => v.toFixed(0)).join(',') : 'n/a';
+      console.log(`[mean_profile] ${label}: chromaCont frameBandChroma=${frameBandChroma.toFixed(1)} frameBandVar=${frameBandVar !== null ? frameBandVar.toFixed(0) : 'n/a'} varGate=${varGateActive} extVarProfile(0-4)=[${extVarProfile}]`);
+      let ext = 0, gap = 0;
       const limit = Math.min(maxLookahead, chromaArr.length - cropN);
       for (let i = 0; i < limit; i++) {
-        const chromaHere = chromaArr[cropN + i];
-        const chromaOk   = chromaHere > chromaContGate;
-        const coherent   = lastExtChroma === null || Math.abs(chromaHere - lastExtChroma) <= chromaCohereTol;
-        if (chromaOk && coherent) {
-          ext = i + 1; gap = 0; lastExtChroma = chromaHere;
+        const chromaOk = chromaArr[cropN + i] > chromaContGate;
+        const varOk    = !varGateActive || (chromaVarArr[cropN + i] < chromaVarThreshold);
+        if (chromaOk && varOk) {
+          ext = i + 1; gap = 0;
         } else {
           gap++;
           if (gap >= contHyst) break;
@@ -1486,12 +1522,12 @@ async function meanProfilePreProcessor(buffer, {
     }
 
     if (rowChromaScores) {
-      cropTop    += chromaLookahead(rowChromaScores, cropTop, 'top');
-      cropBottom += chromaLookahead([...rowChromaScores].reverse(), cropBottom, 'bottom');
+      cropTop    += chromaLookahead(rowChromaScores, rowChromaVars, cropTop, 'top');
+      cropBottom += chromaLookahead([...rowChromaScores].reverse(), rowChromaVars ? [...rowChromaVars].reverse() : null, cropBottom, 'bottom');
     }
     if (cornerColChromaScores && !strictLR) {
-      cropLeft   += chromaLookahead(cornerColChromaScores, cropLeft, 'left');
-      cropRight  += chromaLookahead([...cornerColChromaScores].reverse(), cropRight, 'right');
+      cropLeft   += chromaLookahead(cornerColChromaScores, leftChromaVars, cropLeft, 'left');
+      cropRight  += chromaLookahead([...cornerColChromaScores].reverse(), rightChromaVars, cropRight, 'right');
     }
   }
 
