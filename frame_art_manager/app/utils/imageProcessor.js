@@ -722,26 +722,38 @@ async function meanProfilePreProcessor(buffer, {
   const rowVariances = rowMeans.map((m, y) => rowVariance(y, m));
   const rowMADs = Array.from({ length: height }, (_, y) => rowMAD(y));
 
-  // Hot-pixel fraction per row: fraction of pixels whose luminance exceeds a fixed
-  // threshold (80). Used in incrementalScan's contamination detector: when the edge
-  // reference is very dark (refMean < 30), rows that "look like frame" by mean (the dark
-  // painting background dominates) but contain clustered bright pixels (a face, garment,
-  // or object) will have high hotFrac even though rowMean is still low. Three consecutive
-  // such rows indicate painting content within the scanned band — the crop is rejected.
-  // A "hot" pixel is one that deviates significantly from surrounding content (the row mean),
-  // not just an absolute brightness threshold. This correctly handles all frame luminance
-  // levels: uniform dark frames and uniform gold frames both have low hot-pixel fractions
-  // because their pixels are similar to their row neighbors.
-  const hotDevThreshold = 40;
-  function rowHotFrac(y) {
-    const rMean = rowMeans[y];
-    let count = 0;
-    for (let x = 0; x < width; x++) {
-      if (Math.abs(pixelLum((y * width + x) * channels) - rMean) > hotDevThreshold) count++;
+  // Edge column sets for spatial coherence contamination check (T/B scan).
+  // For each scanned row, records sorted column positions where the horizontal gradient
+  // (|lum(y, x+1) - lum(y, x-1)|) exceeds edgeGradThreshold. Only computed for the
+  // scan range (maxRows rows from each edge) to avoid full-image processing.
+  //
+  // Used in incrementalScan to detect painting content inside frame-apparent rows:
+  // a painting subject's vertical boundary (e.g. the edge of a face) creates a consistent
+  // horizontal gradient at the same column positions across many consecutive rows.
+  // Frame material (uniform colour, random wood grain) produces sparse or inconsistent
+  // edge column positions that do not repeat across rows. Three consecutive frame-apparent
+  // rows whose edge columns overlap (within ±edgeTolerance px) signal painting content.
+  //
+  // The same horizontal-gradient formula is reused for L/R coherence (per-column edge
+  // row sets), computed after cornerBands is established below.
+  // Gradient threshold: only count as an edge if the horizontal luminance change
+  // exceeds this value. Grain boundaries in wood frames are subtle (30–60 lum units);
+  // painting subject edges against a contrasting background are bold (80–150+ lum units).
+  // A higher threshold filters grain while keeping painting content detectable.
+  const edgeGradThreshold = 60;
+  function rowEdgeCols(y) {
+    const cols = [];
+    for (let x = 1; x < width - 1; x++) {
+      const grad = Math.abs(
+        pixelLum((y * width + x + 1) * channels) -
+        pixelLum((y * width + x - 1) * channels)
+      );
+      if (grad > edgeGradThreshold) cols.push(x);
     }
-    return count / width;
+    return cols;
   }
-  const rowHotFracs = Array.from({ length: height }, (_, y) => rowHotFrac(y));
+  const topEdgeSets = Array.from({ length: maxRows }, (_, i) => rowEdgeCols(i));
+  const botEdgeSets = Array.from({ length: maxRows }, (_, i) => rowEdgeCols(height - 1 - i));
 
   // Interior reference: center 50% block.
   // Also accumulates R/G/B for a chromaticity color reference used to detect
@@ -782,13 +794,24 @@ async function meanProfilePreProcessor(buffer, {
   if (label) console.log(`[mean_profile] source: ${label}`);
   console.log(`[mean_profile] image ${width}×${height}, interiorMean=${interiorMean.toFixed(1)}, consistencyThreshold=${consistencyThreshold}, contrastThreshold=${contrastThreshold}`);
 
+  // Returns true if sorted arrays a and b share at least one value within ±tol.
+  // Two-pointer O(m+n) — avoids O(m×n) naive comparison.
+  function edgesOverlap(a, b, tol) {
+    let j = 0;
+    for (let i = 0; i < a.length; i++) {
+      while (j < b.length && b[j] < a[i] - tol) j++;
+      if (j < b.length && b[j] <= a[i] + tol) return true;
+    }
+    return false;
+  }
+
   // Scan values[] from index 0 inward. Extends while each new value is within
   // consistencyThreshold of a reference mean established from the first few edge values.
   // This handles frames with internal texture (wood grain ≈ ±20 variation) while
   // stopping at the sharper frame/painting boundary (typically ±40–80 jump).
   // Requires a minimum band size (5), a natural stopping point (runaway guard),
   // and a contrast check against interiorMean.
-  function incrementalScan(values, maxN, label, thresholdOverride = null, contrastOverride = null, varValues = null, madValues = null, hotValues = null) {
+  function incrementalScan(values, maxN, label, thresholdOverride = null, contrastOverride = null, varValues = null, madValues = null, edgeSets = null) {
     if (maxN < 5 || values.length < 5) return 0;
     // Reference mean from the first few values (outermost edge — always frame material
     // after solidBorderStrip). More robust than running stdDev for wood grain frames.
@@ -818,27 +841,41 @@ async function meanProfilePreProcessor(buffer, {
     // "high variance from sharp geometric transitions" (painting pattern content).
     const refMAD = madValues ? madValues.slice(0, initN).reduce((s, v) => s + v, 0) / initN : 0;
     const madCheckActive = madValues !== null;
-    // Hot-pixel contamination check: for dark-edge scans (refMean < 30), detect rows that
-    // appear "frame-like" by mean luminance but contain a cluster of bright pixels indicating
-    // painting content (e.g. a face or garment mixed with a dark background). The dark
-    // background dominates the row mean, keeping it within the consistency threshold, while
-    // the bright pixels are locally clustered (the user sees painting content both above and
-    // below the crop boundary — the scan swept through a face without stopping because the
-    // face was diluted by surrounding dark background pixels).
+    // Spatial coherence contamination check: detects painting content hiding in
+    // frame-apparent rows/columns by checking whether consecutive frame-apparent
+    // positions share consistent horizontal-gradient edge positions (within ±edgeTolerance).
     //
-    // Fires only on rows that pass the main dev/var/mad checks (appear frame-like by mean),
-    // so it does NOT interfere with the normal frame/painting boundary stop: painting content
-    // at the boundary has high dev AND high hotFrac, and the main hysteresis stops the scan
-    // first. This check only rejects bands where bright content is present in "frame-apparent"
-    // rows — the contamination case.
-    const hotCheckActive = hotValues !== null;
-    const minHotFrac = 0.08; // 8%: a face occupying 10%+ of row width fires at 10% >> 8%
-    const hotHystN   = 3;
-    let hotRunLen = 0;
+    // Frame material (uniform colour, wood grain) produces sparse or randomly varying
+    // edge positions — grain boundaries shift row-to-row so overlap across three
+    // consecutive rows is extremely rare.
+    //
+    // Painting subjects create a persistent vertical or horizontal boundary: e.g. the
+    // edge of a face appears at the same column positions across many consecutive rows
+    // (T/B scan), or at the same row positions across many consecutive columns (L/R scan).
+    // Three consecutive frame-apparent positions whose edge sets overlap within ±tolerance
+    // signal painting content → reject the crop band.
+    //
+    // Fires only on positions that pass the main dev/var/mad checks (appear frame-like),
+    // so it does NOT interfere with the normal frame/painting boundary stop.
+    // Suppress coherence check if any reference position already contains bold edges.
+    // Reference-row edges mean the frame material itself is textured (e.g. wood grain,
+    // ornate structure). In that case the main mean/MAD/variance checks are sufficient
+    // to find the frame/painting boundary, and coherence would fire on the frame's own
+    // texture rather than on painting contamination.
+    // The check is only meaningful when reference rows are completely smooth (uniform dark
+    // background with no edges) — the no-frame contamination case where painting content
+    // (e.g. a face against a dark background) would not otherwise stop the scan.
+    let edgeCheckActive = edgeSets !== null &&
+      !edgeSets.slice(0, initN).some(e => e.length > 0);
+    const edgeTolerance = 5; // ± position tolerance for edge match (handles slight shift)
+    const coherenceN    = 3; // consecutive overlapping positions to trigger rejection
+    let prevEdges  = null;
+    let edgeRunLen = 0;
     if (varValues) console.log(`[mean_profile] ${label}: varProfile(0-${Math.min(24, maxN)-1})=[${varValues.slice(0, Math.min(25, maxN)).map(v => Math.round(v)).join(',')}]`);
     if (madValues) console.log(`[mean_profile] ${label}: madProfile(0-${Math.min(24, maxN)-1})=[${madValues.slice(0, Math.min(25, maxN)).map(v => v.toFixed(1)).join(',')}]`);
+    if (edgeSets) console.log(`[mean_profile] ${label}: refEdgeCounts(0-${initN-1})=[${edgeSets.slice(0, initN).map(e => e.length).join(',')}] edgeCheck=${edgeCheckActive}`);
     let lastGoodIdx = initN - 1, consecutiveOutliers = 0;
-    let stopIdx = -1, stopDev = 0;
+    let stopIdx = -1;
     for (let i = initN; i < Math.min(maxN, values.length); i++) {
       const dev = Math.abs(values[i] - refMean);
       const varOutlier = varCheckActive && varValues[i] > refVar * varMultiplier;
@@ -861,23 +898,26 @@ async function meanProfilePreProcessor(buffer, {
       if (dev < threshold && !varOutlier && !madOutlier) {
         consecutiveOutliers = 0;
         lastGoodIdx = i;
-        // Hot contamination: row appears frame-like by mean, but check for bright pixel
-        // clusters that indicate painting content hidden by dark background.
-        if (hotCheckActive && hotValues[i] > minHotFrac) {
-          hotRunLen++;
-          if (hotRunLen >= hotHystN) {
-            console.log(`[mean_profile] ${label}: contamination — ${hotRunLen} consecutive frame-apparent rows contain bright clusters (hotFrac=${hotValues[i].toFixed(2)}, refMean=${refMean.toFixed(1)}) — REJECTED`);
-            return 0;
+        // Spatial coherence contamination check (frame-apparent branch only).
+        if (edgeCheckActive) {
+          const curEdges = edgeSets[i];
+          if (curEdges.length > 0 && prevEdges !== null && edgesOverlap(curEdges, prevEdges, edgeTolerance)) {
+            edgeRunLen++;
+            if (edgeRunLen >= coherenceN) {
+              console.log(`[mean_profile] ${label}: coherence contamination — ${edgeRunLen} consecutive frame-apparent positions share edge positions (edgeCount=${curEdges.length}) → painting content — REJECTED`);
+              return 0;
+            }
+          } else {
+            edgeRunLen = 0;
           }
-        } else {
-          hotRunLen = 0;
+          prevEdges = curEdges.length > 0 ? curEdges : null;
         }
       } else {
         consecutiveOutliers++;
-        hotRunLen = 0; // row is a real outlier (high dev/var/mad) — not contamination
+        edgeRunLen = 0;  // outlier breaks the coherence run
+        prevEdges = null;
         if (consecutiveOutliers >= hysteresisN) {
           stopIdx = lastGoodIdx + 1;
-          stopDev = dev;
           break;
         }
       }
@@ -1113,8 +1153,8 @@ async function meanProfilePreProcessor(buffer, {
   // Pass rowVariances as supplementary signal: rows with high within-row variance are
   // painting content (structured patterns), not frame material, even if their mean is close
   // to the edge reference. The reversed variance array mirrors the reversed means array.
-  let cropTop    = detectionMode !== 'color' ? incrementalScan(rowMeans, maxRows, 'top', null, null, rowVariances, rowMADs, rowHotFracs) : 0;
-  let cropBottom = detectionMode !== 'color' ? incrementalScan([...rowMeans].reverse(), maxRows, 'bottom', null, null, [...rowVariances].reverse(), [...rowMADs].reverse(), [...rowHotFracs].reverse()) : 0;
+  let cropTop    = detectionMode !== 'color' ? incrementalScan(rowMeans, maxRows, 'top', null, null, rowVariances, rowMADs, topEdgeSets) : 0;
+  let cropBottom = detectionMode !== 'color' ? incrementalScan([...rowMeans].reverse(), maxRows, 'bottom', null, null, [...rowVariances].reverse(), [...rowMADs].reverse(), botEdgeSets) : 0;
 
   // Supplementary color-based T/B scan: detects frames with distinct color but low
   // luminance contrast (e.g. thin gold frames near interior brightness). Runs only when
@@ -1218,7 +1258,7 @@ async function meanProfilePreProcessor(buffer, {
           // case. Also cap by the absolute size limit to catch remaining outliers.
           const bevelLimit = Math.round(height * bevelMaxExtFrac);
           const rawBest = Math.max(extSimple, ext);
-          const bestExt = (rawBest > extSimple * 3 || rawBest > bevelLimit) ? extSimple : rawBest;
+          const bestExt = (rawBest > extSimple * 4 || rawBest > bevelLimit) ? extSimple : rawBest;
           if (bestExt > 0) { console.log(`[mean_profile] top: bevel continuation simple=${extSimple}px adaptive=${ext}px → using ${bestExt}px → ${cropTop + bestExt}px total`); cropTop += bestExt; }
         }
       }
@@ -1245,7 +1285,7 @@ async function meanProfilePreProcessor(buffer, {
           const ext = columnPercentileScan(height - 1 - cropBottom, scanN, -1, 'bottom-bevel-cont-adaptive', bevelMinEdgeLum, true);
           const bevelLimit = Math.round(height * bevelMaxExtFrac);
           const rawBest = Math.max(extSimple, ext);
-          const bestExt = (rawBest > extSimple * 3 || rawBest > bevelLimit) ? extSimple : rawBest;
+          const bestExt = (rawBest > extSimple * 4 || rawBest > bevelLimit) ? extSimple : rawBest;
           if (bestExt > 0) { console.log(`[mean_profile] bottom: bevel continuation simple=${extSimple}px adaptive=${ext}px → using ${bestExt}px → ${cropBottom + bestExt}px total`); cropBottom += bestExt; }
         }
       }
@@ -1271,20 +1311,28 @@ async function meanProfilePreProcessor(buffer, {
   // columns within a dark wood frame that inflate the mean and cause early scan termination.
   const cornerColMeans = Array.from({ length: width }, (_, x) => colMedianInBands(x, cornerBands));
   const cornerColBandMADs = Array.from({ length: width }, (_, x) => colBandMAD(x, cornerBands));
-  // Hot-pixel fraction per column in corner bands: fraction of pixels that deviate
-  // significantly from the column median (cornerColMeans[x]). Uniform frame material
-  // (dark wood, gold) has low hotFrac; varied painting content has high hotFrac.
-  const cornerColHotFracs = Array.from({ length: width }, (_, x) => {
-    const colMed = cornerColMeans[x];
-    let count = 0, total = 0;
-    for (const [y0, y1] of cornerBands) {
+  // Edge row sets for L/R spatial coherence check (per scan-range column only).
+  // For each column in the L/R scan range, records sorted row positions (within corner
+  // bands) where the horizontal gradient (|lum(y, x+1) - lum(y, x-1)|) exceeds
+  // edgeGradThreshold. Uses the same gradient formula as T/B edge detection — a painting
+  // subject's vertical boundary creates strong horizontal gradient at consistent row
+  // positions across consecutive columns, while frame material produces sparse/varied edges.
+  function colEdgeRows(x, bands) {
+    const rows = [];
+    const xm1 = Math.max(0, x - 1), xp1 = Math.min(width - 1, x + 1);
+    for (const [y0, y1] of bands) {
       for (let y = y0; y < y1; y++) {
-        if (Math.abs(pixelLum((y * width + x) * channels) - colMed) > hotDevThreshold) count++;
-        total++;
+        const grad = Math.abs(
+          pixelLum((y * width + xp1) * channels) -
+          pixelLum((y * width + xm1) * channels)
+        );
+        if (grad > edgeGradThreshold) rows.push(y);
       }
     }
-    return total > 0 ? count / total : 0;
-  });
+    return rows; // already sorted ascending
+  }
+  const leftEdgeSets  = Array.from({ length: maxCols }, (_, i) => colEdgeRows(i, cornerBands));
+  const rightEdgeSets = Array.from({ length: maxCols }, (_, i) => colEdgeRows(width - 1 - i, cornerBands));
   // Parallel chroma profile for color-based L/R detection: median chromaticity distance
   // per column within the same corner bands. Only computed for colour images.
   const cornerColChromaScores = channels >= 3
@@ -1313,9 +1361,10 @@ async function meanProfilePreProcessor(buffer, {
   //   2. Size cap (3% of width): real thin frames detected via edge-row fallback are
   //      typically < 15px. A result of 3%+ is almost always dark painting content. This
   //      mirrors the bevel continuation size guard and is similarly calibrated.
-  const strictLR = cropTopForBand === 0 && cropBottomForBand === 0;
+  const MIN_RELIABLE_CROP = 10;
+  const strictLR = cropTopForBand < MIN_RELIABLE_CROP && cropBottomForBand < MIN_RELIABLE_CROP;
   const lrMaxCrop = strictLR ? Math.round(width * 0.03) : Infinity;
-  if (strictLR) console.log(`[mean_profile] L/R: no T/B bands detected — strict mode (threshold=45, maxCrop=${lrMaxCrop}px)`);
+  if (strictLR) console.log(`[mean_profile] L/R: T/B bands unreliable (top=${cropTopForBand}px, bot=${cropBottomForBand}px < ${MIN_RELIABLE_CROP}px) — strict mode (threshold=45, maxCrop=${lrMaxCrop}px)`);
   // Adaptive consistency threshold for L/R: when the outer frame reference is near-black
   // (refMean < half the default consistencyThreshold), tighten the threshold proportionally.
   // Near-black frames transitioning to even moderately dark painting backgrounds benefit
@@ -1328,8 +1377,8 @@ async function meanProfilePreProcessor(buffer, {
   if (!strictLR && (lrThresholdLeft !== consistencyThreshold || lrThresholdRight !== consistencyThreshold)) {
     console.log(`[mean_profile] L/R: adaptive threshold — left refMean=${leftEdgeRefMean.toFixed(1)} → threshold=${lrThresholdLeft}, right refMean=${rightEdgeRefMean.toFixed(1)} → threshold=${lrThresholdRight}`);
   }
-  let cropLeft  = (colMeansDiscriminating && detectionMode !== 'color') ? incrementalScan(cornerColMeans, maxCols, 'left', lrThresholdLeft, null, null, cornerColBandMADs, cornerColHotFracs) : 0;
-  let cropRight = (colMeansDiscriminating && detectionMode !== 'color') ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right', lrThresholdRight, null, null, [...cornerColBandMADs].reverse(), [...cornerColHotFracs].reverse()) : 0;
+  let cropLeft  = (colMeansDiscriminating && detectionMode !== 'color') ? incrementalScan(cornerColMeans, maxCols, 'left', lrThresholdLeft, null, null, cornerColBandMADs, leftEdgeSets) : 0;
+  let cropRight = (colMeansDiscriminating && detectionMode !== 'color') ? incrementalScan([...cornerColMeans].reverse(), maxCols, 'right', lrThresholdRight, null, null, [...cornerColBandMADs].reverse(), rightEdgeSets) : 0;
   if (cropLeft  > lrMaxCrop) { console.log(`[mean_profile] left: strict-mode size cap — ${cropLeft}px > ${lrMaxCrop}px limit → 0`);  cropLeft  = 0; }
   if (cropRight > lrMaxCrop) { console.log(`[mean_profile] right: strict-mode size cap — ${cropRight}px > ${lrMaxCrop}px limit → 0`); cropRight = 0; }
 
@@ -1729,7 +1778,7 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
   return result;
 }
 
-// ── Schema (for UI) ───────────────────────────────────────────────────────────
+// ── Schema (for UI) ──────────────────────────��────────────────────────────────
 
 const IMAGE_PROCESSING_SCHEMA = {
   preProcessors: [
