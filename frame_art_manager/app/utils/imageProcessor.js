@@ -2028,8 +2028,12 @@ async function symmetricScanPreProcessor(buffer, {
       boundaryDepth = d + 1;
       highRun = 0;
     } else {
-      highRun++;
-      if (highRun >= minPaintRun) { stopReason = 'agreement'; break; }
+      // Only apply minPaintRun once we have an anchor. Before any passing depth,
+      // let the scan continue through the noisy entry zone (e.g. thin outer border).
+      if (boundaryDepth > 0) {
+        highRun++;
+        if (highRun >= minPaintRun) { stopReason = 'agreement'; break; }
+      }
     }
 
     prevColors = colors;
