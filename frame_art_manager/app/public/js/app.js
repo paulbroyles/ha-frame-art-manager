@@ -15789,7 +15789,31 @@ function renderWebSourcesTestSection() {
     const processingInfoRow = pi ? (() => {
       const actual = pi.actualProcessor || pi.configured;
       const stopNote = pi.stopReason ? ` — ${pi.stopReason}` : '';
-      return `<tr><td style="font-weight:600;padding:3px 12px 3px 0;white-space:nowrap;">Processing</td><td>${escapeHtml(actual + stopNote)}</td></tr>`;
+      const mainRow = `<tr><td style="font-weight:600;padding:3px 12px 3px 0;white-space:nowrap;">Processing</td><td>${escapeHtml(actual + stopNote)}</td></tr>`;
+
+      // Render option rows using schema labels for the configured pre-processor and crop engine.
+      const preProcessors = webSourceImageProcessingSchema.preProcessors || [];
+      const cropEngines   = webSourceImageProcessingSchema.cropEngines   || [];
+      function optionRows(schemaList, processorValue, optionsObj) {
+        if (!optionsObj || !Object.keys(optionsObj).length) return '';
+        const schema = schemaList.find(p => p.value === processorValue);
+        if (!schema?.options?.length) return '';
+        return schema.options.map(opt => {
+          const val = optionsObj[opt.key];
+          if (val === undefined || val === null) return '';
+          let displayVal;
+          if (opt.type === 'select') {
+            const choice = (opt.choices || []).find(c => c.value === val);
+            displayVal = choice ? choice.label : String(val);
+          } else {
+            displayVal = String(val);
+          }
+          return `<tr><td style="padding:3px 12px 3px 0;white-space:nowrap;color:var(--text-muted,#666);">${escapeHtml(opt.label)}</td><td style="color:var(--text-muted,#666);">${escapeHtml(displayVal)}</td></tr>`;
+        }).join('');
+      }
+      const ppRows = optionRows(preProcessors, pi.configured, pi.preProcessorOptions);
+      const ceRows = optionRows(cropEngines,   webSourcesConfig?.imageProcessing?.cropEngine || 'sharp', pi.cropEngineOptions);
+      return mainRow + ppRows + ceRows;
     })() : '';
     const preprocessedImg = testCache.preprocessedFilename
       ? `<div style="flex:1;min-width:0;">

@@ -809,7 +809,7 @@ router.post('/test-fetch', async (req, res) => {
       ...(Object.keys(attributeSnapshot).length > 0 && { attributeSnapshot }),
       ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
       fetchedAt: new Date().toISOString(),
-      ...(activePreProcessor && { processingInfo: { configured: activePreProcessor, ...processingResult } }),
+      ...(activePreProcessor && { processingInfo: { configured: activePreProcessor, ...processingResult, preProcessorOptions, cropEngineOptions } }),
     };
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 
@@ -873,7 +873,7 @@ router.post('/test-reprocess', async (req, res) => {
       delete webSources.testCache.preprocessedFilename;
     }
     if (activePreProcessor) {
-      webSources.testCache.processingInfo = { configured: activePreProcessor, ...processingResult };
+      webSources.testCache.processingInfo = { configured: activePreProcessor, ...processingResult, preProcessorOptions, cropEngineOptions };
     } else {
       delete webSources.testCache.processingInfo;
     }
