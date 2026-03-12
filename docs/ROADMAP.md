@@ -62,6 +62,14 @@ frame material from painting content when they share similar color or luminance.
 approach finds the frame as a connected color region starting from the image edges, which
 naturally handles irregularly-shaped or multi-color frames without needing per-row statistics.
 
+**Known motivating failure (Met 437878)**: Thin black outer border + narrow ornate gold frame.
+`symmetric_scan` cannot detect this frame because: (a) the gold frame body shows only 60–65%
+cross-sample color agreement (ornate gilding has internal tonal variation) — below the 70%
+threshold needed for an anchor; and (b) the warm painting background is also depth-consistent,
+so per-sample stability cannot distinguish "still in frame" from "gradually-varying painting."
+A flood-fill starting from the image perimeter would naturally include the gold frame region
+(connected to the edge, consistent color relative to neighbors) without needing global agreement.
+
 **Algorithm**:
 1. Downsample image (400–600px) and decode to raw RGB.
 2. Seed the fill from all four edge pixel strips (outermost 1–2px rows/cols).
