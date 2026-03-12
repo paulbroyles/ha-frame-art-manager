@@ -55,6 +55,45 @@ that vary row to row.
 Replace the `rowHotFracs` array and `rowHotFrac(y)` function with a gradient-based scan
 integrated into the `incrementalScan` loop (or as a pre-computed per-row edge-column set).
 
+### Flood-fill / connected-components frame region detection
+
+**Motivation**: Row/column mean-based approaches (meanProfile, tileColor) can't distinguish
+frame material from painting content when they share similar color or luminance. A flood-fill
+approach finds the frame as a connected color region starting from the image edges, which
+naturally handles irregularly-shaped or multi-color frames without needing per-row statistics.
+
+**Algorithm**:
+1. Downsample image (400–600px) and decode to raw RGB.
+2. Seed the fill from all four edge pixel strips (outermost 1–2px rows/cols).
+3. BFS/DFS outward from seeds, accepting pixels within `colorTolerance` (Euclidean RGB
+   distance) of the local neighborhood mean. The fill grows the "frame region."
+4. Stop when no new pixels can be added — the fill boundary is the frame-painting edge.
+5. For each edge, find the deepest filled row/column → that is the crop amount.
+
+**Advantages over tile-color continuity**:
+- Naturally 2D: the fill follows actual color regions rather than scanning in a fixed direction.
+- Handles irregular frames (scalloped edges, partial gilding) because it follows the actual
+  shape of the color region, not just a perpendicular scan.
+- Cross-side consistency is implicit: the fill on all four sides uses the same color tolerance
+  and will stop at the same frame-painting boundary if the frame color is uniform.
+
+**Key challenges**:
+- **Tolerance choice**: too tight → fill stops in frame imperfections; too loose → bleeds into
+  painting. May need an adaptive tolerance (e.g., based on edge pixel color variance).
+- **Dark-background false positives**: dark painting backgrounds starting from the edge look
+  like frame material. Same problem as meanProfile's dark-bg issue. Guard: if fill covers
+  >50% of the image area, reject (not a frame).
+- **Ornate multi-layer frames**: the fill may stop at an inner bevel layer rather than the
+  full frame. Repeated fill passes with different seeds/tolerances might help.
+- **Performance**: flood fill at full resolution is expensive. At 600px downsampled, BFS
+  over ~360K pixels is fast (<100ms), but border bookkeeping adds overhead.
+
+**Implementation note**: Can borrow the `tileMeanRGB` infrastructure from `tileColorPreProcessor`
+for local color estimates. The fill itself needs a visited-pixel bitset and a BFS queue.
+
+**Integration**: Add as `flood_fill` in `PRE_PROCESSORS`. Start with a fixed tolerance of
+~20–30 RGB units and the 50%-area guard. Build on top of the existing downsample+raw pattern.
+
 ### ML-based frame segmentation (pre-processor Option 3)
 The current frame detection pre-processors (`variance_scan` and `trim`) handle solid
 and lightly-textured borders well, but struggle with ornate or highly irregular decorative
