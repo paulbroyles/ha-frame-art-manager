@@ -1885,7 +1885,8 @@ async function symmetricScanPreProcessor(buffer, {
   tileSize           = 8,
   colorThreshold     = 30,   // RGB distance gate for per-sample agreement
   minAgreeFrac       = 0.70, // fraction of samples required to agree at each depth
-  minPaintRun        = 2,    // consecutive non-consensus depths to declare boundary
+  minPaintRun        = 2,    // consecutive non-consensus depths to declare boundary (after anchor)
+  maxEntryRun        = 5,    // max consecutive failing depths before giving up on finding anchor
   baseSamples        = 5,    // min samples per edge; long edges get more (proportional to aspect)
   shiftThreshold     = 20,   // min per-sample RGB delta (depth-to-depth) to count as shifted
   minShiftFrac       = 0.50, // fraction of total samples that must shift for diversity check
@@ -2028,11 +2029,13 @@ async function symmetricScanPreProcessor(buffer, {
       boundaryDepth = d + 1;
       highRun = 0;
     } else {
-      // Only apply minPaintRun once we have an anchor. Before any passing depth,
-      // let the scan continue through the noisy entry zone (e.g. thin outer border).
+      highRun++;
       if (boundaryDepth > 0) {
-        highRun++;
+        // After anchor: minPaintRun consecutive failures = painting boundary.
         if (highRun >= minPaintRun) { stopReason = 'agreement'; break; }
+      } else {
+        // No anchor yet: give up if frame material never shows agreement.
+        if (highRun >= maxEntryRun) { stopReason = 'entryRun'; break; }
       }
     }
 
