@@ -14748,37 +14748,104 @@ function renderWebSourcesGlobalSettings() {
   });
 
   // Image processing settings
-  const preProcessors   = webSourceImageProcessingSchema.preProcessors  || [];
-  const strategies      = webSourceImageProcessingSchema.sharpStrategies || [];
-  const detectionModes  = webSourceImageProcessingSchema.detectionModes  || [];
-  const currentPreProc  = webSourcesConfig?.imageProcessing?.preProcessor  || 'variance_scan';
-  const currentStrategy = webSourcesConfig?.imageProcessing?.sharpStrategy || 'attention';
-  const currentDetMode  = webSourcesConfig?.imageProcessing?.detectionMode || 'combined';
-  const currentSkipLowRes   = webSourcesConfig?.imageProcessing?.skipLowRes   ?? false;
+
+  // Returns the HTML for a processor's options panel (recursively for preProcessor-type options).
+  // processorSchema: the schema entry ({ value, label, options })
+  // currentOptions: the saved options object for this processor (e.g. preProcessorOptions)
+  // idPrefix: DOM ID prefix for this level's controls
+  // allProcessors: the full preProcessors array from the schema (for preProcessor-type options)
+  function renderProcessorOptionsPanel(processorSchema, currentOptions, idPrefix, allProcessors) {
+    if (!processorSchema?.options?.length) return '';
+    const fields = processorSchema.options.map((opt, i) => {
+      const fieldId = `${idPrefix}-${opt.key}`;
+      const currentVal = currentOptions?.[opt.key] ?? opt.default;
+      const marginTop = i > 0 ? 'margin-top:12px;' : '';
+
+      if (opt.type === 'select') {
+        return `
+          <div style="${marginTop}">
+            <label class="ws-global-label" style="display:block;">${escapeHtml(opt.label)}</label>
+            ${opt.description ? `<p class="pool-health-description">${escapeHtml(opt.description)}</p>` : ''}
+            <select id="${fieldId}" class="ws-select" data-option-key="${escapeHtml(opt.key)}">
+              ${opt.choices.map(c => `<option value="${c.value}" ${currentVal === c.value ? 'selected' : ''}>${escapeHtml(c.label)}</option>`).join('')}
+            </select>
+          </div>`;
+      }
+
+      if (opt.type === 'preProcessor') {
+        const available = allProcessors.filter(p => !(opt.excludeValues || []).includes(p.value));
+        const nestedOpts = currentOptions?.[`${opt.key}Options`] ?? {};
+        const selectedSchema = available.find(p => p.value === currentVal) || available.find(p => p.value === opt.default);
+        return `
+          <div style="${marginTop}">
+            <label class="ws-global-label" style="display:block;">${escapeHtml(opt.label)}</label>
+            ${opt.description ? `<p class="pool-health-description">${escapeHtml(opt.description)}</p>` : ''}
+            <select id="${fieldId}" class="ws-select" data-option-key="${escapeHtml(opt.key)}">
+              ${available.map(p => `<option value="${p.value}" ${currentVal === p.value ? 'selected' : ''}>${escapeHtml(p.label)}</option>`).join('')}
+            </select>
+            <div id="${fieldId}-nested">
+              ${renderProcessorOptionsPanel(selectedSchema, nestedOpts, `${fieldId}-nested`, allProcessors)}
+            </div>
+          </div>`;
+      }
+
+      return '';
+    }).join('');
+
+    return `<div class="ws-processor-options-panel" style="margin-top:12px;padding:12px;border:1px solid var(--border-color,#ddd);border-radius:6px;background:var(--card-background-color,var(--background-secondary,#f8f9fa));">${fields}</div>`;
+  }
+
+  // Collects the complete options object from the DOM for a given processor.
+  function collectProcessorOptions(processorSchema, idPrefix, allProcessors) {
+    const opts = {};
+    if (!processorSchema?.options?.length) return opts;
+    for (const opt of processorSchema.options) {
+      const el = document.getElementById(`${idPrefix}-${opt.key}`);
+      if (!el) continue;
+      opts[opt.key] = el.value;
+      if (opt.type === 'preProcessor') {
+        const nestedIdPrefix = `${idPrefix}-${opt.key}-nested`;
+        const nestedSchema = allProcessors.find(p => p.value === el.value);
+        opts[`${opt.key}Options`] = collectProcessorOptions(nestedSchema, nestedIdPrefix, allProcessors);
+      }
+    }
+    return opts;
+  }
+
+  const preProcessors  = webSourceImageProcessingSchema.preProcessors || [];
+  const cropEngines    = webSourceImageProcessingSchema.cropEngines   || [];
+  const currentPreProc = webSourcesConfig?.imageProcessing?.preProcessor  || 'corner_consensus';
+  const currentEngine  = webSourcesConfig?.imageProcessing?.cropEngine    || 'sharp';
+  const currentPreProcOpts   = webSourcesConfig?.imageProcessing?.preProcessorOptions  || {};
+  const currentCropEngOpts   = webSourcesConfig?.imageProcessing?.cropEngineOptions    || {};
+  const currentSkipLowRes    = webSourcesConfig?.imageProcessing?.skipLowRes   ?? false;
   const currentMinResolution = webSourcesConfig?.imageProcessing?.minResolution ?? 1080;
-  if (preProcessors.length > 0 || strategies.length > 0) {
+
+  const currentPreProcSchema = preProcessors.find(p => p.value === currentPreProc);
+  const currentEngineSchema  = cropEngines.find(e => e.value === currentEngine);
+
+  if (preProcessors.length > 0 || cropEngines.length > 0) {
     const processingHtml = `
       <div class="ws-global-setting" style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color,#e0e0e0);">
         ${preProcessors.length > 0 ? `
           <label class="ws-global-label">Frame Detection</label>
-          <p class="pool-health-description">Detect and remove decorative frames or borders from artwork images before cropping. Variance Scan works on both solid and lightly-textured borders; Sharp Trim handles solid uniform borders only.</p>
+          <p class="pool-health-description">Detect and remove decorative frames or borders from artwork images before cropping.</p>
           <select id="ws-pre-processor-select" class="ws-select">
             ${preProcessors.map(p => `<option value="${p.value}" ${currentPreProc === p.value ? 'selected' : ''}>${escapeHtml(p.label)}</option>`).join('')}
           </select>
+          <div id="ws-pre-processor-options">
+            ${renderProcessorOptionsPanel(currentPreProcSchema, currentPreProcOpts, 'ws-pre-processor-options', preProcessors)}
+          </div>
         ` : ''}
-        ${detectionModes.length > 0 ? `
-          <label class="ws-global-label" style="margin-top:16px;display:block;">Detection Mode <span style="font-weight:normal;opacity:0.6;">(Mean Profile only)</span></label>
-          <p class="pool-health-description">Whether to use luminance, color (chromaticity), or both for frame detection. Color helps identify gold and colored frames with low luminance contrast.</p>
-          <select id="ws-detection-mode-select" class="ws-select">
-            ${detectionModes.map(m => `<option value="${m.value}" ${currentDetMode === m.value ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+        ${cropEngines.length > 0 ? `
+          <label class="ws-global-label" style="margin-top:16px;display:block;">Crop Engine</label>
+          <p class="pool-health-description">How to scale and crop the image to fit the TV's 4K aspect ratio.</p>
+          <select id="ws-crop-engine-select" class="ws-select">
+            ${cropEngines.map(e => `<option value="${e.value}" ${currentEngine === e.value ? 'selected' : ''}>${escapeHtml(e.label)}</option>`).join('')}
           </select>
-        ` : ''}
-        ${strategies.length > 0 ? `
-          <label class="ws-global-label" style="margin-top:16px;display:block;">Crop Strategy</label>
-          <p class="pool-health-description">How to select which portion of an image to keep when cropping to fit the TV's 16:9 aspect ratio.</p>
-          <select id="ws-crop-strategy-select" class="ws-select">
-            ${strategies.map(s => `<option value="${s.value}" ${currentStrategy === s.value ? 'selected' : ''}>${escapeHtml(s.label)}</option>`).join('')}
-          </select>
+          <div id="ws-crop-engine-options">
+            ${renderProcessorOptionsPanel(currentEngineSchema, currentCropEngOpts, 'ws-crop-engine-options', preProcessors)}
+          </div>
         ` : ''}
         <label class="ws-global-label" style="margin-top:16px;display:block;">Minimum Resolution</label>
         <p class="pool-health-description">Skip images whose shorter side is below this threshold (pixels) and fetch a different one. Uses up to 3 attempts. Useful for sources that occasionally serve very small images.</p>
@@ -14797,13 +14864,98 @@ function renderWebSourcesGlobalSettings() {
       </div>`;
     container.insertAdjacentHTML('beforeend', processingHtml);
 
-    document.getElementById('ws-pre-processor-select')?.addEventListener('change', async (e) => {
-      const preProcessor = e.target.value;
+    // Helper: save preProcessorOptions after any pre-processor option changes.
+    async function savePreProcessorOptions() {
+      const selEl = document.getElementById('ws-pre-processor-select');
+      if (!selEl) return;
+      const schema = preProcessors.find(p => p.value === selEl.value);
+      const opts = collectProcessorOptions(schema, 'ws-pre-processor-options', preProcessors);
       try {
         const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ preProcessor }),
+          body: JSON.stringify({ preProcessorOptions: opts }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
+          showToast('Frame detection options updated');
+        } else {
+          throw new Error(data.error || 'Failed to update setting');
+        }
+      } catch (error) {
+        console.error('Error updating pre-processor options:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    }
+
+    // Helper: save cropEngineOptions after any crop engine option changes.
+    async function saveCropEngineOptions() {
+      const selEl = document.getElementById('ws-crop-engine-select');
+      if (!selEl) return;
+      const schema = cropEngines.find(e => e.value === selEl.value);
+      const opts = collectProcessorOptions(schema, 'ws-crop-engine-options', preProcessors);
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cropEngineOptions: opts }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
+          showToast('Crop engine options updated');
+        } else {
+          throw new Error(data.error || 'Failed to update setting');
+        }
+      } catch (error) {
+        console.error('Error updating crop engine options:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    }
+
+    // Helper: bind option panel change listeners (called after render and after re-render).
+    function bindOptionsPanelListeners(panelId, saveFn, processorSchema, idPrefix, allProcs) {
+      const panel = document.getElementById(panelId);
+      if (!panel || !processorSchema?.options?.length) return;
+      for (const opt of processorSchema.options) {
+        const fieldEl = document.getElementById(`${idPrefix}-${opt.key}`);
+        if (!fieldEl) continue;
+        if (opt.type === 'preProcessor') {
+          fieldEl.addEventListener('change', async () => {
+            // Re-render the nested options panel for the newly selected sub-processor.
+            const nestedPanelEl = document.getElementById(`${idPrefix}-${opt.key}-nested`);
+            if (nestedPanelEl) {
+              const subSchema = allProcs.find(p => p.value === fieldEl.value);
+              nestedPanelEl.innerHTML = renderProcessorOptionsPanel(subSchema, {}, `${idPrefix}-${opt.key}-nested`, allProcs);
+              // Bind listeners for the newly rendered nested panel.
+              bindOptionsPanelListeners(`${idPrefix}-${opt.key}-nested`, saveFn, subSchema, `${idPrefix}-${opt.key}-nested`, allProcs);
+            }
+            await saveFn();
+          });
+          // Bind listeners for the initially rendered nested panel too.
+          const nestedSchema = allProcs.find(p => p.value === (fieldEl.value));
+          bindOptionsPanelListeners(`${idPrefix}-${opt.key}-nested`, saveFn, nestedSchema, `${idPrefix}-${opt.key}-nested`, allProcs);
+        } else {
+          fieldEl.addEventListener('change', saveFn);
+        }
+      }
+    }
+
+    document.getElementById('ws-pre-processor-select')?.addEventListener('change', async (e) => {
+      const preProcessor = e.target.value;
+      // Re-render the options panel for the newly selected pre-processor.
+      const schema = preProcessors.find(p => p.value === preProcessor);
+      const optsPanelEl = document.getElementById('ws-pre-processor-options');
+      if (optsPanelEl) {
+        optsPanelEl.innerHTML = renderProcessorOptionsPanel(schema, {}, 'ws-pre-processor-options', preProcessors);
+        bindOptionsPanelListeners('ws-pre-processor-options', savePreProcessorOptions, schema, 'ws-pre-processor-options', preProcessors);
+      }
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ preProcessor, preProcessorOptions: {} }),
         });
         const data = await response.json();
         if (data.success) {
@@ -14818,47 +14970,38 @@ function renderWebSourcesGlobalSettings() {
       }
     });
 
-    document.getElementById('ws-detection-mode-select')?.addEventListener('change', async (e) => {
-      const detectionMode = e.target.value;
+    // Bind initial option panel listeners.
+    bindOptionsPanelListeners('ws-pre-processor-options', savePreProcessorOptions, currentPreProcSchema, 'ws-pre-processor-options', preProcessors);
+
+    document.getElementById('ws-crop-engine-select')?.addEventListener('change', async (e) => {
+      const cropEngine = e.target.value;
+      const schema = cropEngines.find(eng => eng.value === cropEngine);
+      const optsPanelEl = document.getElementById('ws-crop-engine-options');
+      if (optsPanelEl) {
+        optsPanelEl.innerHTML = renderProcessorOptionsPanel(schema, {}, 'ws-crop-engine-options', preProcessors);
+        bindOptionsPanelListeners('ws-crop-engine-options', saveCropEngineOptions, schema, 'ws-crop-engine-options', preProcessors);
+      }
       try {
         const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ detectionMode }),
+          body: JSON.stringify({ cropEngine, cropEngineOptions: {} }),
         });
         const data = await response.json();
         if (data.success) {
           if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
-          showToast('Detection mode updated');
+          showToast('Crop engine updated');
         } else {
           throw new Error(data.error || 'Failed to update setting');
         }
       } catch (error) {
-        console.error('Error updating detection mode:', error);
+        console.error('Error updating crop engine setting:', error);
         showToast(`Error: ${error.message}`, 'error');
       }
     });
 
-    document.getElementById('ws-crop-strategy-select')?.addEventListener('change', async (e) => {
-      const sharpStrategy = e.target.value;
-      try {
-        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sharpStrategy }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
-          showToast('Crop strategy updated');
-        } else {
-          throw new Error(data.error || 'Failed to update setting');
-        }
-      } catch (error) {
-        console.error('Error updating crop strategy:', error);
-        showToast(`Error: ${error.message}`, 'error');
-      }
-    });
+    // Bind initial crop engine option panel listeners.
+    bindOptionsPanelListeners('ws-crop-engine-options', saveCropEngineOptions, currentEngineSchema, 'ws-crop-engine-options', preProcessors);
 
     document.getElementById('ws-skip-low-res-toggle')?.addEventListener('change', async (e) => {
       const skipLowRes = e.target.checked;

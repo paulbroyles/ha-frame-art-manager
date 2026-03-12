@@ -236,28 +236,41 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
 const IMAGE_PROCESSING_SCHEMA = {
   preProcessors: [
     { value: 'none',             label: 'None — background strip only; no frame detection' },
-    { value: 'mean_profile',     label: 'Mean Profile — detect frames using row/column mean consistency; handles textured and wood frames' },
+    { value: 'mean_profile',     label: 'Mean Profile — detect frames using row/column mean consistency; handles textured and wood frames',
+      options: [
+        { key: 'detectionMode', label: 'Detection Mode', type: 'select', default: 'combined',
+          description: 'Whether to use luminance, color (chromaticity), or both for frame detection. Color helps identify gold and colored frames with low luminance contrast.',
+          choices: [
+            { value: 'combined',  label: 'Combined (default) — luminance + color analysis' },
+            { value: 'luminance', label: 'Luminance only — row/column mean brightness; no color scans' },
+            { value: 'color',     label: 'Color only — chromaticity distance; no luminance scans' },
+          ] },
+      ] },
     { value: 'corner_consensus', label: 'Corner Consensus — detect frames using four-corner sampling; handles multi-layer frames' },
     { value: 'region_compare',   label: 'Region Compare — detect frames by comparing edge strip to painting interior' },
     { value: 'tile_color',       label: 'Tile Color — detect frames using 2D tile color continuity; tracks color along frame material and stops at abrupt changes' },
     { value: 'symmetric_scan',   label: 'Symmetric Scan — detect frames by checking that all four edges agree in color at each depth; handles multi-layer frames naturally' },
-    { value: 'adaptive_scan',    label: 'Adaptive Scan — symmetric scan with automatic fallback to a second pre-processor when no confident crop is found' },
+    { value: 'adaptive_scan',    label: 'Adaptive Scan — symmetric scan with automatic fallback to a second pre-processor when no confident crop is found',
+      options: [
+        { key: 'fallback', label: 'Fallback Pre-processor', type: 'preProcessor',
+          description: 'Pre-processor to use when Adaptive Scan cannot find a confident crop (no frame anchor found). Its own options appear below.',
+          excludeValues: ['adaptive_scan', 'none'], default: 'corner_consensus' },
+      ] },
     { value: 'variance_scan',    label: 'Variance Scan — detect frames by local edge variance (legacy)' },
     { value: 'trim',             label: 'Sharp Trim — background strip only (same as None; redundant with automatic Stage 1)' },
     // TODO (Option 3): ML Segmentation — handles irregular/ornate frames; see docs/ROADMAP.md
   ],
   cropEngines: [
-    { value: 'sharp', label: 'Sharp (built-in)' },
-  ],
-  sharpStrategies: [
-    { value: 'attention', label: 'Attention — focus on faces and salient regions (recommended for paintings)' },
-    { value: 'entropy',   label: 'Entropy — focus on high-detail, textured regions' },
-    { value: 'centre',    label: 'Center — crop from the geometric center' },
-  ],
-  detectionModes: [
-    { value: 'combined',  label: 'Combined (default) — luminance + color analysis' },
-    { value: 'luminance', label: 'Luminance only — row/column mean brightness; no color scans' },
-    { value: 'color',     label: 'Color only — chromaticity distance; no luminance scans' },
+    { value: 'sharp', label: 'Sharp (built-in)',
+      options: [
+        { key: 'strategy', label: 'Crop Strategy', type: 'select', default: 'attention',
+          description: 'How to select which portion of an image to keep when cropping to fit the TV\'s 16:9 aspect ratio.',
+          choices: [
+            { value: 'attention', label: 'Attention — focus on faces and salient regions (recommended for paintings)' },
+            { value: 'entropy',   label: 'Entropy — focus on high-detail, textured regions' },
+            { value: 'centre',    label: 'Center — crop from the geometric center' },
+          ] },
+      ] },
   ],
 };
 

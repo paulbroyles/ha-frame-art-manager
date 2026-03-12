@@ -140,10 +140,15 @@ async function readWebSourcesConfig(frameArtPath) {
   if (!config.aspectRatioFilter) config.aspectRatioFilter = 'all';
   if (!config.sources) config.sources = {};
   if (!config.perTvCache) config.perTvCache = {};
-  if (!config.imageProcessing) config.imageProcessing = { preProcessor: 'corner_consensus', cropEngine: 'sharp', sharpStrategy: 'attention' };
-  if (!config.imageProcessing.preProcessor) config.imageProcessing.preProcessor = 'corner_consensus';
-  if (!Object.prototype.hasOwnProperty.call(config.imageProcessing, 'skipLowRes')) config.imageProcessing.skipLowRes = false;
-  if (!config.imageProcessing.minResolution) config.imageProcessing.minResolution = 1080;
+  if (!config.imageProcessing) config.imageProcessing = {};
+  const ip = config.imageProcessing;
+  if (!ip.preProcessor)       ip.preProcessor       = 'corner_consensus';
+  if (!ip.cropEngine)         ip.cropEngine         = 'sharp';
+  if (!ip.preProcessorOptions) ip.preProcessorOptions = {};
+  if (!ip.cropEngineOptions)  ip.cropEngineOptions  = {};
+  if (!ip.cropEngineOptions.strategy) ip.cropEngineOptions.strategy = 'attention';
+  if (!Object.prototype.hasOwnProperty.call(ip, 'skipLowRes')) ip.skipLowRes = false;
+  if (!ip.minResolution)      ip.minResolution      = 1080;
 
   // Ensure all builtin sources are present (add any missing ones with defaults)
   for (const [id, def] of Object.entries(BUILTIN_SOURCES)) {
@@ -339,22 +344,20 @@ router.get('/config', async (req, res) => {
 // PUT /api/web-sources/image-processing
 router.put('/image-processing', async (req, res) => {
   try {
-    const { preProcessor, cropEngine, sharpStrategy, detectionMode, skipLowRes, minResolution } = req.body;
-    const validPreProcessors  = IMAGE_PROCESSING_SCHEMA.preProcessors.map(p => p.value);
-    const validEngines        = IMAGE_PROCESSING_SCHEMA.cropEngines.map(e => e.value);
-    const validStrategies     = IMAGE_PROCESSING_SCHEMA.sharpStrategies.map(s => s.value);
-    const validDetectionModes = IMAGE_PROCESSING_SCHEMA.detectionModes.map(m => m.value);
-    if (preProcessor  && !validPreProcessors.includes(preProcessor)) {
+    const { preProcessor, cropEngine, preProcessorOptions, cropEngineOptions, skipLowRes, minResolution } = req.body;
+    const validPreProcessors = IMAGE_PROCESSING_SCHEMA.preProcessors.map(p => p.value);
+    const validEngines       = IMAGE_PROCESSING_SCHEMA.cropEngines.map(e => e.value);
+    if (preProcessor && !validPreProcessors.includes(preProcessor)) {
       return res.status(400).json({ error: `preProcessor must be one of: ${validPreProcessors.join(', ')}` });
     }
-    if (cropEngine    && !validEngines.includes(cropEngine)) {
+    if (cropEngine && !validEngines.includes(cropEngine)) {
       return res.status(400).json({ error: `cropEngine must be one of: ${validEngines.join(', ')}` });
     }
-    if (sharpStrategy && !validStrategies.includes(sharpStrategy)) {
-      return res.status(400).json({ error: `sharpStrategy must be one of: ${validStrategies.join(', ')}` });
+    if (preProcessorOptions !== undefined && (typeof preProcessorOptions !== 'object' || Array.isArray(preProcessorOptions))) {
+      return res.status(400).json({ error: 'preProcessorOptions must be an object' });
     }
-    if (detectionMode && !validDetectionModes.includes(detectionMode)) {
-      return res.status(400).json({ error: `detectionMode must be one of: ${validDetectionModes.join(', ')}` });
+    if (cropEngineOptions !== undefined && (typeof cropEngineOptions !== 'object' || Array.isArray(cropEngineOptions))) {
+      return res.status(400).json({ error: 'cropEngineOptions must be an object' });
     }
     if (skipLowRes !== undefined && typeof skipLowRes !== 'boolean') {
       return res.status(400).json({ error: 'skipLowRes must be a boolean' });
@@ -363,12 +366,16 @@ router.put('/image-processing', async (req, res) => {
       return res.status(400).json({ error: 'minResolution must be a positive number' });
     }
     const webSources = await readWebSourcesConfig(req.frameArtPath);
-    if (preProcessor  !== undefined) webSources.imageProcessing.preProcessor  = preProcessor;
-    if (cropEngine    !== undefined) webSources.imageProcessing.cropEngine    = cropEngine;
-    if (sharpStrategy !== undefined) webSources.imageProcessing.sharpStrategy = sharpStrategy;
-    if (detectionMode !== undefined) webSources.imageProcessing.detectionMode = detectionMode;
-    if (skipLowRes    !== undefined) webSources.imageProcessing.skipLowRes    = skipLowRes;
-    if (minResolution !== undefined) webSources.imageProcessing.minResolution = minResolution;
+    if (preProcessor        !== undefined) webSources.imageProcessing.preProcessor        = preProcessor;
+    if (cropEngine          !== undefined) webSources.imageProcessing.cropEngine          = cropEngine;
+    if (preProcessorOptions !== undefined) webSources.imageProcessing.preProcessorOptions = preProcessorOptions;
+    if (cropEngineOptions   !== undefined) webSources.imageProcessing.cropEngineOptions   = cropEngineOptions;
+    if (skipLowRes          !== undefined) webSources.imageProcessing.skipLowRes          = skipLowRes;
+    if (minResolution       !== undefined) webSources.imageProcessing.minResolution       = minResolution;
+    // Discard legacy flat option fields to avoid config cruft.
+    delete webSources.imageProcessing.sharpStrategy;
+    delete webSources.imageProcessing.detectionMode;
+    delete webSources.imageProcessing.adaptiveFallback;
     await writeWebSourcesConfig(req.frameArtPath, webSources);
     res.json({ success: true, imageProcessing: webSources.imageProcessing });
   } catch (error) {
@@ -594,14 +601,14 @@ router.post('/fetch-and-display', async (req, res) => {
     const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
     const orientation = tvOrientation || 'landscape';
-    const { preProcessor, cropEngine, sharpStrategy, detectionMode } = webSources.imageProcessing;
+    const { preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
     const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
       ? imageBuffer
       : await processWebSourceImage(imageBuffer, orientation, {
           preProcess: preProcessor !== 'none' ? preProcessor : null,
-          preProcessOptions: { label: artMetadata?.artworkUrl, detectionMode },
+          preProcessOptions: { label: artMetadata?.artworkUrl, ...preProcessorOptions },
           cropEngine,
-          cropEngineOptions: { strategy: sharpStrategy },
+          cropEngineOptions,
         });
 
     const ext = contentType.includes('png') ? 'png' : 'jpg';
@@ -754,14 +761,14 @@ router.post('/test-fetch', async (req, res) => {
     }
 
     const orientation = tvOrientation || 'landscape';
-    const { preProcessor, cropEngine, sharpStrategy, detectionMode } = webSources.imageProcessing;
+    const { preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
     const alreadyProcessed = !!SOURCE_MODULES[chosenSourceId]?.alreadyProcessed;
     const activePreProcessor = (!alreadyProcessed && preProcessor !== 'none') ? preProcessor : null;
 
     // Run Phase 1 + Phase 2 pre-processors separately so the output can be saved for visual comparison.
     let preprocessedBuffer = !alreadyProcessed ? await solidBorderStrip(imageBuffer) : imageBuffer;
     if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
-      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: artMetadata?.artworkUrl, detectionMode });
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: artMetadata?.artworkUrl, ...preProcessorOptions });
     }
 
     // Run the crop engine on the pre-processed buffer (pre-process already applied).
@@ -770,7 +777,7 @@ router.post('/test-fetch', async (req, res) => {
       : await processWebSourceImage(preprocessedBuffer, orientation, {
           preProcess: null,
           cropEngine,
-          cropEngineOptions: { strategy: sharpStrategy },
+          cropEngineOptions,
         });
 
     const ext = contentType.includes('png') ? 'png' : 'jpg';
@@ -826,14 +833,14 @@ router.post('/test-reprocess', async (req, res) => {
     const imageBuffer = await fs.readFile(path.join(cacheDir, testCache.rawFilename));
     const ext = path.extname(testCache.rawFilename).slice(1);
 
-    const { preProcessor, cropEngine, sharpStrategy, detectionMode } = webSources.imageProcessing;
+    const { preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
     const alreadyProcessed = !!SOURCE_MODULES[testCache.sourceId]?.alreadyProcessed;
     const activePreProcessor = (!alreadyProcessed && preProcessor !== 'none') ? preProcessor : null;
     const orientation = testCache.orientation || 'landscape';
 
     let preprocessedBuffer = !alreadyProcessed ? await solidBorderStrip(imageBuffer) : imageBuffer;
     if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
-      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: testCache.metadata?.artworkUrl, detectionMode });
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: testCache.metadata?.artworkUrl, ...preProcessorOptions });
     }
 
     const processedBuffer = alreadyProcessed
@@ -841,7 +848,7 @@ router.post('/test-reprocess', async (req, res) => {
       : await processWebSourceImage(preprocessedBuffer, orientation, {
           preProcess: null,
           cropEngine,
-          cropEngineOptions: { strategy: sharpStrategy },
+          cropEngineOptions,
         });
 
     const preprocessedFilename = activePreProcessor ? `_test_preprocessed.${ext}` : null;
