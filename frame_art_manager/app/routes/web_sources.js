@@ -767,8 +767,9 @@ router.post('/test-fetch', async (req, res) => {
 
     // Run Phase 1 + Phase 2 pre-processors separately so the output can be saved for visual comparison.
     let preprocessedBuffer = !alreadyProcessed ? await solidBorderStrip(imageBuffer) : imageBuffer;
+    const processingResult = {};
     if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
-      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: artMetadata?.artworkUrl, ...preProcessorOptions });
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: artMetadata?.artworkUrl, ...preProcessorOptions, _result: processingResult });
     }
 
     // Run the crop engine on the pre-processed buffer (pre-process already applied).
@@ -808,6 +809,7 @@ router.post('/test-fetch', async (req, res) => {
       ...(Object.keys(attributeSnapshot).length > 0 && { attributeSnapshot }),
       ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
       fetchedAt: new Date().toISOString(),
+      ...(activePreProcessor && { processingInfo: { configured: activePreProcessor, ...processingResult } }),
     };
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 
@@ -839,8 +841,9 @@ router.post('/test-reprocess', async (req, res) => {
     const orientation = testCache.orientation || 'landscape';
 
     let preprocessedBuffer = !alreadyProcessed ? await solidBorderStrip(imageBuffer) : imageBuffer;
+    const processingResult = {};
     if (activePreProcessor && PRE_PROCESSORS[activePreProcessor]) {
-      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: testCache.metadata?.artworkUrl, ...preProcessorOptions });
+      preprocessedBuffer = await PRE_PROCESSORS[activePreProcessor](preprocessedBuffer, { label: testCache.metadata?.artworkUrl, ...preProcessorOptions, _result: processingResult });
     }
 
     const processedBuffer = alreadyProcessed
@@ -868,6 +871,11 @@ router.post('/test-reprocess', async (req, res) => {
       webSources.testCache.preprocessedFilename = preprocessedFilename;
     } else {
       delete webSources.testCache.preprocessedFilename;
+    }
+    if (activePreProcessor) {
+      webSources.testCache.processingInfo = { configured: activePreProcessor, ...processingResult };
+    } else {
+      delete webSources.testCache.processingInfo;
     }
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 

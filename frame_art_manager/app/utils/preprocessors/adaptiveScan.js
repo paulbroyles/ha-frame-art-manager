@@ -14,6 +14,7 @@ const { _symmetricScanCore } = require('./symmetricScan');
 async function adaptiveScanPreProcessor(buffer, {
   fallback          = 'corner_consensus', // pre-processor name to use as fallback
   fallbackOptions   = {},                 // options forwarded to the fallback
+  _result           = null,              // optional out-param: caller passes {} to receive { actualProcessor, stopReason }
   // symmetric_scan options (all with same defaults):
   maxCropFrac        = 0.30,
   tileSize           = 8,
@@ -34,16 +35,19 @@ async function adaptiveScanPreProcessor(buffer, {
   const { buffer: result, stopReason } = await _symmetricScanCore(buffer, scanOpts);
 
   if (stopReason === 'diversity' || stopReason === 'agreement') {
+    if (_result) Object.assign(_result, { actualProcessor: 'symmetric_scan', stopReason });
     return result;
   }
 
   if (stopReason === 'maxDepth') {
     console.log('[adaptive_scan] symmetric_scan hit maxDepth (likely bright/uniform background) — returning unchanged');
+    if (_result) Object.assign(_result, { actualProcessor: 'adaptive_scan (no crop)', stopReason });
     return buffer;
   }
 
   // stop=entryRun: symmetric_scan found no anchor; try fallback
   console.log(`[adaptive_scan] symmetric_scan stop=${stopReason} — invoking fallback: ${fallback}`);
+  if (_result) Object.assign(_result, { actualProcessor: `${fallback} (fallback)`, stopReason });
   // Lazy require to avoid circular dependency with ./index (resolved at call-time).
   const { PRE_PROCESSORS } = require('./index');
   const fallbackFn = PRE_PROCESSORS[fallback];

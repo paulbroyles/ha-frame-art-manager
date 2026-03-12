@@ -235,8 +235,10 @@ async function _symmetricScanCore(buffer, {
   return { buffer: cropped, stopReason };
 }
 
-async function symmetricScanPreProcessor(buffer, options = {}) {
-  return (await _symmetricScanCore(buffer, options)).buffer;
+async function symmetricScanPreProcessor(buffer, { _result = null, ...options } = {}) {
+  const { buffer: result, stopReason } = await _symmetricScanCore(buffer, options);
+  if (_result) Object.assign(_result, { actualProcessor: 'symmetric_scan', stopReason });
+  return result;
 }
 
 module.exports = { _symmetricScanCore, symmetricScanPreProcessor };

@@ -15780,9 +15780,20 @@ function renderWebSourcesTestSection() {
                 onerror="this.style.display='none'">
          </div>`
       : '';
+    const pi = testCache.processingInfo;
+    const preprocessedLabel = (() => {
+      if (!pi) return 'Frame Removed';
+      const actual = pi.actualProcessor || pi.configured;
+      return `Frame Removed (${escapeHtml(actual)})`;
+    })();
+    const processingInfoRow = pi ? (() => {
+      const actual = pi.actualProcessor || pi.configured;
+      const stopNote = pi.stopReason ? ` — ${pi.stopReason}` : '';
+      return `<tr><td style="font-weight:600;padding:3px 12px 3px 0;white-space:nowrap;">Processing</td><td>${escapeHtml(actual + stopNote)}</td></tr>`;
+    })() : '';
     const preprocessedImg = testCache.preprocessedFilename
       ? `<div style="flex:1;min-width:0;">
-           <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Frame Removed</div>
+           <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">${preprocessedLabel}</div>
            <img src="${API_BASE}/web-sources/test-cache/preprocessed-image?t=${ts}" alt="After frame detection"
                 style="max-width:100%;max-height:300px;display:block;border-radius:4px;cursor:zoom-in;"
                 onclick="showImageLightbox(this.src,'After frame detection')"
@@ -15801,7 +15812,7 @@ function renderWebSourcesTestSection() {
       <div style="display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap;">
         ${rawImg}${preprocessedImg}${processedImg}
       </div>
-      <table style="border-collapse:collapse;font-size:13px;">${metaRows}${artworkLinkRow}</table>
+      <table style="border-collapse:collapse;font-size:13px;">${processingInfoRow}${metaRows}${artworkLinkRow}</table>
       ${mappedSection}
     </div>`;
   }
