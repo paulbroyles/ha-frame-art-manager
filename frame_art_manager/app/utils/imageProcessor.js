@@ -2014,10 +2014,12 @@ async function symmetricScanPreProcessor(buffer, {
       if (shifted.length >= minShiftCount) {
         const shiftedMed = medianColor(shifted);
         const spread = shifted.reduce((s, c) => s + rgbDist(c, shiftedMed), 0) / shifted.length;
-        if (spread > diversityThreshold) {
+        if (spread > diversityThreshold && boundaryDepth > 0) {
           console.log(`[symmetric_scan] depth ${d}: diversity boundary — ${shifted.length}/${nSamples} shifted, spread=${spread.toFixed(1)}, consensusDelta=${consensusDelta.toFixed(1)}`);
           stopReason = 'diversity';
           break; // boundaryDepth stays at last passing depth
+        } else if (spread > diversityThreshold) {
+          console.log(`[symmetric_scan] depth ${d}: diversity spike (no anchor yet, continuing) — ${shifted.length}/${nSamples} shifted, spread=${spread.toFixed(1)}`);
         }
       }
     }
