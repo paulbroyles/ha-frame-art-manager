@@ -1888,6 +1888,7 @@ async function symmetricScanPreProcessor(buffer, {
   minPaintRun        = 2,    // consecutive non-consensus depths to declare boundary (after anchor)
   maxEntryRun        = 5,    // max consecutive failing depths before giving up on finding anchor
   baseSamples        = 5,    // min samples per edge; long edges get more (proportional to aspect)
+  consistencyThreshold = 15, // max per-sample RGB delta (depth-to-depth) to count as stable
   shiftThreshold     = 20,   // min per-sample RGB delta (depth-to-depth) to count as shifted
   minShiftFrac       = 0.50, // fraction of total samples that must shift for diversity check
   diversityThreshold = 25,   // avg RGB spread among shifted samples that signals painting boundary
@@ -1989,7 +1990,8 @@ async function symmetricScanPreProcessor(buffer, {
   const maxDepth = Math.floor(Math.min(width, height) * maxCropFrac / ts);
   let boundaryDepth = 0, highRun = 0;
   const agreeLog = [];
-  const deltaLog = []; // consensus color delta depth-to-depth (for analysis)
+  const consistLog = []; // per-sample stability counts depth-to-depth
+  const deltaLog = [];   // consensus color delta depth-to-depth (for analysis)
   let prevColors = null;
   let prevMed = null;
   let stopReason = 'maxDepth';
@@ -1998,8 +2000,18 @@ async function symmetricScanPreProcessor(buffer, {
     const colors = samplePoints.map(({ edge, posFrac }) => sampleTile(edge, d, posFrac));
     const med = medianColor(colors);
     const agreeing = colors.filter(c => rgbDist(c, med) <= colorThreshold).length;
-    const pass = agreeing >= minAgree;
+    const passAgree = agreeing >= minAgree;
+
+    // Consistency check: each sample stable relative to its own previous-depth color.
+    // Catches frames with internal color variation that fail cross-sample agreement.
+    const stable = prevColors
+      ? colors.filter((c, i) => rgbDist(c, prevColors[i]) <= consistencyThreshold).length
+      : 0;
+    const passConsist = prevColors ? stable >= minAgree : false;
+
+    const pass = passAgree || passConsist;
     agreeLog.push(agreeing);
+    consistLog.push(stable);
 
     // Consensus color delta (logged but not used as primary signal; may fail for
     // multi-layer frames where all samples shift to a new uniform frame color).
@@ -2066,7 +2078,8 @@ async function symmetricScanPreProcessor(buffer, {
   const _tCompute = Date.now();
   console.log(`[symmetric_scan] downsampled=${width}×${height}, tile=${ts}px, threshold=${colorThreshold}, minAgree=${minAgree}/${nSamples} (T/B:${tbN} L/R:${lrN})`);
   console.log(`[symmetric_scan] agreement  profile(0-${agreeLog.length - 1})=[${agreeLog.join(',')}]`);
-  console.log(`[symmetric_scan] consensusΔ profile(0-${deltaLog.length - 1})=[${deltaLog.join(',')}]`);
+  console.log(`[symmetric_scan] consistency profile(0-${consistLog.length - 1})=[${consistLog.join(',')}]`);
+  console.log(`[symmetric_scan] consensusΔ  profile(0-${deltaLog.length - 1})=[${deltaLog.join(',')}]`);
   console.log(`[symmetric_scan] boundary=${boundaryDepth}t (stop=${stopReason}) → top=${cropPxV}px bot=${cropPxV}px left=${cropPxH}px right=${cropPxH}px — compute=${_tCompute - _t0}ms`);
 
   if (boundaryDepth === 0) return buffer;
