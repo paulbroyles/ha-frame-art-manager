@@ -1452,10 +1452,11 @@ async function meanProfilePreProcessor(buffer, {
   // The frameBandChroma gate (contrastThreshold/2 = 10) ensures this only runs when the
   // detected frame already has a color signal; dark/neutral frames (chroma ≈ 0) are skipped.
   // The hysteresis of 3 tolerates brief gaps in a gold frame without overshooting.
-  // Capped at 15 rows/cols to limit false extension into painting content.
+  // Cap is 5% of the shorter image dimension to accommodate thick ornate frames; the
+  // hysteresis is the primary stopping guard.
   if (detectionMode !== 'luminance') {
     const chromaContGate = contrastThreshold / 2; // 10 when contrastThreshold=20
-    const maxLookahead   = 15;
+    const maxLookahead   = Math.round(Math.min(width, height) * 0.05);
     const contHyst       = 3;
 
     function chromaLookahead(chromaArr, cropN, label) {
