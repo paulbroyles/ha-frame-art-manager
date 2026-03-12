@@ -201,7 +201,7 @@ async function clearTestCacheFile(frameArtPath) {
 /**
  * Call the HA display_image service to show an image on a TV.
  */
-async function displayImageOnTV(imagePath, deviceId, { screenOn = true } = {}) {
+async function displayImageOnTV(imagePath, deviceId, { screenOn = true, artworkMetadata = null } = {}) {
   if (!SUPERVISOR_TOKEN && process.env.NODE_ENV === 'development') {
     console.log(`[DEV] Would display ${imagePath} on device ${deviceId} (screenOn=${screenOn})`);
     return;
@@ -214,7 +214,12 @@ async function displayImageOnTV(imagePath, deviceId, { screenOn = true } = {}) {
       Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
       'Content-Type': 'application/json',
     },
-    data: { device_id: deviceId, image_path: imagePath, screen_on: screenOn },
+    data: {
+      device_id: deviceId,
+      image_path: imagePath,
+      screen_on: screenOn,
+      ...(artworkMetadata && { artwork_metadata: artworkMetadata }),
+    },
     timeout: 60000,
   });
 }
@@ -633,7 +638,10 @@ router.post('/fetch-and-display', async (req, res) => {
     };
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 
-    await displayImageOnTV(cacheFile, deviceId, { screenOn });
+    await displayImageOnTV(cacheFile, deviceId, {
+      screenOn,
+      artworkMetadata: Object.keys(attributeSnapshot).length > 0 ? attributeSnapshot : null,
+    });
 
     res.json({
       success: true,
