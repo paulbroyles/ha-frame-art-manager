@@ -299,6 +299,34 @@ Notable observations:
 
 ---
 
+## Code Organization
+
+The image processing pipeline lives in `frame_art_manager/app/utils/`:
+
+```
+utils/
+  imageProcessor.js          — pipeline orchestrator: solidBorderStrip, computeTargetDimensions,
+                               processWebSourceImage, IMAGE_PROCESSING_SCHEMA, module.exports
+  preprocessors/
+    trim.js                  — trimPreProcessor
+    varianceScan.js          — varianceScanPreProcessor
+    regionCompare.js         — regionComparePreProcessor
+    cornerConsensus.js       — cornerConsensusPreProcessor
+    meanProfile.js           — meanProfilePreProcessor
+    tileColor.js             — tileColorPreProcessor
+    symmetricScan.js         — _symmetricScanCore, symmetricScanPreProcessor
+    adaptiveScan.js          — adaptiveScanPreProcessor (imports _symmetricScanCore from symmetricScan.js;
+                               lazy-requires ./index for fallback lookup to avoid circular dependency)
+    index.js                 — PRE_PROCESSORS registry; re-exports all pre-processor functions
+  cropEngines/
+    sharpCrop.js             — sharpCropEngine
+    index.js                 — CROP_ENGINES registry; re-exports all crop engine functions
+```
+
+`imageProcessor.js` is the public API — callers import from it and it re-exports `PRE_PROCESSORS`, `CROP_ENGINES`, and `IMAGE_PROCESSING_SCHEMA` from the sub-directories. Adding a new pre-processor or crop engine means: (1) create its file in the appropriate sub-directory, (2) register it in the sub-directory's `index.js`, (3) add it to the schema in `imageProcessor.js`, and (4) update this document.
+
+---
+
 ## Future Work
 
 **Raw buffer pipeline**: Pass raw pixel data (`{ data, info }`) between phases instead of encoding/decoding between each phase. This would save ~240ms per image (the Phase 1 encode + Phase 2 decode round-trip). The pre-processor interface would need a parallel raw-buffer path while keeping the current `async (buffer, options) → Buffer` interface for compatibility.
