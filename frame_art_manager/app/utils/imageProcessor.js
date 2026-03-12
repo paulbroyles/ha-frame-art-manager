@@ -1881,13 +1881,15 @@ async function tileColorPreProcessor(buffer, {
  * to handle frames that are wider on one side (e.g. heavier bottom frame).
  */
 async function symmetricScanPreProcessor(buffer, {
-  maxCropFrac    = 0.30,
-  tileSize       = 8,
-  colorThreshold = 30,   // RGB distance gate for per-sample agreement
-  minAgreeFrac   = 0.70, // fraction of samples required to agree at each depth
-  minPaintRun    = 2,    // consecutive non-consensus depths to declare boundary
-  tbPosFracs     = [0.25, 0.50, 0.75], // T/B sample positions (fraction of width)
-  lrPosFracs     = [0.15, 0.85],       // L/R sample positions (fraction of height)
+  maxCropFrac        = 0.30,
+  tileSize           = 8,
+  colorThreshold     = 30,   // RGB distance gate for per-sample agreement
+  minAgreeFrac       = 0.70, // fraction of samples required to agree at each depth
+  minPaintRun        = 2,    // consecutive non-consensus depths to declare boundary
+  baseSamples        = 5,    // min samples per edge; long edges get more (proportional to aspect)
+  shiftThreshold     = 20,   // min per-sample RGB delta (depth-to-depth) to count as shifted
+  minShiftFrac       = 0.50, // fraction of total samples that must shift for diversity check
+  diversityThreshold = 25,   // avg RGB spread among shifted samples that signals painting boundary
 } = {}) {
   const _t0 = Date.now();
 
@@ -1957,6 +1959,21 @@ async function symmetricScanPreProcessor(buffer, {
     }
   }
 
+  // Build evenly-spaced position fracs from 0.15 to 0.85.
+  // Staying ≥15% from each adjacent edge prevents T/B samples from landing inside
+  // the L/R frame region (and vice versa), which would contaminate the color read.
+  function makePosFracs(n) {
+    if (n === 1) return [0.5];
+    return Array.from({ length: n }, (_, i) => 0.15 + (i / (n - 1)) * 0.70);
+  }
+
+  // Sample density: proportional to edge length, minimum baseSamples per edge.
+  // T/B positions span width; L/R positions span height.
+  const tbN = Math.max(baseSamples, Math.round(baseSamples * width / height));
+  const lrN = Math.max(baseSamples, Math.round(baseSamples * height / width));
+  const tbPosFracs = makePosFracs(tbN);
+  const lrPosFracs = makePosFracs(lrN);
+
   // All sample points: (edge, posFrac) pairs.
   const samplePoints = [
     ...tbPosFracs.map(f => ({ edge: 'top',    posFrac: f })),
@@ -1964,31 +1981,57 @@ async function symmetricScanPreProcessor(buffer, {
     ...lrPosFracs.map(f => ({ edge: 'left',   posFrac: f })),
     ...lrPosFracs.map(f => ({ edge: 'right',  posFrac: f })),
   ];
-  const nSamples = samplePoints.length; // 10
-  const minAgree = Math.round(nSamples * minAgreeFrac); // 7
-
-  // Check consensus at a given depth: how many of the 10 samples agree?
-  function checkDepth(depth) {
-    const colors = samplePoints.map(({ edge, posFrac }) => sampleTile(edge, depth, posFrac));
-    const med = medianColor(colors);
-    const agreeing = colors.filter(c => rgbDist(c, med) <= colorThreshold).length;
-    return { pass: agreeing >= minAgree, agreeing };
-  }
+  const nSamples = samplePoints.length;
+  const minAgree = Math.round(nSamples * minAgreeFrac);
+  const minShiftCount = Math.round(nSamples * minShiftFrac);
 
   const maxDepth = Math.floor(Math.min(width, height) * maxCropFrac / ts);
   let boundaryDepth = 0, highRun = 0;
   const agreeLog = [];
+  const deltaLog = []; // consensus color delta depth-to-depth (for analysis)
+  let prevColors = null;
+  let prevMed = null;
+  let stopReason = 'maxDepth';
 
   for (let d = 0; d < maxDepth; d++) {
-    const { pass, agreeing } = checkDepth(d);
+    const colors = samplePoints.map(({ edge, posFrac }) => sampleTile(edge, d, posFrac));
+    const med = medianColor(colors);
+    const agreeing = colors.filter(c => rgbDist(c, med) <= colorThreshold).length;
+    const pass = agreeing >= minAgree;
     agreeLog.push(agreeing);
+
+    // Consensus color delta (logged but not used as primary signal; may fail for
+    // multi-layer frames where all samples shift to a new uniform frame color).
+    const consensusDelta = prevMed ? rgbDist(med, prevMed) : 0;
+    deltaLog.push(Math.round(consensusDelta));
+
+    // Diversity check: if many samples shifted from the previous depth AND their
+    // new colors are spread out (not all landing on the same new frame color),
+    // that is a strong signal we have crossed into painting content.
+    if (prevColors) {
+      const shiftAmounts = colors.map((c, i) => rgbDist(c, prevColors[i]));
+      const shifted = colors.filter((_, i) => shiftAmounts[i] > shiftThreshold);
+      if (shifted.length >= minShiftCount) {
+        const shiftedMed = medianColor(shifted);
+        const spread = shifted.reduce((s, c) => s + rgbDist(c, shiftedMed), 0) / shifted.length;
+        if (spread > diversityThreshold) {
+          console.log(`[symmetric_scan] depth ${d}: diversity boundary — ${shifted.length}/${nSamples} shifted, spread=${spread.toFixed(1)}, consensusDelta=${consensusDelta.toFixed(1)}`);
+          stopReason = 'diversity';
+          break; // boundaryDepth stays at last passing depth
+        }
+      }
+    }
+
     if (pass) {
       boundaryDepth = d + 1;
       highRun = 0;
     } else {
       highRun++;
-      if (highRun >= minPaintRun) break;
+      if (highRun >= minPaintRun) { stopReason = 'agreement'; break; }
     }
+
+    prevColors = colors;
+    prevMed = med;
   }
 
   // Contrast guard: reject if the detected frame edge color is not meaningfully
@@ -2012,9 +2055,10 @@ async function symmetricScanPreProcessor(buffer, {
   const cropPxH = Math.round(boundaryDepth * ts * scaleX);
 
   const _tCompute = Date.now();
-  console.log(`[symmetric_scan] downsampled=${width}×${height}, tile=${ts}px, threshold=${colorThreshold}, minAgree=${minAgree}/${nSamples}`);
-  console.log(`[symmetric_scan] agreement profile(0-${Math.min(9, agreeLog.length - 1)})=[${agreeLog.slice(0, 10).join(',')}]`);
-  console.log(`[symmetric_scan] boundary=${boundaryDepth}t → top=${cropPxV}px bot=${cropPxV}px left=${cropPxH}px right=${cropPxH}px — compute=${_tCompute - _t0}ms`);
+  console.log(`[symmetric_scan] downsampled=${width}×${height}, tile=${ts}px, threshold=${colorThreshold}, minAgree=${minAgree}/${nSamples} (T/B:${tbN} L/R:${lrN})`);
+  console.log(`[symmetric_scan] agreement  profile(0-${agreeLog.length - 1})=[${agreeLog.join(',')}]`);
+  console.log(`[symmetric_scan] consensusΔ profile(0-${deltaLog.length - 1})=[${deltaLog.join(',')}]`);
+  console.log(`[symmetric_scan] boundary=${boundaryDepth}t (stop=${stopReason}) → top=${cropPxV}px bot=${cropPxV}px left=${cropPxH}px right=${cropPxH}px — compute=${_tCompute - _t0}ms`);
 
   if (boundaryDepth === 0) return buffer;
 
