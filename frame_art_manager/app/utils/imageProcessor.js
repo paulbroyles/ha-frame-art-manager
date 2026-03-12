@@ -1452,30 +1452,30 @@ async function meanProfilePreProcessor(buffer, {
   // The frameBandChroma gate (contrastThreshold/2 = 10) ensures this only runs when the
   // detected frame already has a color signal; dark/neutral frames (chroma ≈ 0) are skipped.
   // The hysteresis of 3 tolerates brief gaps in a gold frame without overshooting.
-  // Cap is 5% of the shorter image dimension to accommodate thick ornate frames; the
-  // hysteresis is the primary stopping guard.
+  // Cap is 5% of the shorter image dimension to accommodate thick ornate frames.
+  //
+  // Chroma coherence: frame material forms straight color bands — consecutive rows/cols
+  // have similar chroma. Painting content has varying colors across rows/cols. We require
+  // each position's chroma to be within chromaCohereTol of the previous extended position.
+  // This distinguishes uniform gold frames from warm-toned paintings (which vary across rows).
   if (detectionMode !== 'luminance') {
-    const chromaContGate = contrastThreshold / 2; // 10 when contrastThreshold=20
-    const maxLookahead   = Math.round(Math.min(width, height) * 0.05);
-    const contHyst       = 3;
+    const chromaContGate  = contrastThreshold / 2; // 10 when contrastThreshold=20
+    const maxLookahead    = Math.round(Math.min(width, height) * 0.05);
+    const contHyst        = 3;
+    const chromaCohereTol = 25; // adjacent positions must be within 25 chroma units of each other
 
-    // lumGate: a position is only "frame-like" if its luminance also differs from the
-    // interior. This prevents extending into painting content that happens to have high
-    // chroma (e.g. warm-toned paintings) — genuine frame material is typically distinct
-    // from the painting's interior luminance.
-    const lumGate = contrastThreshold * 0.5; // 10 when contrastThreshold=20
-
-    function chromaLookahead(chromaArr, lumArr, cropN, label) {
+    function chromaLookahead(chromaArr, cropN, label) {
       if (cropN === 0 || !chromaArr || chromaArr.length <= cropN) return 0;
       const frameBandChroma = chromaArr.slice(0, cropN).reduce((s, v) => s + v, 0) / cropN;
       if (frameBandChroma <= chromaContGate) return 0;
-      let ext = 0, gap = 0;
+      let ext = 0, gap = 0, lastExtChroma = null;
       const limit = Math.min(maxLookahead, chromaArr.length - cropN);
       for (let i = 0; i < limit; i++) {
-        const chromaOk = chromaArr[cropN + i] > chromaContGate;
-        const lumOk = !lumArr || Math.abs(lumArr[cropN + i] - interiorMean) > lumGate;
-        if (chromaOk && lumOk) {
-          ext = i + 1; gap = 0;
+        const chromaHere = chromaArr[cropN + i];
+        const chromaOk   = chromaHere > chromaContGate;
+        const coherent   = lastExtChroma === null || Math.abs(chromaHere - lastExtChroma) <= chromaCohereTol;
+        if (chromaOk && coherent) {
+          ext = i + 1; gap = 0; lastExtChroma = chromaHere;
         } else {
           gap++;
           if (gap >= contHyst) break;
@@ -1486,12 +1486,12 @@ async function meanProfilePreProcessor(buffer, {
     }
 
     if (rowChromaScores) {
-      cropTop    += chromaLookahead(rowChromaScores, rowMeans, cropTop, 'top');
-      cropBottom += chromaLookahead([...rowChromaScores].reverse(), [...rowMeans].reverse(), cropBottom, 'bottom');
+      cropTop    += chromaLookahead(rowChromaScores, cropTop, 'top');
+      cropBottom += chromaLookahead([...rowChromaScores].reverse(), cropBottom, 'bottom');
     }
     if (cornerColChromaScores && !strictLR) {
-      cropLeft   += chromaLookahead(cornerColChromaScores, cornerColMeans, cropLeft, 'left');
-      cropRight  += chromaLookahead([...cornerColChromaScores].reverse(), [...cornerColMeans].reverse(), cropRight, 'right');
+      cropLeft   += chromaLookahead(cornerColChromaScores, cropLeft, 'left');
+      cropRight  += chromaLookahead([...cornerColChromaScores].reverse(), cropRight, 'right');
     }
   }
 
