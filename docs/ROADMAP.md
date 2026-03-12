@@ -1,5 +1,60 @@
 ## Future Investigations
 
+### Spatial block coherence for contamination detection (mean_profile pre-processor)
+
+**Problem**: The current `hotFrac` contamination check in `incrementalScan` counts the fraction
+of pixels per row that deviate significantly from the row mean. This fails in two ways:
+- **False negatives**: A thin strip of painting content (face occupying only 5–8% of row width)
+  may have hotFrac below the 0.08 threshold and go undetected.
+- **False positives**: Textured frame material (wood grain, rough plaster) has many pixels that
+  deviate from the row mean, triggering the check even though they are frame, not painting.
+
+**User insight**: Hot pixels should be defined as "pixels very different from surrounding
+content" — i.e., local contrast, not global row deviation. A grain pixel on a dark frame IS
+very different from the row average, but NOT different from its immediate neighbors (there
+are other similar grain pixels nearby). A face pixel in a dark background IS different from
+its immediate neighbors. The key discriminator is **spatial coherence across adjacent rows**:
+painting subjects produce edge columns (large horizontal gradient) that appear at the *same
+column positions* across many consecutive rows; frame texture produces random edge positions
+that vary row to row.
+
+**Proposed implementation** (horizontal gradient + column coherence):
+
+1. **Per-row edge detection**: For each row `y` being scanned, compute the horizontal gradient
+   magnitude at each column: `grad[x] = |pixelLum(y, x+1) - pixelLum(y, x-1)|`. Mark column
+   `x` as an "edge column" for row `y` if `grad[x] > edgeThreshold` (e.g., 30 lum units).
+   No library needed — computed directly from the raw buffer via `pixelLum`.
+
+2. **Cross-row coherence tracking**: Maintain a `colEdgeCount[x]` array (width-sized) counting
+   how many of the last N scan rows had an edge at column `x` (within a tolerance window of
+   ±W columns). Increment on each newly scanned row; decay or reset when a row has no edge
+   at `x`.
+
+3. **Contamination trigger**: If any column `x` has `colEdgeCount[x] >= coherenceN` (e.g., 3
+   consecutive rows all had an edge near column `x`) → structural content detected →
+   treat as contamination and reject the scan (return 0), same as the current hotFrac trigger.
+
+4. **Apply to both row and column scans**: The row scan (T/B edges) checks horizontal gradients
+   per row; the column scan (L/R edges) checks vertical gradients per column (same logic,
+   transposed). `cornerColHotFracs` used in the L/R `incrementalScan` can be replaced with
+   the analogous column-wise coherence check.
+
+**Advantages over hotFrac**:
+- Immune to sparse, random texture (grain positions vary row to row → no coherent column)
+- Detects narrow painting subjects (even 5% face width creates a clear edge at both sides)
+- Naturally handles all frame luminance levels (no absolute or relative threshold needed —
+  it's purely about local gradient, not deviation from row mean)
+- Applicable to color channels too: compute gradient on each RGB channel and OR the results
+
+**Key parameters to calibrate**:
+- `edgeThreshold`: minimum gradient to count as an edge (start at 30 lum)
+- `toleranceW`: column match window (start at ±5px to handle slight row-to-row registration)
+- `coherenceN`: consecutive rows required (3, matching current hotHystN)
+
+**Files to modify**: `meanProfilePreProcessor` in `app/utils/imageProcessor.js`.
+Replace the `rowHotFracs` array and `rowHotFrac(y)` function with a gradient-based scan
+integrated into the `incrementalScan` loop (or as a pre-computed per-row edge-column set).
+
 ### ML-based frame segmentation (pre-processor Option 3)
 The current frame detection pre-processors (`variance_scan` and `trim`) handle solid
 and lightly-textured borders well, but struggle with ornate or highly irregular decorative
