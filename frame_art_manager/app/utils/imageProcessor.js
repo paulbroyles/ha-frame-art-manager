@@ -1647,12 +1647,196 @@ async function meanProfilePreProcessor(buffer, {
 // Cost: ~50–200 MB model weights, onnxruntime-node dependency, startup latency.
 // See docs/ROADMAP.md for discussion.
 
+/**
+ * Tile Local Variance pre-processor.
+ *
+ * Detects frame material by finding the transition from spatially coherent,
+ * low-variance regions (frame) to complex, high-variance regions (painting content).
+ *
+ * Unlike mean-based pre-processors (which collapse a row or column to a single value
+ * and lose spatial structure), this operates on 2D tiles: for each tile, the total
+ * RGB variance of its pixels is measured. A frame tile is spatially uniform (low
+ * within-tile variance); a painting tile is spatially complex (high variance). The
+ * frame boundary is where this transitions.
+ *
+ * Algorithm:
+ *   1. Downsample image to ~600px on the long axis for speed.
+ *   2. Divide into tiles of tileSize×tileSize px.
+ *   3. For each tile, compute total RGB variance (sum of per-channel variance within
+ *      the tile's pixels).
+ *   4. Scan from each edge inward. At each tile depth, summarize the tile
+ *      row (T/B) or tile column (L/R, restricted to corner bands) using its median
+ *      variance — robust against isolated complex tiles in an otherwise uniform frame.
+ *   5. Boundary = first sustained high-variance run after a confirmed low-variance
+ *      (frame) region. Scale result back to original image coordinates.
+ *
+ * Tuning parameters:
+ *   - varThreshold: total RGB variance gate. Tiles below this are frame-like.
+ *     Solid borders: ~100–400. Wood grain: ~400–1500. Painting: 2000–10000+.
+ *   - tileSize: tile side length at downsampled resolution. Smaller = finer grain,
+ *     slower. 8px is a good default for ~600px downsampled images.
+ *   - minFrameRun: consecutive low-var tile depths required to confirm frame present.
+ *     Prevents thin painting edges from being misidentified as frames.
+ *   - minPaintRun: consecutive high-var tile depths to declare the boundary found.
+ *     Provides hysteresis against isolated complex tiles in the frame.
+ *   - cornerFrac: fraction of image height used for L/R corner bands. Only the top
+ *     and bottom portions are used for L/R scan, to exclude painting content that
+ *     dominates the center columns.
+ */
+async function tileVariancePreProcessor(buffer, {
+  maxCropFrac  = 0.30,
+  tileSize     = 8,
+  varThreshold = 1500,
+  minFrameRun  = 1,
+  minPaintRun  = 2,
+  cornerFrac   = 0.30,
+} = {}) {
+  const _t0 = Date.now();
+
+  // Preserve original dimensions for final scale-back.
+  const origMeta = await sharp(buffer).metadata();
+  const origW = origMeta.width, origH = origMeta.height;
+
+  // Downsample: target ~600px on the long axis. Thin frames (<10px) are already
+  // well-handled by meanProfile; this pre-processor targets thicker frames where
+  // the coarser scale is still sufficient.
+  const SCALE_TARGET = 600;
+  const { data, info } = await sharp(buffer)
+    .resize(SCALE_TARGET, SCALE_TARGET, { fit: 'inside', withoutEnlargement: true })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const { width, height, channels } = info;
+  const scaleX = origW / width;
+  const scaleY = origH / height;
+
+  // Total RGB variance of pixels in a rectangular tile region.
+  // Measures spatial color complexity: low = uniform frame material, high = painting.
+  function tileRGBVar(x0, y0, x1, y1) {
+    const lx0 = Math.max(0, x0), ly0 = Math.max(0, y0);
+    const lx1 = Math.min(width, x1), ly1 = Math.min(height, y1);
+    let sR = 0, sG = 0, sB = 0, sR2 = 0, sG2 = 0, sB2 = 0, n = 0;
+    for (let y = ly0; y < ly1; y++) {
+      for (let x = lx0; x < lx1; x++) {
+        const off = (y * width + x) * channels;
+        const r = data[off], g = data[off + 1], b = data[off + 2];
+        sR += r; sR2 += r * r;
+        sG += g; sG2 += g * g;
+        sB += b; sB2 += b * b;
+        n++;
+      }
+    }
+    if (n === 0) return 0;
+    return (sR2 / n - (sR / n) ** 2) +
+           (sG2 / n - (sG / n) ** 2) +
+           (sB2 / n - (sB / n) ** 2);
+  }
+
+  // Median of an array. Used to summarize a tile row/column — robust to outliers.
+  function median(arr) {
+    if (arr.length === 0) return 0;
+    const s = [...arr].sort((a, b) => a - b);
+    return s[Math.floor(s.length * 0.45)]; // slightly below median to lean toward frame detection
+  }
+
+  // All tile variances in tile-row ty, scanning across the full image width.
+  // Used for top/bottom edge scanning.
+  function tileRowVars(ty) {
+    const y0 = ty * tileSize, y1 = y0 + tileSize;
+    const vars = [];
+    for (let tx = 0; tx * tileSize < width; tx++)
+      vars.push(tileRGBVar(tx * tileSize, y0, (tx + 1) * tileSize, y1));
+    return vars;
+  }
+
+  // All tile variances in tile-column tx, restricted to top + bottom corner bands.
+  // Corner bands exclude painting content that dominates center columns.
+  // Used for left/right edge scanning.
+  const cornerH = Math.round(height * cornerFrac);
+  function tileColVars(tx) {
+    const x0 = tx * tileSize, x1 = x0 + tileSize;
+    const vars = [];
+    // Top band
+    for (let ty = 0; ty * tileSize < cornerH; ty++)
+      vars.push(tileRGBVar(x0, ty * tileSize, x1, (ty + 1) * tileSize));
+    // Bottom band
+    const botStart = Math.floor((height - cornerH) / tileSize);
+    for (let ty = botStart; ty * tileSize < height; ty++)
+      vars.push(tileRGBVar(x0, ty * tileSize, x1, (ty + 1) * tileSize));
+    return vars;
+  }
+
+  // Build variance profile: one median-variance value per tile depth from the edge.
+  function buildProfile(maxDepth, varsFn) {
+    return Array.from({ length: maxDepth }, (_, d) => median(varsFn(d)));
+  }
+
+  // Find the frame boundary in a variance profile.
+  // Returns tile depth of boundary (0 = no frame detected).
+  // Strategy: require minFrameRun low-var tiles to confirm "frame present", then
+  // stop at the first minPaintRun consecutive high-var tiles (painting boundary).
+  function findBoundary(profile) {
+    let frameSeen = 0, highRun = 0, boundary = 0;
+    for (let i = 0; i < profile.length; i++) {
+      if (profile[i] <= varThreshold) {
+        frameSeen++;
+        highRun = 0;
+        if (frameSeen >= minFrameRun) boundary = i + 1;
+      } else {
+        highRun++;
+        if (highRun >= minPaintRun && frameSeen >= minFrameRun) return boundary;
+        if (frameSeen < minFrameRun) boundary = 0; // haven't confirmed frame yet
+      }
+    }
+    return frameSeen >= minFrameRun ? boundary : 0;
+  }
+
+  const maxTilesV = Math.floor(height * maxCropFrac / tileSize);
+  const maxTilesH = Math.floor(width  * maxCropFrac / tileSize);
+  const nTilesV   = Math.floor(height / tileSize);
+  const nTilesH   = Math.floor(width  / tileSize);
+
+  const topProfile    = buildProfile(maxTilesV, d => tileRowVars(d));
+  const bottomProfile = buildProfile(maxTilesV, d => tileRowVars(nTilesV - 1 - d));
+  const leftProfile   = buildProfile(maxTilesH, d => tileColVars(d));
+  const rightProfile  = buildProfile(maxTilesH, d => tileColVars(nTilesH - 1 - d));
+
+  const cropTopTiles    = findBoundary(topProfile);
+  const cropBottomTiles = findBoundary(bottomProfile);
+  const cropLeftTiles   = findBoundary(leftProfile);
+  const cropRightTiles  = findBoundary(rightProfile);
+
+  const cropTop    = Math.round(cropTopTiles    * tileSize * scaleY);
+  const cropBottom = Math.round(cropBottomTiles * tileSize * scaleY);
+  const cropLeft   = Math.round(cropLeftTiles   * tileSize * scaleX);
+  const cropRight  = Math.round(cropRightTiles  * tileSize * scaleX);
+
+  const _tCompute = Date.now();
+  console.log(`[tile_variance] downsampled=${width}×${height}, tile=${tileSize}px, threshold=${varThreshold}`);
+  console.log(`[tile_variance] top profile(0-9)=[${topProfile.slice(0,10).map(v=>Math.round(v)).join(',')}]`);
+  console.log(`[tile_variance] bot profile(0-9)=[${bottomProfile.slice(0,10).map(v=>Math.round(v)).join(',')}]`);
+  console.log(`[tile_variance] left profile(0-9)=[${leftProfile.slice(0,10).map(v=>Math.round(v)).join(',')}]`);
+  console.log(`[tile_variance] right profile(0-9)=[${rightProfile.slice(0,10).map(v=>Math.round(v)).join(',')}]`);
+  console.log(`[tile_variance] crop: top=${cropTop}px (${cropTopTiles}t) bot=${cropBottom}px (${cropBottomTiles}t) left=${cropLeft}px (${cropLeftTiles}t) right=${cropRight}px (${cropRightTiles}t) — compute=${_tCompute - _t0}ms`);
+
+  if (cropTop === 0 && cropBottom === 0 && cropLeft === 0 && cropRight === 0) return buffer;
+
+  const extractW = origW - cropLeft - cropRight;
+  const extractH = origH - cropTop  - cropBottom;
+  if (extractW <= 0 || extractH <= 0) return buffer;
+
+  return sharp(buffer)
+    .extract({ left: cropLeft, top: cropTop, width: extractW, height: extractH })
+    .toBuffer();
+}
+
 const PRE_PROCESSORS = {
   trim:              trimPreProcessor,
   variance_scan:     varianceScanPreProcessor,
   region_compare:    regionComparePreProcessor,
   corner_consensus:  cornerConsensusPreProcessor,
   mean_profile:      meanProfilePreProcessor,
+  tile_variance:     tileVariancePreProcessor,
 };
 
 // ── Dimension computation ─────────────────────────────────────────────────────
@@ -1771,6 +1955,7 @@ const IMAGE_PROCESSING_SCHEMA = {
     { value: 'mean_profile',     label: 'Mean Profile — detect frames using row/column mean consistency; handles textured and wood frames' },
     { value: 'corner_consensus', label: 'Corner Consensus — detect frames using four-corner sampling; handles multi-layer frames' },
     { value: 'region_compare',   label: 'Region Compare — detect frames by comparing edge strip to painting interior' },
+    { value: 'tile_variance',    label: 'Tile Variance — detect frames using 2D tile RGB variance; targets thick ornate/wood frames' },
     { value: 'variance_scan',    label: 'Variance Scan — detect frames by local edge variance (legacy)' },
     { value: 'trim',             label: 'Sharp Trim — background strip only (same as None; redundant with automatic Stage 1)' },
     // TODO (Option 3): ML Segmentation — handles irregular/ornate frames; see docs/ROADMAP.md
