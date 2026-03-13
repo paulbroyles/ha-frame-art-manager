@@ -291,6 +291,22 @@ function buildWebSourceSnapshot(artMetadata, effectiveMapping) {
 }
 
 /**
+ * Merge attributeSnapshot and entitySnapshot into a single flat metadata dict
+ * suitable for passing to HA. Entity attributes are prefixed with the entity
+ * type id: e.g. entitySnapshot.artist.Name → artist_name.
+ */
+function buildHaMetadata(attributeSnapshot, entitySnapshot) {
+  const metadata = { ...attributeSnapshot };
+  for (const [entityId, attrs] of Object.entries(entitySnapshot || {})) {
+    for (const [attrName, value] of Object.entries(attrs)) {
+      const key = `${entityId}_${attrName.toLowerCase().replace(/\s+/g, '_')}`;
+      metadata[key] = value;
+    }
+  }
+  return Object.keys(metadata).length > 0 ? metadata : null;
+}
+
+/**
  * Resolve the effective aspect ratio filter for a fetch operation.
  *
  * 'match_tv' requires the caller to pass tvOrientation ('landscape' or 'portrait').
@@ -640,7 +656,7 @@ router.post('/fetch-and-display', async (req, res) => {
 
     await displayImageOnTV(cacheFile, deviceId, {
       screenOn,
-      artworkMetadata: Object.keys(attributeSnapshot).length > 0 ? attributeSnapshot : null,
+      artworkMetadata: buildHaMetadata(attributeSnapshot, entitySnapshot),
     });
 
     res.json({
