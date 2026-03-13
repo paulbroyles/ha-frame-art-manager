@@ -11152,11 +11152,6 @@ body.dropdown-open .image-card:hover {
   transition: border-color 0.2s;
 }
 
-.web-source-card.enabled {
-  border-color: var(--accent-color, #4a90d9);
-  background: var(--accent-bg-light, #f0f6ff);
-}
-
 .web-source-card.ws-source-incompatible {
   opacity: 0.5;
   pointer-events: none;
@@ -11446,4 +11441,306 @@ input[type="checkbox"]:checked + .toggle-text {
   border: 1px solid #ccc;
   border-radius: 4px;
   font-size: 13px;
+}
+
+/* ── Filter mode row ─────────────────────────────────────────────────────── */
+
+.ws-filter-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ws-filter-mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* ── Virtual tag cards ───────────────────────────────────────────────────── */
+
+.ws-virtual-tags-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ws-virtual-tag-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border: 1px solid var(--border-color, #e0e0e0);
+  border-radius: 8px;
+  background: var(--bg-primary, #fff);
+}
+
+.ws-virtual-tag-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ws-virtual-tag-id {
+  font-size: 12px;
+  font-family: monospace;
+  color: var(--accent-color, #4a90d9);
+  opacity: 0.8;
+}
+
+.ws-virtual-tag-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Filter section wrapper */
+.ws-filters-section {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color, #eee);
+}
+
+.ws-section-label {
+  font-weight: 600;
+  font-size: 14px;
+  display: block;
+  margin-bottom: 4px;
+}
+
+/* Unified filter list component */
+.ws-filter-list {
+  margin-top: 8px;
+}
+
+.ws-filter-entry {
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.ws-filter-entry-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--surface-bg, #f8f9fa);
+  border-bottom: 1px solid var(--border-color, #ddd);
+  cursor: pointer;
+  gap: 8px;
+}
+
+.ws-filter-entry-title {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.ws-filter-entry-summary {
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Collapsed state: hide body, show summary */
+.ws-filter-entry[data-collapsed="true"] .ws-filter-entry-body {
+  display: none;
+}
+
+.ws-filter-entry[data-collapsed="true"] .ws-filter-entry-header {
+  border-bottom: none;
+}
+
+/* When expanded, hide summary (body is visible) */
+.ws-filter-entry[data-collapsed="false"] .ws-filter-entry-summary {
+  display: none;
+}
+
+/* Locked entries always show summary (no body) */
+.ws-filter-entry-locked .ws-filter-entry-header {
+  cursor: default;
+  border-bottom: none;
+}
+
+.ws-filter-entry-remove {
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+.ws-filter-entry-body {
+  padding: 0;
+}
+
+.ws-filter-search-input-wrap {
+  padding: 12px 16px;
+}
+
+.ws-filter-search-input-wrap .ws-type-input {
+  width: 100%;
+}
+
+.ws-filter-entry-body > .ws-filter-core-value {
+  margin: 12px 16px;
+  display: block;
+}
+
+.ws-filter-entry-body .ws-filter-section {
+  border: none;
+  margin: 0;
+}
+
+.ws-filter-entry-locked {
+  opacity: 0.7;
+}
+
+.ws-filter-add-row {
+  margin-top: 4px;
+  position: relative;
+}
+
+.ws-filter-add-btn {
+  display: block;
+  width: 100%;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary, #666);
+  background: none;
+  border: 2px dashed var(--border-color, #ddd);
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.ws-filter-add-btn:hover {
+  border-color: var(--accent-color, #4a9eff);
+  color: var(--accent-color, #4a9eff);
+}
+
+.ws-filter-add-options {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  z-index: 10;
+  overflow: hidden;
+}
+
+.ws-filter-add-option {
+  display: block;
+  width: 100%;
+  padding: 10px 16px;
+  font-size: 13px;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border-color, #eee);
+  cursor: pointer;
+  color: var(--text-primary, #333);
+}
+
+.ws-filter-add-option:last-child {
+  border-bottom: none;
+}
+
+.ws-filter-add-option:hover {
+  background: var(--surface-bg, #f8f9fa);
+}
+
+/* Test panel mode tabs */
+.ws-test-modes {
+  display: flex;
+  gap: 0;
+  margin-bottom: 12px;
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.ws-test-mode-btn {
+  flex: 1;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--card-bg, #fff);
+  border: none;
+  border-right: 1px solid var(--border-color, #ddd);
+  cursor: pointer;
+  color: var(--text-secondary, #666);
+  transition: background 0.15s, color 0.15s;
+}
+
+.ws-test-mode-btn:last-child {
+  border-right: none;
+}
+
+.ws-test-mode-btn:hover {
+  background: var(--surface-bg, #f8f9fa);
+}
+
+.ws-test-mode-btn.active {
+  background: var(--accent-color, #4a9eff);
+  color: #fff;
+  font-weight: 600;
+}
+
+.ws-test-mode-panel {
+  margin-bottom: 8px;
+}
+
+/* Generic locked (backwards compat) */
+.ws-filter-locked {
+  opacity: 0.6;
+}
+
+/* Already applied by parent filter (redundant) — muted with dashed underline hint */
+.ws-filter-locked-redundant {
+  opacity: 0.55;
+  text-decoration: underline dotted;
+  text-decoration-color: #999;
+  text-underline-offset: 2px;
+}
+
+/* Excluded by parent filter (will never apply) — strikethrough + more faded */
+.ws-filter-locked-excluded {
+  opacity: 0.4;
+  text-decoration: line-through;
+  text-decoration-color: #999;
+}
+
+.ws-filter-locked-icon {
+  font-size: 11px;
+  margin-left: 2px;
+}
+
+.ws-type-tag-locked {
+  opacity: 0.7;
+  cursor: default;
+  border-style: dashed;
+}
+
+.ws-type-tag-locked-redundant {
+  opacity: 0.6;
+  border-style: dashed;
+}
+
+.ws-type-tag-locked-excluded {
+  opacity: 0.4;
+  border-style: dashed;
+  text-decoration: line-through;
 }

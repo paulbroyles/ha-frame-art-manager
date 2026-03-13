@@ -1340,6 +1340,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initGalleryInfiniteScroll(); // Initialize infinite scroll for gallery
   initTagsetModalListeners(); // Initialize tagset modal event listeners
   initWebSourceSettingsModal(); // Initialize web source settings modal
+  initVirtualTagModal(); // Initialize virtual tag modal
   
   // Pre-fetch similar groups for filter counts
   fetchSimilarGroups();
@@ -14629,9 +14630,16 @@ let webSourceSettingsSchemas = {}; // Cached settings schemas from GET /config
 let webSourceSourceConstraints = {}; // Cached per-source constraints (e.g. aspectRatioConstraint)
 let webSourceMetadata = {};        // Cached per-source { fields, defaultMapping } from GET /config
 let webSourceSettingsSourceId = null; // Which source is currently open in the settings modal
+let webSourceFilterTypes = {};     // Cached per-source filter type definitions from GET /config
+let webSourceCapabilities = {};    // Cached per-source capabilities (e.g. hasCookies) from GET /config
+let webSourceCoreFilterTypes = []; // Cached framework-level filter types (e.g. orientation)
 let webSourceImageProcessingSchema = {}; // Cached imageProcessingSchema from GET /config
 let webSourceTestOrientation = 'landscape'; // Simulated TV orientation for test fetches
 let webSourceSpecificImage = ''; // Optional specific image URL or ID for test fetches
+let webSourceTestMode = 'virtual-tag'; // 'virtual-tag' | 'ad-hoc' | 'specific'
+let webSourceTestVirtualTagId = ''; // Selected virtual tag for test
+let webSourceTestAdHocSourceId = ''; // Selected source for ad-hoc test
+let webSourceTestAdHocFilters = []; // Ad-hoc filters built inline
 
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
 
@@ -14676,6 +14684,7 @@ async function loadWebSourcesTab() {
   await loadWebSourcesConfig();
   renderWebSourcesGlobalSettings();
   renderWebSourcesList();
+  renderVirtualTagsList();
   renderWebSourcesTestSection();
 }
 
@@ -14687,6 +14696,9 @@ async function loadWebSourcesConfig() {
       webSourcesConfig = data.webSources;
       webSourceSettingsSchemas = data.settingsSchemas || {};
       webSourceSourceConstraints = data.sourceConstraints || {};
+      webSourceFilterTypes = data.filterTypes || {};
+      webSourceCapabilities = data.sourceCapabilities || {};
+      webSourceCoreFilterTypes = data.coreFilterTypes || [];
       webSourceMetadata = data.sourceMetadata || {};
       webSourceImageProcessingSchema = data.imageProcessingSchema || {};
     }
@@ -14695,57 +14707,70 @@ async function loadWebSourcesConfig() {
   }
 }
 
-function renderWebSourcesGlobalSettings() {
+function renderWebSourcesGlobalSettings(expandedTypes) {
   const container = document.getElementById('web-sources-global-settings');
   if (!container) return;
 
-  const current = webSourcesConfig?.aspectRatioFilter || 'all';
-  const options = [
-    { value: 'all',       label: 'All',       desc: 'fetch images of any orientation' },
-    { value: 'landscape', label: 'Landscape',  desc: 'wider than tall' },
-    { value: 'portrait',  label: 'Portrait',   desc: 'taller than wide' },
-    { value: 'match_tv',  label: 'Match TV',   desc: 'use the orientation of the destination TV' },
-  ];
+  const globalFilters = webSourcesConfig?.globalFilters || [];
+  const coreFilterTypes = webSourceCoreFilterTypes || [];
 
-  container.innerHTML = `
-    <div class="ws-global-setting">
-      <label class="ws-global-label">Image Orientation</label>
-      <p class="pool-health-description">Filter fetched images by aspect ratio. Sources incompatible with the selected orientation are automatically skipped.</p>
-      <div class="ws-aspect-radio-group">
-        ${options.map(opt => `
-          <label class="ws-aspect-radio-label">
-            <input type="radio" name="ws-aspect-ratio" value="${opt.value}" ${current === opt.value ? 'checked' : ''}>
-            <span><strong>${opt.label}</strong> <span class="ws-aspect-desc">${opt.desc}</span></span>
-          </label>
-        `).join('')}
-      </div>
-    </div>`;
-
-  container.querySelectorAll('input[name="ws-aspect-ratio"]').forEach(radio => {
-    radio.addEventListener('change', async () => {
-      if (!radio.checked) return;
-      const aspectRatioFilter = radio.value;
-      try {
-        const response = await fetch(`${API_BASE}/web-sources/aspect-ratio-filter`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ aspectRatioFilter }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          if (webSourcesConfig) webSourcesConfig.aspectRatioFilter = aspectRatioFilter;
-          // Re-render the source list so incompatible sources are shown as disabled
-          renderWebSourcesList();
-          showToast(`Image orientation set to: ${aspectRatioFilter.replace('_', ' ')}`);
-        } else {
-          throw new Error(data.error || 'Failed to update setting');
-        }
-      } catch (error) {
-        console.error('Error updating aspect ratio filter:', error);
-        showToast(`Error: ${error.message}`, 'error');
-      }
-    });
+  let html = '<div class="ws-global-filters-section">';
+  html += '<label class="ws-global-label">Global Filters</label>';
+  html += '<p class="pool-health-description">Filters applied to all sources and virtual tags. These constrain corresponding values at lower levels.</p>';
+  html += renderFilterList({
+    containerId: 'ws-global-filters',
+    availableFilterTypes: coreFilterTypes,
+    currentFilters: globalFilters,
+    lockedFilters: [],
+    expandedTypes,
   });
+  html += '</div>';
+  container.innerHTML = html;
+
+  // Bind interactions for the global filter list
+  initFilterListInteractions(container, {
+    onAdd: async (filterType, filterMode) => {
+      const ftDef = coreFilterTypes.find(ft => ft.type === filterType);
+      if (!ftDef) return;
+      const defaultValue = ftDef.values?.[0]?.value;
+      if (!defaultValue) return;
+      const mode = filterMode || 'require';
+      const newGlobalFilters = [...globalFilters, { type: filterType, mode, values: [defaultValue] }];
+      await saveGlobalFilters(newGlobalFilters, new Set([`${filterType}:${mode}`]));
+    },
+    onRemove: async (filterType, filterMode) => {
+      const newGlobalFilters = globalFilters.filter(f => !(f.type === filterType && (!filterMode || f.mode === filterMode)));
+      await saveGlobalFilters(newGlobalFilters);
+    },
+    onCoreValueChange: async (filterType, newValue) => {
+      const newGlobalFilters = globalFilters.map(f =>
+        f.type === filterType ? { ...f, values: [newValue] } : f
+      );
+      await saveGlobalFilters(newGlobalFilters);
+    },
+  });
+
+  async function saveGlobalFilters(newGlobalFilters, expandedTypes) {
+    try {
+      const response = await fetch(`${API_BASE}/web-sources/global-filters`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filters: newGlobalFilters }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        if (webSourcesConfig) webSourcesConfig.globalFilters = newGlobalFilters;
+        renderWebSourcesGlobalSettings(expandedTypes);
+        renderWebSourcesList();
+        showToast('Global filters updated');
+      } else {
+        throw new Error(data.error || 'Failed to update global filters');
+      }
+    } catch (error) {
+      console.error('Error updating global filters:', error);
+      showToast(`Error: ${error.message}`, 'error');
+    }
+  }
 
   // Image processing settings
 
@@ -15064,12 +15089,15 @@ function renderWebSourcesList() {
     return;
   }
 
-  const currentAspectRatio = webSourcesConfig?.aspectRatioFilter || 'all';
+  // Resolve current orientation from globalFilters
+  const globalFilters = webSourcesConfig?.globalFilters || [];
+  const orientationFilter = globalFilters.find(f => f.type === 'orientation' && f.mode === 'require');
+  const currentAspectRatio = orientationFilter?.values?.[0] || 'all';
 
   let html = '<div class="web-sources-cards">';
   for (const [sourceId, source] of Object.entries(sources)) {
-    const isEnabled = !!source.enabled;
-    const hasSettings = !!webSourceSettingsSchemas[sourceId] || (webSourceMetadata[sourceId]?.fields?.length > 0);
+    const hasFilters = (webSourceFilterTypes[sourceId]?.length > 0);
+    const hasSettings = hasFilters || !!webSourceSettingsSchemas[sourceId] || webSourceCapabilities[sourceId]?.hasCookies || (webSourceMetadata[sourceId]?.fields?.length > 0);
     const constraint = webSourceSourceConstraints[sourceId]?.aspectRatioConstraint;
     const isIncompatible =
       (constraint === 'landscape' && currentAspectRatio === 'portrait') ||
@@ -15079,7 +15107,7 @@ function renderWebSourcesList() {
       ? `<span class="ws-incompatible-note">Unavailable: ${constraintLabel} source, incompatible with ${currentAspectRatio} filter</span>`
       : '';
     html += `
-      <div class="web-source-card${isEnabled ? ' enabled' : ''}${isIncompatible ? ' ws-source-incompatible' : ''}">
+      <div class="web-source-card${isIncompatible ? ' ws-source-incompatible' : ''}">
         <div class="web-source-card-header">
           <div class="web-source-info">
             <strong>${escapeHtml(source.name)}</strong>
@@ -15088,47 +15116,12 @@ function renderWebSourcesList() {
           </div>
           <div class="web-source-card-actions">
             ${hasSettings ? `<button type="button" class="btn-secondary btn-small web-source-settings-btn" data-source-id="${escapeHtml(sourceId)}" title="Settings">Settings</button>` : ''}
-            <label class="toggle-label${isIncompatible ? ' toggle-label-disabled' : ''}" ${isIncompatible ? 'title="This source cannot be used with the current orientation filter"' : ''}>
-              <input type="checkbox" class="web-source-enable-toggle" data-source-id="${escapeHtml(sourceId)}" ${isEnabled ? 'checked' : ''} ${isIncompatible ? 'disabled' : ''}>
-              <span class="toggle-text">${isEnabled ? 'Enabled' : 'Disabled'}</span>
-            </label>
           </div>
         </div>
       </div>`;
   }
   html += '</div>';
   container.innerHTML = html;
-
-  container.querySelectorAll('.web-source-enable-toggle').forEach(checkbox => {
-    checkbox.addEventListener('change', async () => {
-      const sourceId = checkbox.dataset.sourceId;
-      const enabled = checkbox.checked;
-      checkbox.nextElementSibling.textContent = enabled ? 'Enabled' : 'Disabled';
-      const card = checkbox.closest('.web-source-card');
-      if (card) card.classList.toggle('enabled', enabled);
-
-      try {
-        const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/enable`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          if (!webSourcesConfig.sources) webSourcesConfig.sources = {};
-          webSourcesConfig.sources[sourceId] = { ...webSourcesConfig.sources[sourceId], ...data.source };
-          showToast(`${data.source.name} ${enabled ? 'enabled' : 'disabled'}`);
-        } else {
-          throw new Error(data.error || 'Failed to update source');
-        }
-      } catch (error) {
-        console.error('Error updating web source:', error);
-        checkbox.checked = !enabled;
-        checkbox.nextElementSibling.textContent = !enabled ? 'Enabled' : 'Disabled';
-        showToast(`Error: ${error.message}`, 'error');
-      }
-    });
-  });
 
   container.querySelectorAll('.web-source-settings-btn').forEach(btn => {
     btn.addEventListener('click', () => openWebSourceSettings(btn.dataset.sourceId));
@@ -15137,51 +15130,911 @@ function renderWebSourcesList() {
 
 // ── Web Source Settings Modal ─────────────────────────────────────────────────
 
+// ── Generic filter renderer ──────────────────────────────────────────────────
+
 /**
- * Render the settings panel for Google Art Wallpaper.
- * Handles a generic schema.fields array of boolean toggles, with optional
- * requiresSource checks against currently-enabled sources.
+ * Render the filter sections for a source based on its declared filter types.
+ * Returns an HTML string containing all filter type sections.
+ * The current filter values are read from webSourcesConfig.sources[sourceId].filters.
  */
-function renderGoogleArtWallpaperSettings(schema, currentSettings) {
-  if (!schema?.fields?.length) return '';
-  let html = '';
-  for (const field of schema.fields) {
-    if (field.type !== 'boolean') continue;
-    // Check whether the required source module is installed (present in sourceMetadata),
-    // not whether it's enabled as an active web source — enrichment works regardless of
-    // whether the user is actively shuffling from that source.
-    const requiredSourceAvailable = !field.requiresSource
-      || !!webSourceMetadata[field.requiresSource];
-    const currentVal = currentSettings?.[field.key] ?? field.default ?? false;
-    const disabledAttr = requiredSourceAvailable ? '' : 'disabled';
-    const disabledNote = requiredSourceAvailable ? '' :
-      ` <em>(requires the ${field.requiresSource} source module to be installed)</em>`;
-    html += `
-      <div style="margin-bottom:12px;">
-        <label class="ws-global-label" style="${requiredSourceAvailable ? '' : 'opacity:0.5;'}">
-          <input type="checkbox"
-                 class="ws-boolean-setting"
-                 data-setting-key="${escapeHtml(field.key)}"
-                 ${currentVal ? 'checked' : ''}
-                 ${disabledAttr}>
-          ${escapeHtml(field.label)}
-        </label>
-        <p class="pool-health-description">${escapeHtml(field.description)}${disabledNote}</p>
-      </div>`;
+/**
+ * Render all filter sections for a source.
+ * @param {string} sourceId
+ * @param {Array} [currentFilters] - Current filter values. Defaults to source config filters.
+ * @param {Array} [lockedFilters] - Filters from higher cascade levels (shown as locked/disabled).
+ */
+function renderSourceFilters(sourceId, currentFilters, lockedFilters, expandedTypes) {
+  const sourceFilterTypes = webSourceFilterTypes[sourceId] || [];
+  const coreTypes = webSourceCoreFilterTypes || [];
+  const allFilterTypes = [...coreTypes, ...sourceFilterTypes];
+  if (currentFilters === undefined) {
+    currentFilters = webSourcesConfig?.sources?.[sourceId]?.filters || [];
   }
+  // Global filters are locked at the source level
+  if (!lockedFilters) lockedFilters = webSourcesConfig?.globalFilters || [];
+
+  return renderFilterList({
+    containerId: `ws-filters-${sourceId}`,
+    availableFilterTypes: allFilterTypes,
+    currentFilters,
+    lockedFilters,
+    sourceId,
+    expandedTypes,
+  });
+}
+
+/**
+ * Unified filter list component. Renders a list of active filters with add/remove,
+ * reusable at global, source, and virtual tag levels.
+ *
+ * @param {object} options
+ * @param {string} options.containerId - Unique DOM ID prefix
+ * @param {Array} options.availableFilterTypes - Filter type definitions that can be added
+ * @param {Array} options.currentFilters - Active filters [{type, mode, values}]
+ * @param {Array} [options.lockedFilters] - Parent-level filters (shown locked, not removable)
+ * @param {string} [options.sourceId] - Source ID for data attributes (used by readFiltersFromUI)
+ * @returns {string} HTML
+ */
+function renderFilterList({ containerId, availableFilterTypes, currentFilters, lockedFilters = [], sourceId = '', expandedTypes = null }) {
+  // Track active type:mode pairs for dual-mode support
+  const activeTypeModePairs = new Set(currentFilters.map(f => `${f.type}:${f.mode}`));
+  const activeTypes = new Set(currentFilters.map(f => f.type));
+  const lockedTypes = new Set(lockedFilters.map(f => f.type));
+
+  // Build addable options: each entry is { type, mode, label } where mode is the
+  // specific mode to add. A filter type with multiple modes can appear twice if one
+  // mode is already active and another is available.
+  const addableOptions = [];
+  for (const ft of availableFilterTypes) {
+    // Single-value non-multiValue filters locked by parent are not addable
+    if (lockedTypes.has(ft.type) && !ft.multiValue) continue;
+    // Modes already active at this level are always blocked.
+    // Locked modes from parent are only blocked for non-multiValue types;
+    // multiValue types can add the same mode at a lower level to narrow further
+    // (require = intersection, exclude = union).
+    const usedModes = [
+      ...currentFilters.filter(f => f.type === ft.type).map(f => f.mode),
+      ...(!ft.multiValue ? lockedFilters.filter(f => f.type === ft.type).map(f => f.mode) : []),
+    ];
+    const availableModes = (ft.modes || ['require']).filter(m => !usedModes.includes(m));
+    if (availableModes.length === 0) continue;
+    if (!activeTypes.has(ft.type)) {
+      // Type not active at all — add as single option (mode chosen via radio or default)
+      addableOptions.push({ type: ft.type, mode: availableModes[0], label: ft.label, modes: availableModes });
+    } else if (ft.modes && ft.modes.length > 1) {
+      // Type already has one mode active — offer remaining modes individually
+      for (const m of availableModes) {
+        const modeLabel = m === 'exclude' ? 'Exclude' : 'Include Only';
+        addableOptions.push({ type: ft.type, mode: m, label: `${ft.label} (${modeLabel})` });
+      }
+    }
+  }
+
+  let html = `<div class="ws-filter-list" id="${escapeHtml(containerId)}">`;
+
+  // 1. Locked filters from parent level (not removable, not editable)
+  for (const lockedFilter of lockedFilters) {
+    const ft = availableFilterTypes.find(f => f.type === lockedFilter.type);
+    if (!ft) continue;
+    html += renderLockedFilterEntry(ft, lockedFilter);
+  }
+
+  // 2. Active filters (user-added, removable)
+  for (const filter of currentFilters) {
+    const ft = availableFilterTypes.find(f => f.type === filter.type);
+    if (!ft) continue;
+    // Collect ALL parent filters of the same type (regardless of mode).
+    // The child's mode determines how each parent filter contributes to locking:
+    // - For child Include: parent excludes lock as "will never apply", parent requires
+    //   define the available universe (values outside it lock as "will never apply")
+    // - For child Exclude: parent excludes lock as "already applied" (redundant)
+    const parentFiltersForType = lockedFilters.filter(f => f.type === filter.type);
+    const expanded = expandedTypes ? (expandedTypes.has(`${filter.type}:${filter.mode}`) || expandedTypes.has(filter.type)) : false;
+    // Check if both modes are active for this type (dual-mode)
+    const bothModesActive = ft.modes?.length > 1 && ft.modes.every(m => activeTypeModePairs.has(`${ft.type}:${m}`));
+    html += renderActiveFilterEntry(sourceId, ft, filter, parentFiltersForType, { expanded, fixedMode: bothModesActive });
+  }
+
+  // 3. Add filter button
+  if (addableOptions.length > 0) {
+    html += `<div class="ws-filter-add-row">
+      <button type="button" class="ws-filter-add-btn" data-container-id="${escapeHtml(containerId)}">+ Add Filter</button>
+      <div class="ws-filter-add-options" style="display:none;">
+        ${addableOptions.map(opt => `<button type="button" class="ws-filter-add-option" data-filter-type="${escapeHtml(opt.type)}" data-filter-mode="${escapeHtml(opt.mode)}">${escapeHtml(opt.label)}</button>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  if (currentFilters.length === 0 && lockedFilters.length === 0 && addableOptions.length === 0) {
+    html += '<p class="pool-health-description" style="font-style:italic;">No filter types available for this source.</p>';
+  }
+
+  html += '</div>';
   return html;
 }
 
 /**
- * Renderers for source-specific settings UI.
- * Each function receives (schema, currentSettings) and returns an HTML string.
- * Add an entry here when adding a new source that needs a settings dialog.
+ * Render a locked (inherited) filter entry. Shows the filter state but is not editable.
  */
-const WEB_SOURCE_SETTINGS_RENDERERS = {
-  google_arts: renderGoogleArtsSettings,
-  met_museum: renderMetMuseumSettings,
-  google_art_wallpaper: renderGoogleArtWallpaperSettings,
-};
+function renderLockedFilterEntry(filterType, filter) {
+  const valueLabels = filter.values.map(v => {
+    const vDef = (filterType.values || []).find(fv => fv.value === v);
+    return vDef?.label || v;
+  });
+  const modeLabel = filter.mode === 'require' ? 'Include only' : 'Exclude';
+  let html = `<div class="ws-filter-entry ws-filter-entry-locked">
+    <div class="ws-filter-entry-header">
+      <span class="ws-filter-entry-title">🔒 ${escapeHtml(filterType.label)}</span>
+      <span class="ws-filter-entry-summary">${escapeHtml(modeLabel)}: ${escapeHtml(valueLabels.join(', '))}</span>
+    </div>
+  </div>`;
+  return html;
+}
+
+/**
+ * Generate a short summary string for a single filter (used in collapsed headers).
+ */
+function generateFilterSummary(filterType, filter) {
+  if (!filter || !filter.values) return '';
+  // Core single-value (e.g. orientation)
+  if (filterType.core && !filterType.multiValue) {
+    const vDef = (filterType.values || []).find(fv => fv.value === filter.values[0]);
+    return vDef?.label || filter.values[0] || '';
+  }
+  // Search filter (single-value text)
+  if (filterType.inputStyle === 'search') {
+    return filter.values[0] ? `"${filter.values[0]}"` : 'no query';
+  }
+  // Checkbox/text multi-value
+  const modeLabel = filter.mode === 'require' ? 'Include only' : 'Exclude';
+  if (!filter.values.length) return `${modeLabel}: none selected`;
+  const valueLabels = filter.values.slice(0, 3).map(v => {
+    const vDef = (filterType.values || []).find(fv => fv.value.toLowerCase() === v.toLowerCase());
+    return vDef?.label || v;
+  });
+  const suffix = filter.values.length > 3 ? ` +${filter.values.length - 3} more` : '';
+  return `${modeLabel}: ${valueLabels.join(', ')}${suffix}`;
+}
+
+/**
+ * Render an active (user-added) filter entry with its value picker and remove button.
+ */
+function renderActiveFilterEntry(sourceId, filterType, currentFilter, parentFilters, { expanded = false, fixedMode = false } = {}) {
+  const collapsed = !expanded;
+  const filterMode = currentFilter?.mode || filterType.modes?.[0] || 'require';
+  const summary = generateFilterSummary(filterType, currentFilter);
+  // When in dual-mode (both require+exclude active), show mode in title
+  const titleSuffix = fixedMode ? ` (${filterMode === 'exclude' ? 'Exclude' : 'Include Only'})` : '';
+  let html = `<div class="ws-filter-entry" data-filter-type="${escapeHtml(filterType.type)}" data-filter-mode="${escapeHtml(filterMode)}" data-collapsed="${collapsed}">
+    <div class="ws-filter-entry-header">
+      <span class="ws-filter-entry-title">${escapeHtml(filterType.label)}${escapeHtml(titleSuffix)}</span>
+      <span class="ws-filter-entry-summary">${escapeHtml(summary)}</span>
+      <button type="button" class="btn-secondary btn-small ws-filter-entry-remove" data-filter-type="${escapeHtml(filterType.type)}" data-filter-mode="${escapeHtml(filterMode)}" title="Remove this filter">&times;</button>
+    </div>
+    <div class="ws-filter-entry-body">`;
+
+  if (filterType.core && !filterType.multiValue) {
+    // Simple select (e.g. orientation)
+    html += `<select class="ws-select ws-filter-core-value" data-filter-type="${escapeHtml(filterType.type)}">
+      ${(filterType.values || []).map(v =>
+        `<option value="${escapeHtml(v.value)}" ${currentFilter.values.includes(v.value) ? 'selected' : ''}>${escapeHtml(v.label)}</option>`
+      ).join('')}
+    </select>`;
+  } else if (filterType.inputStyle === 'search') {
+    // Single-value search input
+    const searchVal = currentFilter?.values?.[0] || '';
+    html += `<div class="ws-filter-search-input-wrap">
+      <input type="text" class="ws-type-input ws-filter-search-value"
+             data-source-id="${escapeHtml(sourceId)}" data-filter-type="${escapeHtml(filterType.type)}"
+             placeholder="${escapeHtml(filterType.description || 'Enter search query...')}"
+             value="${escapeHtml(searchVal)}">
+    </div>`;
+  } else if (filterType.inputStyle === 'text') {
+    // Text input filter (rendered inline)
+    html += renderTextFilterSection(sourceId, filterType, currentFilter, parentFilters, { fixedMode });
+  } else {
+    // Checkbox filter (rendered inline)
+    html += renderCheckboxFilterSection(sourceId, filterType, currentFilter, parentFilters, { fixedMode });
+  }
+
+  html += '</div></div>';
+  return html;
+}
+
+/**
+ * Render a checkbox-based filter section (for filter types with enumerated values/groups).
+ * Used for media categories and similar grouped value lists.
+ * @param {Array} [parentFilters] - All parent filters of the same type from higher cascade levels.
+ *   Used to compute which values are locked and why.
+ */
+function renderCheckboxFilterSection(sourceId, filterType, currentFilter, parentFilters, { fixedMode = false } = {}) {
+  // Current excluded/required values
+  const filterValues = new Set((currentFilter?.values || []).map(v => v.toLowerCase()));
+  const filterMode = currentFilter?.mode || 'require';
+
+  // Compute aggregate parent state from ALL parent filters of this type.
+  // parentExcluded: union of all exclude values (these are explicitly blocked upstream)
+  // parentRequired: intersection of all require values (null if no require filters exist)
+  const parentExcluded = new Set();
+  let parentRequired = null; // null = no require constraint (all allowed)
+  for (const pf of (parentFilters || [])) {
+    const vals = (pf.values || []).map(v => v.toLowerCase());
+    if (pf.mode === 'exclude') {
+      for (const v of vals) parentExcluded.add(v);
+    } else if (pf.mode === 'require') {
+      const reqSet = new Set(vals);
+      if (parentRequired === null) {
+        parentRequired = reqSet;
+      } else {
+        // Intersection: only values in both sets survive
+        parentRequired = new Set([...parentRequired].filter(v => reqSet.has(v)));
+      }
+    }
+  }
+  const hasParent = parentExcluded.size > 0 || parentRequired !== null;
+
+  // Determine lock state and reason for each value based on the CHILD's mode.
+  // Returns: { locked: boolean, reason: 'redundant' | 'excluded' | null }
+  //
+  // For Include (require): lock values that are excluded upstream (contradiction)
+  //   or not in the required set upstream (also contradiction). Both = "will never apply".
+  // For Exclude: lock only values already excluded upstream (redundant = "already applied").
+  const getLockInfo = (value) => {
+    if (!hasParent) return { locked: false, reason: null };
+    const vl = value.toLowerCase();
+
+    if (filterMode === 'require') {
+      // Include mode: lock contradictions
+      if (parentExcluded.has(vl)) return { locked: true, reason: 'excluded' };
+      if (parentRequired !== null && !parentRequired.has(vl)) return { locked: true, reason: 'excluded' };
+      return { locked: false, reason: null };
+    } else {
+      // Exclude mode: lock only redundancies
+      if (parentExcluded.has(vl)) return { locked: true, reason: 'redundant' };
+      return { locked: false, reason: null };
+    }
+  };
+
+  const isLocked = (value) => getLockInfo(value).locked;
+
+  // Checked state depends on mode, but only for available values.
+  // Locked values: always unchecked.
+  // Default for NEW filters (empty values): include = all checked, exclude = none checked.
+  const hasExplicitValues = currentFilter?.values?.length > 0;
+  const isChecked = (value) => {
+    if (isLocked(value)) return false;
+    if (!hasExplicitValues) {
+      return filterMode === 'require';
+    }
+    return filterValues.has(value.toLowerCase());
+  };
+
+  const groups = filterType.groups || [];
+  const hasGroups = groups.length > 0;
+
+  // Store parent context as data attribute for mode-switch re-computation
+  const parentContext = JSON.stringify({
+    excluded: [...parentExcluded],
+    required: parentRequired ? [...parentRequired] : null,
+  });
+
+  let html = `<div class="ws-filter-section" data-filter-type="${escapeHtml(filterType.type)}" data-source-id="${escapeHtml(sourceId)}" data-parent-context="${escapeHtml(parentContext)}">
+    <div style="padding:14px 16px;">
+      <h4 style="margin:0 0 4px;">${escapeHtml(filterType.label)}</h4>
+      <p style="margin:0 0 12px;font-size:13px;color:#555;">${escapeHtml(filterType.description)}</p>`;
+
+  // Mode selector (only show if more than one mode available AND not in fixed/dual mode)
+  if (filterType.modes.length > 1 && !fixedMode) {
+    html += `<div class="ws-filter-mode-row" style="margin-bottom:12px;">
+      <label style="font-size:13px;font-weight:500;">Mode:</label>
+      ${filterType.modes.map(m => `
+        <label class="ws-filter-mode-label" style="margin-left:12px;">
+          <input type="radio" name="ws-filter-mode-${escapeHtml(sourceId)}-${escapeHtml(filterType.type)}" value="${m}" class="ws-filter-mode-radio" ${filterMode === m ? 'checked' : ''}>
+          <span>${m === 'exclude' ? 'Exclude selected' : 'Include only selected'}</span>
+        </label>
+      `).join('')}
+    </div>`;
+  }
+
+  html += `<div class="ws-media-toolbar">
+      <button type="button" class="btn-secondary btn-small ws-filter-select-all">Select All</button>
+      <button type="button" class="btn-secondary btn-small ws-filter-select-none">Select None</button>
+    </div>
+    <div class="ws-media-categories">`;
+
+  if (hasGroups) {
+    for (const group of groups) {
+      const groupValues = group.values || [];
+      const lockedInGroup = groupValues.filter(v => isLocked(v));
+      const availableInGroup = groupValues.filter(v => !isLocked(v));
+      const checkedAvailable = availableInGroup.filter(v => isChecked(v)).length;
+      const allAvailableChecked = availableInGroup.length > 0 && checkedAvailable === availableInGroup.length;
+      const noneAvailableChecked = checkedAvailable === 0;
+      // Only show as locked if there are actual locked items (not just an empty group)
+      const allLocked = lockedInGroup.length > 0 && availableInGroup.length === 0;
+      const catChecked = allAvailableChecked ? 'checked' : '';
+      const catIndeterminate = (!allAvailableChecked && !noneAvailableChecked) ? 'data-indeterminate="true"' : '';
+      const catDisabled = allLocked ? 'disabled' : '';
+
+      html += `<div class="ws-media-category">
+        <div class="ws-media-category-header${allLocked ? ' ws-filter-locked' : ''}">
+          <label class="ws-category-label" onclick="event.stopPropagation()">
+            <input type="checkbox" class="ws-category-checkbox" ${catChecked} ${catIndeterminate} ${catDisabled}>
+            ${escapeHtml(group.name)}${allLocked ? ' <span class="ws-filter-locked-icon">🔒</span>' : ''}
+          </label>
+          <button type="button" class="ws-category-toggle-btn" title="Expand/collapse">${allLocked ? '▶' : '▼'}</button>
+        </div>
+        <div class="ws-media-category-items"${allLocked ? ' style="display:none"' : ''}>`;
+
+      for (const value of groupValues) {
+        const checked = isChecked(value);
+        const lockInfo = getLockInfo(value);
+        const lockClass = lockInfo.locked ? (lockInfo.reason === 'redundant' ? ' ws-filter-locked-redundant' : ' ws-filter-locked-excluded') : '';
+        const lockTitle = lockInfo.locked ? (lockInfo.reason === 'redundant' ? 'Already applied by parent filter' : 'Excluded by parent filter') : '';
+        const lockIcon = lockInfo.locked ? (lockInfo.reason === 'redundant' ? '↑' : '🚫') : '';
+        html += `<label class="ws-media-item${lockClass}">
+          <input type="checkbox" class="ws-filter-value-checkbox" data-value="${escapeHtml(value)}" ${checked ? 'checked' : ''} ${lockInfo.locked ? 'disabled' : ''}>
+          ${escapeHtml(value)}${lockInfo.locked ? ` <span class="ws-filter-locked-icon" title="${lockTitle}">${lockIcon}</span>` : ''}
+        </label>`;
+      }
+
+      html += `</div></div>`;
+    }
+  } else {
+    // Flat list of values (no groups)
+    for (const v of (filterType.values || [])) {
+      const checked = isChecked(v.value);
+      const lockInfo = getLockInfo(v.value);
+      const lockClass = lockInfo.locked ? (lockInfo.reason === 'redundant' ? ' ws-filter-locked-redundant' : ' ws-filter-locked-excluded') : '';
+      const lockTitle = lockInfo.locked ? (lockInfo.reason === 'redundant' ? 'Already applied by parent filter' : 'Excluded by parent filter') : '';
+      const lockIcon = lockInfo.locked ? (lockInfo.reason === 'redundant' ? '↑' : '🚫') : '';
+      html += `<label class="ws-media-item${lockClass}">
+        <input type="checkbox" class="ws-filter-value-checkbox" data-value="${escapeHtml(v.value)}" ${checked ? 'checked' : ''} ${lockInfo.locked ? 'disabled' : ''}>
+        ${escapeHtml(v.label || v.value)}${lockInfo.locked ? ` <span class="ws-filter-locked-icon" title="${lockTitle}">${lockIcon}</span>` : ''}
+      </label>`;
+    }
+  }
+
+  html += `</div></div></div>`;
+  return html;
+}
+
+/**
+ * Render a text-input filter section (for filter types with inputStyle: 'text').
+ * Used for objectType and similar free-text filters with optional suggestions.
+ */
+function renderTextFilterSection(sourceId, filterType, currentFilter, parentFilters, { fixedMode = false } = {}) {
+  const values = currentFilter?.values || [];
+  const filterMode = currentFilter?.mode || 'require';
+
+  // Compute aggregate parent state (same logic as checkbox section)
+  const parentExcluded = new Set();
+  let parentRequired = null;
+  for (const pf of (parentFilters || [])) {
+    const vals = (pf.values || []).map(v => v.toLowerCase());
+    if (pf.mode === 'exclude') {
+      for (const v of vals) parentExcluded.add(v);
+    } else if (pf.mode === 'require') {
+      const reqSet = new Set(vals);
+      parentRequired = parentRequired === null ? reqSet : new Set([...parentRequired].filter(v => reqSet.has(v)));
+    }
+  }
+
+  // Locked values: for exclude mode, only values already excluded upstream (redundant).
+  // For include mode, values excluded upstream or outside required set (will never apply).
+  const isLockedValue = (v) => {
+    const vl = v.toLowerCase();
+    if (filterMode === 'require') {
+      return parentExcluded.has(vl) || (parentRequired !== null && !parentRequired.has(vl));
+    } else {
+      return parentExcluded.has(vl);
+    }
+  };
+  const getLockReason = (v) => {
+    const vl = v.toLowerCase();
+    if (filterMode === 'exclude' && parentExcluded.has(vl)) return 'redundant';
+    if (filterMode === 'require' && (parentExcluded.has(vl) || (parentRequired !== null && !parentRequired.has(vl)))) return 'excluded';
+    return null;
+  };
+
+  // Collect all locked values from parent filters for display
+  const allParentValues = new Set();
+  for (const pf of (parentFilters || [])) {
+    for (const v of (pf.values || [])) allParentValues.add(v);
+  }
+  const lockedValues = new Set([...allParentValues].filter(v => isLockedValue(v)).map(v => v.toLowerCase()));
+
+  // Locked values from parent filter appear as non-removable tags with reason-specific styling
+  const lockedTags = [...allParentValues].filter(v => isLockedValue(v)).map(t => {
+    const reason = getLockReason(t);
+    const cls = reason === 'redundant' ? 'ws-type-tag-locked-redundant' : 'ws-type-tag-locked-excluded';
+    const title = reason === 'redundant' ? 'Already applied by parent filter' : 'Excluded by parent filter';
+    return `<span class="ws-type-tag ws-type-tag-locked ${cls}" data-type="${escapeHtml(t)}" title="${title}">${escapeHtml(t)}</span>`;
+  }).join('');
+  const editableTags = values
+    .filter(t => !lockedValues.has(t.toLowerCase()))
+    .map(t =>
+      `<span class="ws-type-tag" data-type="${escapeHtml(t)}">${escapeHtml(t)}<button type="button" class="ws-type-tag-remove" aria-label="Remove">\u00d7</button></span>`
+    ).join('');
+  const typeTags = lockedTags + editableTags;
+
+  let html = `<div class="ws-filter-section ws-filter-text-section" data-filter-type="${escapeHtml(filterType.type)}" data-source-id="${escapeHtml(sourceId)}">
+    <div class="ws-mapping-section">
+      <h4>${escapeHtml(filterType.label)}</h4>
+      <p class="pool-health-description">${escapeHtml(filterType.description)}</p>
+      <div class="ws-type-tags ws-filter-text-tags">${typeTags}</div>
+      <div class="ws-type-add-row">
+        <input type="text" class="ws-type-input ws-filter-text-input" placeholder="e.g. ${escapeHtml((filterType.suggestions || [])[0] || 'value')}">
+        <button type="button" class="btn-secondary btn-small ws-filter-text-add">Add</button>
+      </div>`;
+
+  // Show suggestions if available
+  if (filterType.suggestions?.length > 0) {
+    const unusedSuggestions = filterType.suggestions.filter(s => !values.some(v => v.toLowerCase() === s.toLowerCase()));
+    if (unusedSuggestions.length > 0) {
+      html += `<div class="ws-filter-suggestions" style="margin-top:8px;">
+        <span style="font-size:12px;color:#888;">Suggestions:</span>
+        ${unusedSuggestions.map(s => `<button type="button" class="ws-filter-suggestion-btn btn-secondary btn-small" style="margin:2px 4px;padding:2px 8px;font-size:12px;" data-value="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}
+      </div>`;
+    }
+  }
+
+  html += `</div></div>`;
+  return html;
+}
+
+/**
+ * Read the current filter state from the settings modal DOM for a given source.
+ * Returns an array of filter objects [{type, mode, values}].
+ */
+function readFiltersFromUI(sourceId) {
+  const body = document.getElementById('web-source-settings-body');
+  if (!body) return [];
+
+  const filters = [];
+
+  // Search filters (single-value text input, not inside .ws-filter-section)
+  body.querySelectorAll(`.ws-filter-search-value[data-source-id="${CSS.escape(sourceId)}"]`).forEach(input => {
+    const val = input.value.trim();
+    if (val) {
+      filters.push({ type: input.dataset.filterType, mode: 'require', values: [val] });
+    }
+  });
+
+  body.querySelectorAll(`.ws-filter-section[data-source-id="${CSS.escape(sourceId)}"]`).forEach(section => {
+    const filterType = section.dataset.filterType;
+    const filterTypeDef = (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType);
+    if (!filterTypeDef) return;
+
+    // Read mode from the parent entry's data-filter-mode (authoritative in dual-mode),
+    // falling back to radio button selection, then filter type default.
+    const parentEntry = section.closest('.ws-filter-entry');
+    const entryMode = parentEntry?.dataset?.filterMode;
+    const modeRadio = section.querySelector('.ws-filter-mode-radio:checked');
+
+    if (filterTypeDef.inputStyle === 'text') {
+      // Text filter: collect tag values (skip locked tags from higher cascade levels)
+      const values = [];
+      section.querySelectorAll('.ws-type-tag:not(.ws-type-tag-locked)').forEach(tag => values.push(tag.dataset.type));
+      if (values.length > 0) {
+        filters.push({ type: filterType, mode: entryMode || 'exclude', values });
+      }
+    } else {
+      // Checkbox filter: collect based on mode (skip disabled/locked checkboxes)
+      const mode = entryMode || modeRadio?.value || filterTypeDef.modes[0] || 'require';
+      const allValues = [];
+      const checkedValues = [];
+      section.querySelectorAll('.ws-filter-value-checkbox:not(:disabled)').forEach(cb => {
+        allValues.push(cb.dataset.value);
+        if (cb.checked) checkedValues.push(cb.dataset.value);
+      });
+
+      // Both modes: checked values = the list. Include: checked = included. Exclude: checked = excluded.
+      if (mode === 'exclude') {
+        if (checkedValues.length > 0) {
+          filters.push({ type: filterType, mode: 'exclude', values: checkedValues });
+        }
+      } else {
+        if (checkedValues.length > 0 && checkedValues.length < allValues.length) {
+          filters.push({ type: filterType, mode: 'require', values: checkedValues });
+        }
+      }
+    }
+  });
+
+  return filters;
+}
+
+/**
+ * Attach event handlers for generic filter sections after rendering.
+ * Called by initWebSourceSettingsInteractions.
+ */
+function initFilterSectionInteractions(body) {
+  // Expand/collapse category items
+  body.querySelectorAll('.ws-filter-section .ws-media-category-header').forEach(header => {
+    header.addEventListener('click', e => {
+      if (e.target.type === 'checkbox') return;
+      const category = header.closest('.ws-media-category');
+      const items = category.querySelector('.ws-media-category-items');
+      const btn = header.querySelector('.ws-category-toggle-btn');
+      const expanded = items.style.display !== 'none';
+      items.style.display = expanded ? 'none' : '';
+      btn.textContent = expanded ? '\u25b6' : '\u25bc';
+    });
+  });
+
+  // Category checkbox → check/uncheck all available (non-disabled) in that category
+  body.querySelectorAll('.ws-filter-section .ws-category-checkbox').forEach(catCb => {
+    catCb.addEventListener('change', () => {
+      const category = catCb.closest('.ws-media-category');
+      category.querySelectorAll('.ws-filter-value-checkbox:not(:disabled)').forEach(cb => {
+        cb.checked = catCb.checked;
+      });
+      catCb.indeterminate = false;
+    });
+  });
+
+  // Individual checkbox → update category checkbox state
+  body.querySelectorAll('.ws-filter-section .ws-filter-value-checkbox').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const category = cb.closest('.ws-media-category');
+      if (!category) return;
+      const catCb = category.querySelector('.ws-category-checkbox');
+      if (!catCb) return;
+      const all = Array.from(category.querySelectorAll('.ws-filter-value-checkbox:not(:disabled)'));
+      const checkedCount = all.filter(c => c.checked).length;
+      if (all.length === 0 || checkedCount === 0) {
+        catCb.checked = false; catCb.indeterminate = false;
+      } else if (checkedCount === all.length) {
+        catCb.checked = true; catCb.indeterminate = false;
+      } else {
+        catCb.checked = false; catCb.indeterminate = true;
+      }
+    });
+  });
+
+  // Select All / Select None per filter section
+  body.querySelectorAll('.ws-filter-section .ws-filter-select-all').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const section = btn.closest('.ws-filter-section');
+      section.querySelectorAll('.ws-filter-value-checkbox:not(:disabled)').forEach(cb => { cb.checked = true; });
+      section.querySelectorAll('.ws-category-checkbox:not(:disabled)').forEach(cb => { cb.checked = true; cb.indeterminate = false; });
+    });
+  });
+  body.querySelectorAll('.ws-filter-section .ws-filter-select-none').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const section = btn.closest('.ws-filter-section');
+      section.querySelectorAll('.ws-filter-value-checkbox:not(:disabled)').forEach(cb => { cb.checked = false; });
+      section.querySelectorAll('.ws-category-checkbox:not(:disabled)').forEach(cb => { cb.checked = false; cb.indeterminate = false; });
+    });
+  });
+
+  // Text filter: add/remove tags
+  body.querySelectorAll('.ws-filter-section .ws-filter-text-add').forEach(addBtn => {
+    addBtn.addEventListener('click', () => {
+      const section = addBtn.closest('.ws-filter-section');
+      const input = section.querySelector('.ws-filter-text-input');
+      addFilterTextTag(section, input.value);
+      input.value = '';
+      input.focus();
+    });
+  });
+
+  body.querySelectorAll('.ws-filter-section .ws-filter-text-input').forEach(input => {
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const section = input.closest('.ws-filter-section');
+        addFilterTextTag(section, input.value);
+        input.value = '';
+      }
+    });
+  });
+
+  body.querySelectorAll('.ws-filter-section .ws-type-tag-remove').forEach(btn => {
+    btn.addEventListener('click', () => btn.closest('.ws-type-tag').remove());
+  });
+
+  // Suggestion buttons
+  body.querySelectorAll('.ws-filter-section .ws-filter-suggestion-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const section = btn.closest('.ws-filter-section');
+      addFilterTextTag(section, btn.dataset.value);
+      btn.remove();
+    });
+  });
+
+  // Mode radio changes: flip checkbox semantics and re-compute locks
+  body.querySelectorAll('.ws-filter-section .ws-filter-mode-radio').forEach(radio => {
+    radio.addEventListener('change', () => {
+      if (!radio.checked) return;
+      const section = radio.closest('.ws-filter-section');
+      const newMode = radio.value;
+
+      // Re-compute lock state based on parent context and new mode
+      const parentContextStr = section.dataset.parentContext;
+      let parentExcluded = new Set();
+      let parentRequired = null;
+      if (parentContextStr) {
+        try {
+          const ctx = JSON.parse(parentContextStr);
+          parentExcluded = new Set((ctx.excluded || []).map(v => v.toLowerCase()));
+          parentRequired = ctx.required ? new Set(ctx.required.map(v => v.toLowerCase())) : null;
+        } catch (e) { /* ignore parse errors */ }
+      }
+
+      const shouldLock = (value) => {
+        const vl = value.toLowerCase();
+        if (newMode === 'require') {
+          return parentExcluded.has(vl) || (parentRequired !== null && !parentRequired.has(vl));
+        } else {
+          return parentExcluded.has(vl);
+        }
+      };
+      const getLockReason = (value) => {
+        const vl = value.toLowerCase();
+        if (newMode === 'exclude' && parentExcluded.has(vl)) return 'redundant';
+        if (newMode === 'require' && (parentExcluded.has(vl) || (parentRequired !== null && !parentRequired.has(vl)))) return 'excluded';
+        return null;
+      };
+
+      // Update each checkbox: invert available ones, update lock state for all
+      section.querySelectorAll('.ws-filter-value-checkbox').forEach(cb => {
+        const value = cb.dataset.value;
+        const wasLocked = cb.disabled;
+        const nowLocked = shouldLock(value);
+        const label = cb.closest('label');
+
+        if (nowLocked !== wasLocked) {
+          // Lock state changed
+          cb.disabled = nowLocked;
+          if (nowLocked) {
+            cb.checked = false;
+          }
+        } else if (!nowLocked) {
+          // Same unlock state — invert checkbox
+          cb.checked = !cb.checked;
+        }
+
+        // Update label styling
+        if (label) {
+          label.classList.remove('ws-filter-locked-redundant', 'ws-filter-locked-excluded');
+          const existingIcon = label.querySelector('.ws-filter-locked-icon');
+          if (existingIcon) existingIcon.remove();
+          if (nowLocked) {
+            const reason = getLockReason(value);
+            label.classList.add(reason === 'redundant' ? 'ws-filter-locked-redundant' : 'ws-filter-locked-excluded');
+            const icon = reason === 'redundant' ? '↑' : '🚫';
+            const title = reason === 'redundant' ? 'Already applied by parent filter' : 'Excluded by parent filter';
+            const span = document.createElement('span');
+            span.className = 'ws-filter-locked-icon';
+            span.title = title;
+            span.textContent = icon;
+            label.appendChild(span);
+          }
+        }
+      });
+
+      // Update category checkboxes
+      section.querySelectorAll('.ws-media-category').forEach(cat => {
+        const catCb = cat.querySelector('.ws-category-checkbox');
+        if (!catCb) return;
+        const header = cat.querySelector('.ws-media-category-header');
+        const all = Array.from(cat.querySelectorAll('.ws-filter-value-checkbox'));
+        const available = all.filter(c => !c.disabled);
+        const allLocked = available.length === 0;
+
+        catCb.disabled = allLocked;
+        header?.classList.remove('ws-filter-locked');
+        // Update category header lock icon
+        const headerLabel = header?.querySelector('.ws-category-label');
+        const existingCatIcon = headerLabel?.querySelector('.ws-filter-locked-icon');
+        if (allLocked && !existingCatIcon && headerLabel) {
+          const span = document.createElement('span');
+          span.className = 'ws-filter-locked-icon';
+          span.textContent = '🔒';
+          headerLabel.appendChild(span);
+        } else if (!allLocked && existingCatIcon) {
+          existingCatIcon.remove();
+        }
+        if (allLocked) header?.classList.add('ws-filter-locked');
+
+        // Auto-collapse fully locked categories, expand unlocked ones
+        const items = cat.querySelector('.ws-media-category-items');
+        const toggleBtn = cat.querySelector('.ws-category-toggle-btn');
+        if (items && toggleBtn) {
+          if (allLocked) {
+            items.style.display = 'none';
+            toggleBtn.textContent = '\u25b6';
+          } else if (items.style.display === 'none') {
+            items.style.display = '';
+            toggleBtn.textContent = '\u25bc';
+          }
+        }
+
+        if (!allLocked) {
+          const checkedCount = available.filter(c => c.checked).length;
+          if (checkedCount === 0) { catCb.checked = false; catCb.indeterminate = false; }
+          else if (checkedCount === available.length) { catCb.checked = true; catCb.indeterminate = false; }
+          else { catCb.checked = false; catCb.indeterminate = true; }
+        }
+      });
+    });
+  });
+}
+
+/**
+ * Add a text tag to a text-input filter section.
+ */
+function addFilterTextTag(section, value) {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) return;
+  const list = section.querySelector('.ws-filter-text-tags');
+  if (!list) return;
+  if (list.querySelector(`.ws-type-tag[data-type="${CSS.escape(trimmed)}"]`)) return;
+  const span = document.createElement('span');
+  span.className = 'ws-type-tag';
+  span.dataset.type = trimmed;
+  span.innerHTML = `${escapeHtml(trimmed)}<button type="button" class="ws-type-tag-remove" aria-label="Remove">\u00d7</button>`;
+  span.querySelector('.ws-type-tag-remove').addEventListener('click', () => span.remove());
+  list.appendChild(span);
+}
+
+/**
+ * Attach event handlers for the unified filter list component (add/remove/core-value).
+ * @param {HTMLElement} container - The container element holding the filter list
+ * @param {object} callbacks - { onAdd(filterType), onRemove(filterType), onCoreValueChange(filterType, value) }
+ */
+/**
+ * Re-render the filter list inside the source settings modal and re-init interactions.
+ */
+function reRenderSourceFilters(sourceId, currentFilters, expandedTypes) {
+  const body = document.getElementById('web-source-settings-body');
+  const filterListEl = body?.querySelector('.ws-filter-list');
+  if (!filterListEl) return;
+  const html = renderSourceFilters(sourceId, currentFilters, undefined, expandedTypes);
+  filterListEl.outerHTML = html;
+  // Re-init interactions on the new DOM
+  initFilterSectionInteractions(body);
+  body.querySelectorAll('.ws-category-checkbox[data-indeterminate="true"]').forEach(cb => {
+    cb.indeterminate = true;
+  });
+  initFilterListInteractions(body, {
+    onAdd: (filterType, filterMode) => {
+      const filters = readFiltersFromUI(sourceId);
+      const mode = filterMode || 'require';
+      filters.push({ type: filterType, mode, values: [] });
+      reRenderSourceFilters(sourceId, filters, new Set([`${filterType}:${mode}`]));
+    },
+    onRemove: (filterType, filterMode) => {
+      const filters = readFiltersFromUI(sourceId).filter(f => !(f.type === filterType && (!filterMode || f.mode === filterMode)));
+      reRenderSourceFilters(sourceId, filters);
+    },
+  });
+}
+
+function initFilterListInteractions(container, callbacks = {}) {
+  // Add filter button + type picker
+  container.querySelectorAll('.ws-filter-add-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const row = btn.closest('.ws-filter-add-row');
+      const options = row.querySelector('.ws-filter-add-options');
+      // If only one option, add it directly
+      const optionBtns = options.querySelectorAll('.ws-filter-add-option');
+      if (optionBtns.length === 1) {
+        callbacks.onAdd?.(optionBtns[0].dataset.filterType, optionBtns[0].dataset.filterMode);
+        return;
+      }
+      // Toggle options visibility
+      const isVisible = options.style.display !== 'none';
+      options.style.display = isVisible ? 'none' : '';
+    });
+  });
+
+  container.querySelectorAll('.ws-filter-add-option').forEach(btn => {
+    btn.addEventListener('click', () => {
+      callbacks.onAdd?.(btn.dataset.filterType, btn.dataset.filterMode);
+    });
+  });
+
+  // Close options on outside click
+  const closeHandler = (e) => {
+    container.querySelectorAll('.ws-filter-add-options').forEach(opts => {
+      if (!opts.contains(e.target) && !opts.previousElementSibling?.contains(e.target)) {
+        opts.style.display = 'none';
+      }
+    });
+  };
+  document.addEventListener('click', closeHandler);
+  // Store handler for cleanup if needed
+  container._filterListCloseHandler = closeHandler;
+
+  // Remove filter button
+  container.querySelectorAll('.ws-filter-entry-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      callbacks.onRemove?.(btn.dataset.filterType, btn.dataset.filterMode);
+    });
+  });
+
+  // Core filter value change (simple select, e.g. orientation)
+  container.querySelectorAll('.ws-filter-core-value').forEach(select => {
+    select.addEventListener('change', () => {
+      callbacks.onCoreValueChange?.(select.dataset.filterType, select.value);
+    });
+  });
+
+  // Collapsible filter entries — toggle on header click
+  container.querySelectorAll('.ws-filter-entry:not(.ws-filter-entry-locked) .ws-filter-entry-header').forEach(header => {
+    header.addEventListener('click', (e) => {
+      // Don't toggle when clicking remove button
+      if (e.target.closest('.ws-filter-entry-remove')) return;
+      const entry = header.closest('.ws-filter-entry');
+      const isCollapsed = entry.dataset.collapsed === 'true';
+      entry.dataset.collapsed = isCollapsed ? 'false' : 'true';
+    });
+  });
+
+  // Update search filter summary as user types
+  container.querySelectorAll('.ws-filter-search-value').forEach(input => {
+    input.addEventListener('input', () => {
+      const entry = input.closest('.ws-filter-entry');
+      const summary = entry?.querySelector('.ws-filter-entry-summary');
+      if (summary) {
+        const val = input.value.trim();
+        summary.textContent = val ? `"${val}"` : 'no query';
+      }
+    });
+  });
+}
+
+/**
+ * Render non-filter settings for a source: schema-driven boolean toggles
+ * plus any source-specific action buttons (e.g. cookie clear).
+ */
+function renderSourceExtraSettings(sourceId) {
+  let html = '';
+
+  // Schema-driven boolean toggles (generic for any source with a settingsSchema)
+  const schema = webSourceSettingsSchemas[sourceId];
+  if (schema?.fields?.length) {
+    const currentSettings = webSourcesConfig?.sources?.[sourceId]?.settings || {};
+    for (const field of schema.fields) {
+      if (field.type !== 'boolean') continue;
+      // Check whether the required source module is installed (present in sourceMetadata),
+      // not whether it's enabled as an active web source.
+      const requiredSourceAvailable = !field.requiresSource
+        || !!webSourceMetadata[field.requiresSource];
+      const currentVal = currentSettings?.[field.key] ?? field.default ?? false;
+      const disabledAttr = requiredSourceAvailable ? '' : 'disabled';
+      const disabledNote = requiredSourceAvailable ? '' :
+        ` <em>(requires the ${field.requiresSource} source module to be installed)</em>`;
+      html += `
+        <div style="margin-bottom:12px;padding:0 16px;">
+          <label class="ws-global-label" style="${requiredSourceAvailable ? '' : 'opacity:0.5;'}">
+            <input type="checkbox"
+                   class="ws-boolean-setting"
+                   data-setting-key="${escapeHtml(field.key)}"
+                   ${currentVal ? 'checked' : ''}
+                   ${disabledAttr}>
+            ${escapeHtml(field.label)}
+          </label>
+          <p class="pool-health-description">${escapeHtml(field.description)}${disabledNote}</p>
+        </div>`;
+    }
+  }
+
+  // Cookie management (generic — shown for any source that exports clearCookies)
+  if (webSourceCapabilities[sourceId]?.hasCookies) {
+    html += `<div class="ws-mapping-section">
+      <h4>Session Cookies</h4>
+      <p class="pool-health-description">This source uses session cookies to reduce rate limiting. Cookies are seeded automatically on the first fetch. If fetches are failing with 429 errors, clearing the cookie jar forces a fresh session.</p>
+      <button type="button" class="btn-secondary btn-small ws-clear-cookies-btn" data-source-id="${escapeHtml(sourceId)}">Clear Cookie Jar</button>
+    </div>`;
+  }
+
+  return html;
+}
 
 /**
  * Returns the HTML string for a source's metadata mapping section within
@@ -15232,23 +16085,28 @@ function renderSourceMappingSection(sourceId, fields) {
 }
 
 function openWebSourceSettings(sourceId) {
-  const schema = webSourceSettingsSchemas[sourceId];
-  const renderer = WEB_SOURCE_SETTINGS_RENDERERS[sourceId];
+  const filterTypes = webSourceFilterTypes[sourceId] || [];
   const fields = webSourceMetadata[sourceId]?.fields || [];
+  const hasExtraSettings = !!webSourceSettingsSchemas[sourceId] || webSourceCapabilities[sourceId]?.hasCookies;
 
-  if ((!schema || !renderer) && fields.length === 0) return;
+  if (filterTypes.length === 0 && fields.length === 0 && !hasExtraSettings) return;
 
   const source = webSourcesConfig?.sources?.[sourceId] || {};
-  const currentSettings = source.settings || {};
 
   document.getElementById('web-source-settings-title').textContent =
     `${source.name || sourceId} — Settings`;
   const body = document.getElementById('web-source-settings-body');
 
   let html = '';
-  if (schema && renderer) {
-    html += renderer(schema, currentSettings);
-  }
+  // Filters section
+  html += '<div class="ws-filters-section">';
+  html += '<label class="ws-section-label">Filters</label>';
+  html += '<p class="pool-health-description">Narrow which artwork this source can return. Inherited global filters are shown locked.</p>';
+  html += renderSourceFilters(sourceId);
+  html += '</div>';
+  // Source-specific non-filter settings (cookie clear, boolean toggles)
+  html += renderSourceExtraSettings(sourceId);
+  // Metadata mapping
   if (fields.length > 0) {
     html += renderSourceMappingSection(sourceId, fields);
   }
@@ -15263,6 +16121,21 @@ function openWebSourceSettings(sourceId) {
 
   // Attach expand/collapse and checkbox cascade logic
   initWebSourceSettingsInteractions();
+
+  // Attach add/remove filter interactions
+  initFilterListInteractions(body, {
+    onAdd: (filterType, filterMode) => {
+      // Add a new empty filter of this type and re-render (expanded)
+      const currentFilters = readFiltersFromUI(sourceId);
+      const mode = filterMode || 'require';
+      currentFilters.push({ type: filterType, mode, values: [] });
+      reRenderSourceFilters(sourceId, currentFilters, new Set([`${filterType}:${mode}`]));
+    },
+    onRemove: (filterType, filterMode) => {
+      const currentFilters = readFiltersFromUI(sourceId).filter(f => !(f.type === filterType && (!filterMode || f.mode === filterMode)));
+      reRenderSourceFilters(sourceId, currentFilters);
+    },
+  });
 
   // Bind reset mapping button
   body.querySelector('.ws-reset-mapping-btn')
@@ -15284,22 +16157,34 @@ async function saveWebSourceSettings() {
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
 
   try {
-    // Save media category settings if applicable
-    const schema = webSourceSettingsSchemas[sourceId];
-    const renderer = WEB_SOURCE_SETTINGS_RENDERERS[sourceId];
-    if (schema && renderer) {
-      const settings = readWebSourceSettingsFromUI(sourceId);
-      if (settings !== null) {
-        const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/settings`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ settings }),
-        });
-        const data = await response.json();
-        if (!data.success) throw new Error(data.error || 'Failed to save settings');
-        if (webSourcesConfig?.sources?.[sourceId]) {
-          webSourcesConfig.sources[sourceId].settings = settings;
-        }
+    // Save filters via the generic filter endpoint
+    const filterTypes = webSourceFilterTypes[sourceId] || [];
+    if (filterTypes.length > 0) {
+      const filters = readFiltersFromUI(sourceId);
+      const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/filters`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filters }),
+      });
+      const data = await response.json();
+      if (!data.success) throw new Error(data.error || 'Failed to save filters');
+      if (webSourcesConfig?.sources?.[sourceId]) {
+        webSourcesConfig.sources[sourceId].filters = filters;
+      }
+    }
+
+    // Save non-filter settings if applicable (e.g. boolean toggles)
+    const nonFilterSettings = readNonFilterSettingsFromUI(sourceId);
+    if (nonFilterSettings !== null) {
+      const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: nonFilterSettings }),
+      });
+      const data = await response.json();
+      if (!data.success) throw new Error(data.error || 'Failed to save settings');
+      if (webSourcesConfig?.sources?.[sourceId]) {
+        webSourcesConfig.sources[sourceId].settings = nonFilterSettings;
       }
     }
 
@@ -15338,6 +16223,7 @@ async function saveWebSourceSettings() {
     const configData = await configResp.json();
     if (configData.success) {
       webSourcesConfig = configData.webSources;
+      webSourceFilterTypes = configData.filterTypes || {};
       webSourceMetadata = configData.sourceMetadata || {};
       // Re-render the open settings panel with the updated field list.
       openWebSourceSettings(sourceId);
@@ -15354,36 +16240,21 @@ async function saveWebSourceSettings() {
 }
 
 /**
- * Read the current UI state for a source's settings dialog.
- * Returns the settings object to POST, or null on error.
+ * Read non-filter settings from the UI (boolean toggles driven by settingsSchema).
+ * Returns settings object or null if no non-filter settings exist for this source.
  */
-function readWebSourceSettingsFromUI(sourceId) {
-  if (sourceId === 'google_arts') {
-    const disabledMedia = [];
-    document.querySelectorAll('#web-source-settings-body .ws-media-checkbox').forEach(cb => {
-      if (!cb.checked) disabledMedia.push(cb.dataset.medium);
-    });
-    const excludedTypes = [];
-    document.querySelectorAll('#ws-excluded-types-list .ws-type-tag').forEach(tag => {
-      excludedTypes.push(tag.dataset.type);
-    });
-    return { disabledMedia, excludedTypes };
-  }
-  if (sourceId === 'met_museum') {
-    const disabledMedia = [];
-    document.querySelectorAll('#web-source-settings-body .ws-media-checkbox').forEach(cb => {
-      if (!cb.checked) disabledMedia.push(cb.dataset.medium);
-    });
-    return { disabledMedia };
-  }
-  if (sourceId === 'google_art_wallpaper') {
-    const settings = {};
-    document.querySelectorAll('#web-source-settings-body .ws-boolean-setting').forEach(cb => {
-      settings[cb.dataset.settingKey] = cb.checked;
-    });
-    return settings;
-  }
-  return {};
+function readNonFilterSettingsFromUI(sourceId) {
+  const schema = webSourceSettingsSchemas[sourceId];
+  if (!schema?.fields?.length) return null;
+
+  const settings = {};
+  const boolFields = schema.fields.filter(f => f.type === 'boolean');
+  if (boolFields.length === 0) return null;
+
+  document.querySelectorAll('#web-source-settings-body .ws-boolean-setting').forEach(cb => {
+    settings[cb.dataset.settingKey] = cb.checked;
+  });
+  return settings;
 }
 
 /**
@@ -15393,103 +16264,11 @@ function readWebSourceSettingsFromUI(sourceId) {
 function initWebSourceSettingsInteractions() {
   const body = document.getElementById('web-source-settings-body');
 
-  // Expand/collapse category items
-  body.querySelectorAll('.ws-media-category-header').forEach(header => {
-    header.addEventListener('click', e => {
-      // Don't toggle expand when clicking directly on the category checkbox
-      if (e.target.type === 'checkbox') return;
-      const category = header.closest('.ws-media-category');
-      const items = category.querySelector('.ws-media-category-items');
-      const btn = header.querySelector('.ws-category-toggle-btn');
-      const expanded = items.style.display !== 'none';
-      items.style.display = expanded ? 'none' : '';
-      btn.textContent = expanded ? '▶' : '▼';
-    });
-  });
+  // Generic filter section interactions (checkboxes, text tags, mode toggles)
+  initFilterSectionInteractions(body);
 
-  // Category checkbox → check/uncheck all media in that category
-  body.querySelectorAll('.ws-category-checkbox').forEach(catCb => {
-    catCb.addEventListener('change', () => {
-      const category = catCb.closest('.ws-media-category');
-      category.querySelectorAll('.ws-media-checkbox').forEach(cb => {
-        cb.checked = catCb.checked;
-      });
-      catCb.indeterminate = false;
-    });
-  });
-
-  // Individual media checkbox → update category checkbox state
-  body.querySelectorAll('.ws-media-checkbox').forEach(mediaCb => {
-    mediaCb.addEventListener('change', () => {
-      const category = mediaCb.closest('.ws-media-category');
-      const catCb = category.querySelector('.ws-category-checkbox');
-      const all = Array.from(category.querySelectorAll('.ws-media-checkbox'));
-      const checkedCount = all.filter(c => c.checked).length;
-      if (checkedCount === 0) {
-        catCb.checked = false;
-        catCb.indeterminate = false;
-      } else if (checkedCount === all.length) {
-        catCb.checked = true;
-        catCb.indeterminate = false;
-      } else {
-        catCb.checked = false;
-        catCb.indeterminate = true;
-      }
-    });
-  });
-
-  // Select All / Select None buttons
-  body.querySelector('#ws-select-all')?.addEventListener('click', () => {
-    body.querySelectorAll('.ws-media-checkbox').forEach(cb => { cb.checked = true; });
-    body.querySelectorAll('.ws-category-checkbox').forEach(cb => {
-      cb.checked = true;
-      cb.indeterminate = false;
-    });
-  });
-  body.querySelector('#ws-select-none')?.addEventListener('click', () => {
-    body.querySelectorAll('.ws-media-checkbox').forEach(cb => { cb.checked = false; });
-    body.querySelectorAll('.ws-category-checkbox').forEach(cb => {
-      cb.checked = false;
-      cb.indeterminate = false;
-    });
-  });
-
-  // Excluded types: add via input, remove via × button
-  function addExcludedType(value) {
-    const trimmed = value.trim().toLowerCase();
-    if (!trimmed) return;
-    const list = body.querySelector('#ws-excluded-types-list');
-    if (!list) return;
-    if (list.querySelector(`.ws-type-tag[data-type="${CSS.escape(trimmed)}"]`)) return; // already present
-    const span = document.createElement('span');
-    span.className = 'ws-type-tag';
-    span.dataset.type = trimmed;
-    span.innerHTML = `${escapeHtml(trimmed)}<button type="button" class="ws-type-tag-remove" aria-label="Remove">×</button>`;
-    span.querySelector('.ws-type-tag-remove').addEventListener('click', () => span.remove());
-    list.appendChild(span);
-  }
-
-  body.querySelectorAll('#ws-excluded-types-list .ws-type-tag-remove').forEach(btn => {
-    btn.addEventListener('click', () => btn.closest('.ws-type-tag').remove());
-  });
-
-  body.querySelector('#ws-excluded-type-add')?.addEventListener('click', () => {
-    const input = body.querySelector('#ws-excluded-type-input');
-    addExcludedType(input.value);
-    input.value = '';
-    input.focus();
-  });
-
-  body.querySelector('#ws-excluded-type-input')?.addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      const input = body.querySelector('#ws-excluded-type-input');
-      addExcludedType(input.value);
-      input.value = '';
-    }
-  });
-
-  body.querySelector('#ws-clear-cookies-btn')?.addEventListener('click', async function () {
+  // Cookie clear button (any source with hasCookies capability)
+  body.querySelector('.ws-clear-cookies-btn')?.addEventListener('click', async function () {
     const sourceId = this.dataset.sourceId;
     this.disabled = true;
     this.textContent = 'Clearing…';
@@ -15512,121 +16291,7 @@ function initWebSourceSettingsInteractions() {
   });
 }
 
-// ── Source-specific settings renderers ───────────────────────────────────────
-
-function renderGoogleArtsSettings(schema, currentSettings) {
-  const disabledSet = new Set((currentSettings.disabledMedia || []).map(m => m.toLowerCase()));
-  const categories = schema.mediaCategories || [];
-  const excludedTypes = currentSettings.excludedTypes ?? schema.defaultExcludedTypes ?? [];
-
-  let html = `<div style="padding:14px 16px;">
-    <p style="margin:0 0 12px;font-size:13px;color:#555;">
-      Select which media types to include when fetching random artwork. Only enabled media will be chosen.
-    </p>
-    <div class="ws-media-toolbar">
-      <button type="button" id="ws-select-all" class="btn-secondary btn-small">Select All</button>
-      <button type="button" id="ws-select-none" class="btn-secondary btn-small">Select None</button>
-    </div>
-    <div class="ws-media-categories">`;
-
-  for (const cat of categories) {
-    const mediaInCat = cat.media || [];
-    const checkedCount = mediaInCat.filter(m => !disabledSet.has(m.toLowerCase())).length;
-    const allChecked = checkedCount === mediaInCat.length;
-    const noneChecked = checkedCount === 0;
-    const catChecked = allChecked ? 'checked' : '';
-    const catIndeterminate = (!allChecked && !noneChecked) ? 'data-indeterminate="true"' : '';
-
-    html += `<div class="ws-media-category">
-      <div class="ws-media-category-header">
-        <label class="ws-category-label" onclick="event.stopPropagation()">
-          <input type="checkbox" class="ws-category-checkbox" ${catChecked} ${catIndeterminate}>
-          ${escapeHtml(cat.name)}
-        </label>
-        <button type="button" class="ws-category-toggle-btn" title="Expand/collapse">▼</button>
-      </div>
-      <div class="ws-media-category-items">`;
-
-    for (const medium of mediaInCat) {
-      const isEnabled = !disabledSet.has(medium.toLowerCase());
-      html += `<label class="ws-media-item">
-        <input type="checkbox" class="ws-media-checkbox" data-medium="${escapeHtml(medium)}" ${isEnabled ? 'checked' : ''}>
-        ${escapeHtml(medium)}
-      </label>`;
-    }
-
-    html += `</div></div>`;
-  }
-
-  html += `</div></div>`;
-
-  const typeTags = excludedTypes.map(t =>
-    `<span class="ws-type-tag" data-type="${escapeHtml(t)}">${escapeHtml(t)}<button type="button" class="ws-type-tag-remove" aria-label="Remove">×</button></span>`
-  ).join('');
-  html += `<div class="ws-mapping-section">
-    <h4>Excluded Object Types</h4>
-    <p class="pool-health-description">Artworks whose <em>Type</em> field matches any of these values (case-insensitive) are skipped during random selection. Add values as you encounter unwanted object types.</p>
-    <div id="ws-excluded-types-list" class="ws-type-tags">${typeTags}</div>
-    <div class="ws-type-add-row">
-      <input type="text" id="ws-excluded-type-input" class="ws-type-input" placeholder="e.g. drawing">
-      <button type="button" id="ws-excluded-type-add" class="btn-secondary btn-small">Add</button>
-    </div>
-  </div>`;
-
-  html += `<div class="ws-mapping-section">
-    <h4>Session Cookies</h4>
-    <p class="pool-health-description">Google Arts &amp; Culture uses session cookies to reduce rate limiting. Cookies are seeded automatically on the first fetch. If fetches are failing with 429 errors, clearing the cookie jar forces a fresh session.</p>
-    <button type="button" id="ws-clear-cookies-btn" class="btn-secondary btn-small" data-source-id="google_arts">Clear Cookie Jar</button>
-  </div>`;
-  return html;
-}
-
-function renderMetMuseumSettings(schema, currentSettings) {
-  const disabledSet = new Set((currentSettings.disabledMedia || []).map(m => m.toLowerCase()));
-  const categories = schema.mediaCategories || [];
-
-  let html = `<div style="padding:14px 16px;">
-    <p style="margin:0 0 12px;font-size:13px;color:#555;">
-      Select which categories to include when fetching random artwork. Only enabled categories will be chosen.
-    </p>
-    <div class="ws-media-toolbar">
-      <button type="button" id="ws-select-all" class="btn-secondary btn-small">Select All</button>
-      <button type="button" id="ws-select-none" class="btn-secondary btn-small">Select None</button>
-    </div>
-    <div class="ws-media-categories">`;
-
-  for (const cat of categories) {
-    const mediaInCat = cat.media || [];
-    const checkedCount = mediaInCat.filter(m => !disabledSet.has(m.toLowerCase())).length;
-    const allChecked = checkedCount === mediaInCat.length;
-    const noneChecked = checkedCount === 0;
-    const catChecked = allChecked ? 'checked' : '';
-    const catIndeterminate = (!allChecked && !noneChecked) ? 'data-indeterminate="true"' : '';
-
-    html += `<div class="ws-media-category">
-      <div class="ws-media-category-header">
-        <label class="ws-category-label" onclick="event.stopPropagation()">
-          <input type="checkbox" class="ws-category-checkbox" ${catChecked} ${catIndeterminate}>
-          ${escapeHtml(cat.name)}
-        </label>
-        <button type="button" class="ws-category-toggle-btn" title="Expand/collapse">▼</button>
-      </div>
-      <div class="ws-media-category-items">`;
-
-    for (const medium of mediaInCat) {
-      const isEnabled = !disabledSet.has(medium.toLowerCase());
-      html += `<label class="ws-media-item">
-        <input type="checkbox" class="ws-media-checkbox" data-medium="${escapeHtml(medium)}" ${isEnabled ? 'checked' : ''}>
-        ${escapeHtml(medium)}
-      </label>`;
-    }
-
-    html += `</div></div>`;
-  }
-
-  html += `</div></div>`;
-  return html;
-}
+// Legacy source-specific renderers removed — now using generic renderSourceFilters().
 
 // Wire up the settings modal close/save buttons (called once at startup)
 function initWebSourceSettingsModal() {
@@ -15722,13 +16387,6 @@ function buildMappingOptionsHtml(currentValue) {
   return html;
 }
 
-// Client-side copy of source display names.
-const BUILTIN_SOURCES_CLIENT = {
-  google_arts:         { name: 'Google Arts & Culture' },
-  google_art_wallpaper:{ name: 'Google Art Wallpaper' },
-  met_museum:          { name: 'The Metropolitan Museum of Art' },
-};
-
 async function resetSourceMapping(sourceId) {
   try {
     const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/metadata-mapping`, {
@@ -15747,7 +16405,7 @@ async function resetSourceMapping(sourceId) {
         document.querySelector('#web-source-settings-body .ws-reset-mapping-btn')
           ?.addEventListener('click', () => resetSourceMapping(sourceId));
       }
-      const sourceName = BUILTIN_SOURCES_CLIENT[sourceId]?.name || sourceId;
+      const sourceName = webSourcesConfig?.sources?.[sourceId]?.name || sourceId;
       showToast(`Mapping reset to auto-detected for ${sourceName}`);
     } else {
       throw new Error(data.error || 'Failed to reset');
@@ -15758,13 +16416,391 @@ async function resetSourceMapping(sourceId) {
   }
 }
 
+// ── Virtual Tags ──────────────────────────────────────────────────────────────
+
+let virtualTagEditingId = null; // null = creating, string = editing existing tag
+
+function renderVirtualTagsList() {
+  const container = document.getElementById('ws-virtual-tags-list');
+  if (!container) return;
+
+  const virtualTags = webSourcesConfig?.virtualTags || {};
+  const tagEntries = Object.entries(virtualTags);
+
+  if (tagEntries.length === 0) {
+    container.innerHTML = '<p class="empty-state">No virtual tags defined yet.</p>';
+  } else {
+    let html = '<div class="ws-virtual-tags-cards">';
+    for (const [id, tag] of tagEntries) {
+      const sourceName = webSourcesConfig?.sources?.[tag.sourceId]?.name || tag.sourceId;
+      const filterSummary = summarizeFilters(tag.filters || []);
+      html += `
+        <div class="ws-virtual-tag-card" data-tag-id="${escapeHtml(id)}">
+          <div class="ws-virtual-tag-info">
+            <strong>${escapeHtml(tag.label)}</strong>
+            <span class="ws-virtual-tag-id">ws:${escapeHtml(id)}</span>
+            <span class="web-source-description">${escapeHtml(sourceName)}${filterSummary ? ' — ' + escapeHtml(filterSummary) : ''}</span>
+          </div>
+          <div class="ws-virtual-tag-actions">
+            <button type="button" class="btn-secondary btn-small ws-virtual-tag-edit" data-tag-id="${escapeHtml(id)}">Edit</button>
+            <button type="button" class="btn-secondary btn-small ws-virtual-tag-delete" data-tag-id="${escapeHtml(id)}">Delete</button>
+          </div>
+        </div>`;
+    }
+    html += '</div>';
+    container.innerHTML = html;
+  }
+
+  // Bind add button
+  document.getElementById('ws-add-virtual-tag-btn')?.addEventListener('click', () => openVirtualTagModal(null));
+
+  // Bind edit/delete buttons
+  container.querySelectorAll('.ws-virtual-tag-edit').forEach(btn => {
+    btn.addEventListener('click', () => openVirtualTagModal(btn.dataset.tagId));
+  });
+  container.querySelectorAll('.ws-virtual-tag-delete').forEach(btn => {
+    btn.addEventListener('click', () => deleteVirtualTag(btn.dataset.tagId));
+  });
+}
+
+function summarizeFilters(filters) {
+  if (!filters || filters.length === 0) return '';
+  return filters.map(f => {
+    const modeLabel = f.mode === 'require' ? 'only' : 'excl.';
+    const vals = f.values.length <= 3
+      ? f.values.join(', ')
+      : `${f.values.slice(0, 2).join(', ')} +${f.values.length - 2}`;
+    return `${f.type}: ${modeLabel} ${vals}`;
+  }).join('; ');
+}
+
+function openVirtualTagModal(tagId) {
+  virtualTagEditingId = tagId;
+  const isEdit = !!tagId;
+  const tag = isEdit ? (webSourcesConfig?.virtualTags?.[tagId] || {}) : {};
+
+  document.getElementById('ws-virtual-tag-modal-title').textContent =
+    isEdit ? 'Edit Virtual Tag' : 'New Virtual Tag';
+
+  const sources = webSourcesConfig?.sources || {};
+  const sourceOptions = Object.entries(sources).map(([id, s]) =>
+    `<option value="${escapeHtml(id)}" ${tag.sourceId === id ? 'selected' : ''}>${escapeHtml(s.name || id)}</option>`
+  ).join('');
+
+  const body = document.getElementById('ws-virtual-tag-modal-body');
+  body.innerHTML = `
+    <div style="padding:14px 16px;">
+      <div class="form-group-compact" style="margin-bottom:14px;">
+        <label class="ws-global-label">Label</label>
+        <input type="text" id="ws-vt-label" class="ws-type-input" style="width:100%;" placeholder="e.g. Impressionist Paintings" value="${escapeHtml(tag.label || '')}">
+      </div>
+      <div class="form-group-compact" style="margin-bottom:14px;">
+        <label class="ws-global-label">ID <span style="font-weight:normal;color:#888;">(used as tag name: ws:&lt;id&gt;)</span></label>
+        <input type="text" id="ws-vt-id" class="ws-type-input" style="width:100%;" placeholder="e.g. impressionist-paintings" value="${escapeHtml(tagId || '')}" ${isEdit ? 'disabled' : ''}>
+        <p class="pool-health-description" style="margin-top:4px;">Lowercase letters, numbers, hyphens, and underscores only.</p>
+      </div>
+      <div class="form-group-compact" style="margin-bottom:14px;">
+        <label class="ws-global-label">Source</label>
+        <select id="ws-vt-source" class="ws-select" style="width:100%;">
+          <option value="">— Select a source —</option>
+          ${sourceOptions}
+        </select>
+      </div>
+      <div class="ws-filters-section">
+        <label class="ws-section-label">Filters</label>
+        <p class="pool-health-description">Narrow results for this virtual tag. Inherited global and source filters are shown locked.</p>
+        <div id="ws-vt-filters-container">
+          ${tag.sourceId ? renderVirtualTagFilters(tag.sourceId, tag.filters || []) : '<p class="pool-health-description" style="font-style:italic;">Select a source to configure filters.</p>'}
+        </div>
+      </div>
+    </div>`;
+
+  // Auto-generate ID from label (only on create)
+  if (!isEdit) {
+    const labelInput = body.querySelector('#ws-vt-label');
+    const idInput = body.querySelector('#ws-vt-id');
+    labelInput.addEventListener('input', () => {
+      idInput.value = labelInput.value.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    });
+  }
+
+  // Source change re-renders filters
+  body.querySelector('#ws-vt-source').addEventListener('change', (e) => {
+    const sourceId = e.target.value;
+    const filtersContainer = document.getElementById('ws-vt-filters-container');
+    if (sourceId) {
+      initVirtualTagFilterList(filtersContainer, sourceId, []);
+    } else {
+      filtersContainer.innerHTML = '<p class="pool-health-description">Select a source to configure filters.</p>';
+    }
+  });
+
+  // Init filter interactions for pre-rendered filters
+  const filtersContainer = document.getElementById('ws-vt-filters-container');
+  if (tag.sourceId) {
+    initVirtualTagFilterList(filtersContainer, tag.sourceId, tag.filters || [], true);
+  }
+
+  document.getElementById('ws-virtual-tag-modal').classList.add('active');
+}
+
+/**
+ * Render filter sections for a virtual tag.
+ * Similar to renderSourceFilters but uses a different data-source-id prefix
+ * and defaults all checkboxes to unchecked (require mode) for new virtual tags.
+ */
+/**
+ * Render and init a virtual tag filter list inside the given container.
+ * @param {boolean} [skipRender] - If true, skip innerHTML (already rendered), just init interactions.
+ */
+function initVirtualTagFilterList(container, sourceId, currentFilters, skipRender = false, expandedTypes = null) {
+  if (!skipRender) {
+    container.innerHTML = renderVirtualTagFilters(sourceId, currentFilters, expandedTypes);
+  }
+  initFilterSectionInteractions(container);
+  container.querySelectorAll('.ws-category-checkbox[data-indeterminate="true"]').forEach(cb => {
+    cb.indeterminate = true;
+  });
+  initFilterListInteractions(container, {
+    onAdd: (filterType, filterMode) => {
+      const filters = readVirtualTagFiltersFromUI();
+      const mode = filterMode || 'require';
+      filters.push({ type: filterType, mode, values: [] });
+      initVirtualTagFilterList(container, sourceId, filters, false, new Set([`${filterType}:${mode}`]));
+    },
+    onRemove: (filterType, filterMode) => {
+      const filters = readVirtualTagFiltersFromUI().filter(f => !(f.type === filterType && (!filterMode || f.mode === filterMode)));
+      initVirtualTagFilterList(container, sourceId, filters);
+    },
+  });
+}
+
+function renderVirtualTagFilters(sourceId, currentFilters, expandedTypes) {
+  const sourceFilterTypes = webSourceFilterTypes[sourceId] || [];
+  const coreTypes = webSourceCoreFilterTypes || [];
+  const allFilterTypes = [...coreTypes, ...sourceFilterTypes];
+  // Both global and source-level filters are locked (inherited).
+  const globalFilters = webSourcesConfig?.globalFilters || [];
+  const sourceFilters = webSourcesConfig?.sources?.[sourceId]?.filters || [];
+  const lockedFilters = [...globalFilters, ...sourceFilters];
+
+  return renderFilterList({
+    containerId: `ws-vt-filters-${sourceId}`,
+    availableFilterTypes: allFilterTypes,
+    currentFilters,
+    lockedFilters,
+    sourceId,
+    expandedTypes,
+  });
+}
+
+function readVirtualTagFiltersFromUI() {
+  const container = document.getElementById('ws-vt-filters-container');
+  if (!container) return [];
+  const sourceId = document.getElementById('ws-vt-source')?.value;
+  if (!sourceId) return [];
+
+  const filters = [];
+
+  // Search filters
+  container.querySelectorAll(`.ws-filter-search-value[data-source-id="${CSS.escape(sourceId)}"]`).forEach(input => {
+    const val = input.value.trim();
+    if (val) {
+      filters.push({ type: input.dataset.filterType, mode: 'require', values: [val] });
+    }
+  });
+
+  container.querySelectorAll(`.ws-filter-section[data-source-id="${CSS.escape(sourceId)}"]`).forEach(section => {
+    const filterType = section.dataset.filterType;
+    const filterTypeDef = (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType);
+    if (!filterTypeDef) return;
+
+    const parentEntry = section.closest('.ws-filter-entry');
+    const entryMode = parentEntry?.dataset?.filterMode;
+    const modeRadio = section.querySelector('.ws-filter-mode-radio:checked');
+
+    if (filterTypeDef.inputStyle === 'text') {
+      const values = [];
+      section.querySelectorAll('.ws-type-tag:not(.ws-type-tag-locked)').forEach(tag => values.push(tag.dataset.type));
+      if (values.length > 0) {
+        filters.push({ type: filterType, mode: entryMode || 'exclude', values });
+      }
+    } else {
+      const mode = entryMode || modeRadio?.value || filterTypeDef.modes[0] || 'require';
+      const allValues = [];
+      const checkedValues = [];
+      section.querySelectorAll('.ws-filter-value-checkbox:not(:disabled)').forEach(cb => {
+        allValues.push(cb.dataset.value);
+        if (cb.checked) checkedValues.push(cb.dataset.value);
+      });
+
+      // Both modes: checked = in the list
+      if (mode === 'exclude') {
+        if (checkedValues.length > 0) {
+          filters.push({ type: filterType, mode: 'exclude', values: checkedValues });
+        }
+      } else {
+        if (checkedValues.length > 0 && checkedValues.length < allValues.length) {
+          filters.push({ type: filterType, mode: 'require', values: checkedValues });
+        }
+      }
+    }
+  });
+  return filters;
+}
+
+function closeVirtualTagModal() {
+  document.getElementById('ws-virtual-tag-modal').classList.remove('active');
+  virtualTagEditingId = null;
+}
+
+async function saveVirtualTag() {
+  const isEdit = virtualTagEditingId !== null;
+  const id = isEdit ? virtualTagEditingId : document.getElementById('ws-vt-id')?.value?.trim();
+  const label = document.getElementById('ws-vt-label')?.value?.trim();
+  const sourceId = document.getElementById('ws-vt-source')?.value;
+  const filters = readVirtualTagFiltersFromUI();
+
+  if (!id || !/^[a-z0-9_-]+$/.test(id)) {
+    showToast('ID must be a lowercase slug (a-z, 0-9, hyphens, underscores)', 'error');
+    return;
+  }
+  if (!label) {
+    showToast('Label is required', 'error');
+    return;
+  }
+  if (!sourceId) {
+    showToast('Please select a source', 'error');
+    return;
+  }
+
+  const saveBtn = document.getElementById('ws-virtual-tag-save');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving\u2026'; }
+
+  try {
+    const url = isEdit
+      ? `${API_BASE}/web-sources/virtual-tags/${encodeURIComponent(id)}`
+      : `${API_BASE}/web-sources/virtual-tags`;
+    const method = isEdit ? 'PUT' : 'POST';
+    const body = isEdit
+      ? { label, sourceId, filters }
+      : { id, label, sourceId, filters };
+
+    const response = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'Failed to save virtual tag');
+
+    // Update local cache
+    if (!webSourcesConfig.virtualTags) webSourcesConfig.virtualTags = {};
+    webSourcesConfig.virtualTags[id] = data.virtualTag;
+
+    closeVirtualTagModal();
+    renderVirtualTagsList();
+    renderWebSourcesTestSection();
+    showToast(isEdit ? 'Virtual tag updated' : `Virtual tag created: ws:${id}`);
+  } catch (error) {
+    console.error('Error saving virtual tag:', error);
+    showToast(`Error: ${error.message}`, 'error');
+  } finally {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+  }
+}
+
+async function deleteVirtualTag(tagId) {
+  const tag = webSourcesConfig?.virtualTags?.[tagId];
+  if (!tag) return;
+  if (!confirm(`Delete virtual tag "${tag.label}" (ws:${tagId})?`)) return;
+
+  try {
+    const response = await fetch(`${API_BASE}/web-sources/virtual-tags/${encodeURIComponent(tagId)}`, {
+      method: 'DELETE',
+    });
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'Failed to delete virtual tag');
+
+    delete webSourcesConfig.virtualTags[tagId];
+    renderVirtualTagsList();
+    renderWebSourcesTestSection();
+    showToast(`Virtual tag "ws:${tagId}" deleted`);
+  } catch (error) {
+    console.error('Error deleting virtual tag:', error);
+    showToast(`Error: ${error.message}`, 'error');
+  }
+}
+
+function initVirtualTagModal() {
+  document.getElementById('ws-virtual-tag-close')?.addEventListener('click', closeVirtualTagModal);
+  document.getElementById('ws-virtual-tag-cancel')?.addEventListener('click', closeVirtualTagModal);
+  document.getElementById('ws-virtual-tag-save')?.addEventListener('click', saveVirtualTag);
+  document.getElementById('ws-virtual-tag-modal')?.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeVirtualTagModal();
+  });
+}
+
 function renderWebSourcesTestSection() {
   const container = document.getElementById('web-sources-test-section');
   if (!container) return;
 
   const testCache = webSourcesConfig?.testCache || null;
+  const virtualTags = webSourcesConfig?.virtualTags || {};
+  const sources = webSourcesConfig?.sources || {};
 
-  let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
+  // Build virtual tag options
+  const vtOptions = Object.entries(virtualTags).map(([id, vt]) => {
+    const srcName = sources[vt.sourceId]?.name || vt.sourceId;
+    return `<option value="${escapeHtml(id)}" ${webSourceTestVirtualTagId === id ? 'selected' : ''}>${escapeHtml(vt.label)} (${escapeHtml(srcName)})</option>`;
+  }).join('');
+
+  // Build source options for ad-hoc mode
+  const sourceOptions = Object.entries(sources).map(([id, src]) =>
+    `<option value="${escapeHtml(id)}" ${webSourceTestAdHocSourceId === id ? 'selected' : ''}>${escapeHtml(src.name)}</option>`
+  ).join('');
+
+  let html = '';
+
+  // Test mode tabs
+  html += `<div class="ws-test-modes">
+    <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'virtual-tag' ? 'active' : ''}" data-mode="virtual-tag">Virtual Tag</button>
+    <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'ad-hoc' ? 'active' : ''}" data-mode="ad-hoc">Ad-hoc</button>
+    <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'specific' ? 'active' : ''}" data-mode="specific">Specific Image</button>
+  </div>`;
+
+  // Virtual Tag mode
+  html += `<div class="ws-test-mode-panel" id="ws-test-panel-virtual-tag" style="${webSourceTestMode === 'virtual-tag' ? '' : 'display:none;'}">
+    <div style="margin-bottom:10px;">
+      <select id="ws-test-virtual-tag" class="ws-select" style="width:100%;">
+        <option value="">— Select a virtual tag —</option>
+        ${vtOptions}
+      </select>
+    </div>
+  </div>`;
+
+  // Ad-hoc mode
+  html += `<div class="ws-test-mode-panel" id="ws-test-panel-ad-hoc" style="${webSourceTestMode === 'ad-hoc' ? '' : 'display:none;'}">
+    <div style="margin-bottom:10px;">
+      <select id="ws-test-ad-hoc-source" class="ws-select" style="width:100%;">
+        <option value="">— Select a source —</option>
+        ${sourceOptions}
+      </select>
+    </div>
+    <div id="ws-test-ad-hoc-filters"></div>
+  </div>`;
+
+  // Specific Image mode
+  html += `<div class="ws-test-mode-panel" id="ws-test-panel-specific" style="${webSourceTestMode === 'specific' ? '' : 'display:none;'}">
+    <div style="margin-bottom:10px;">
+      <input type="text" id="web-source-specific-image" placeholder="Met Museum ID, collection URL, or direct image URL"
+             class="ws-type-input" style="width:100%;"
+             value="${escapeHtml(webSourceSpecificImage || '')}">
+    </div>
+  </div>`;
+
+  // Common controls: orientation + buttons
+  html += `<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
     <button type="button" id="web-source-test-fetch-btn" class="btn-secondary btn-small">Fetch Test Image</button>
     ${testCache ? `<button type="button" id="web-source-test-reprocess-btn" class="btn-secondary btn-small">Reprocess</button>` : ''}
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;">
@@ -15776,11 +16812,6 @@ function renderWebSourcesTestSection() {
         <input type="radio" name="ws-test-orientation" value="portrait" ${webSourceTestOrientation === 'portrait' ? 'checked' : ''}> Portrait
       </label>
     </div>
-  </div>
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
-    <input type="text" id="web-source-specific-image" placeholder="Specific image: Met Museum ID, URL, or direct image URL (optional)"
-           style="flex:1;min-width:0;padding:5px 8px;font-size:13px;border:1px solid var(--border-color,#ddd);border-radius:4px;background:var(--input-bg,#fff);color:var(--text-primary,#333);"
-           value="${escapeHtml(webSourceSpecificImage || '')}">
   </div>`;
 
   if (testCache) {
@@ -15886,10 +16917,41 @@ function renderWebSourcesTestSection() {
            onerror="this.style.display='none'">
     </div>`;
 
+    // Fetch trace section
+    const ft = testCache.fetchTrace;
+    let traceHtml = '';
+    if (ft) {
+      const traceRows = [];
+      const pathLabels = { 'virtual-tag': 'Virtual Tag', 'ad-hoc': 'Ad-hoc', 'specific': 'Specific Image' };
+      traceRows.push(['Fetch path', pathLabels[ft.path] || ft.path]);
+      if (ft.virtualTagId) {
+        const vtLabel = webSourcesConfig?.virtualTags?.[ft.virtualTagId]?.label || ft.virtualTagId;
+        traceRows.push(['Virtual tag', `${vtLabel} (${ft.virtualTagId})`]);
+      }
+      traceRows.push(['Source', testCache.sourceId]);
+      if (ft.mode) traceRows.push(['Mode', ft.mode]);
+      if (ft.aspectRatio && ft.aspectRatio !== 'all') traceRows.push(['Aspect ratio', ft.aspectRatio]);
+      if (ft.mergedFilters?.length > 0) {
+        const filterSummary = ft.mergedFilters.map(f => {
+          const modeLabel = f.mode === 'require' ? 'include' : 'exclude';
+          return `${f.type} (${modeLabel}): ${f.values.join(', ')}`;
+        }).join('; ');
+        traceRows.push(['Merged filters', filterSummary]);
+      }
+      if (ft.specificImage) traceRows.push(['Input', ft.specificImage]);
+      traceHtml = `<div style="margin-bottom:12px;">
+        <div style="font-weight:600;margin-bottom:4px;font-size:13px;">Fetch Trace</div>
+        <table style="border-collapse:collapse;font-size:13px;">
+          ${traceRows.map(([k, v]) => `<tr><td style="font-weight:600;padding:3px 12px 3px 0;white-space:nowrap;">${escapeHtml(k)}</td><td>${escapeHtml(String(v))}</td></tr>`).join('')}
+        </table>
+      </div>`;
+    }
+
     html += `<div class="web-source-test-result">
       <div style="display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap;">
         ${rawImg}${preprocessedImg}${processedImg}
       </div>
+      ${traceHtml}
       <table style="border-collapse:collapse;font-size:13px;">${processingInfoRow}${metaRows}${artworkLinkRow}</table>
       ${mappedSection}
     </div>`;
@@ -15897,6 +16959,38 @@ function renderWebSourcesTestSection() {
 
   container.innerHTML = html;
 
+  // Mode tabs
+  container.querySelectorAll('.ws-test-mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      webSourceTestMode = btn.dataset.mode;
+      container.querySelectorAll('.ws-test-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === webSourceTestMode));
+      container.querySelectorAll('.ws-test-mode-panel').forEach(p => {
+        p.style.display = p.id === `ws-test-panel-${webSourceTestMode}` ? '' : 'none';
+      });
+    });
+  });
+
+  // Virtual tag selector
+  document.getElementById('ws-test-virtual-tag')?.addEventListener('change', (e) => {
+    webSourceTestVirtualTagId = e.target.value;
+  });
+
+  // Ad-hoc source selector + filter rendering
+  const adHocSourceSelect = document.getElementById('ws-test-ad-hoc-source');
+  adHocSourceSelect?.addEventListener('change', (e) => {
+    webSourceTestAdHocSourceId = e.target.value;
+    webSourceTestAdHocFilters = [];
+    renderTestAdHocFilters();
+  });
+  // Init ad-hoc filters if source already selected
+  if (webSourceTestAdHocSourceId) renderTestAdHocFilters();
+
+  // Specific image input
+  document.getElementById('web-source-specific-image')?.addEventListener('input', (e) => {
+    webSourceSpecificImage = e.target.value;
+  });
+
+  // Common controls
   document.getElementById('web-source-test-fetch-btn')?.addEventListener('click', fetchTestWebSource);
   document.getElementById('web-source-test-reprocess-btn')?.addEventListener('click', reprocessTestWebSource);
   container.querySelectorAll('input[name="ws-test-orientation"]').forEach(radio => {
@@ -15904,9 +16998,106 @@ function renderWebSourcesTestSection() {
       if (radio.checked) webSourceTestOrientation = radio.value;
     });
   });
-  document.getElementById('web-source-specific-image')?.addEventListener('input', (e) => {
-    webSourceSpecificImage = e.target.value;
+}
+
+/**
+ * Render the ad-hoc filter editor inside the test panel.
+ * Uses the same renderFilterList + initFilterListInteractions pattern.
+ */
+function renderTestAdHocFilters(expandedTypes) {
+  const filtersContainer = document.getElementById('ws-test-ad-hoc-filters');
+  if (!filtersContainer) return;
+
+  const sourceId = webSourceTestAdHocSourceId;
+  if (!sourceId) {
+    filtersContainer.innerHTML = '';
+    return;
+  }
+
+  const sourceFilterTypes = webSourceFilterTypes[sourceId] || [];
+  const coreTypes = webSourceCoreFilterTypes || [];
+  const allFilterTypes = [...coreTypes, ...sourceFilterTypes];
+  const globalFilters = webSourcesConfig?.globalFilters || [];
+  const sourceFilters = webSourcesConfig?.sources?.[sourceId]?.filters || [];
+  const lockedFilters = [...globalFilters, ...sourceFilters];
+
+  filtersContainer.innerHTML = renderFilterList({
+    containerId: 'ws-test-ad-hoc-filter-list',
+    availableFilterTypes: allFilterTypes,
+    currentFilters: webSourceTestAdHocFilters,
+    lockedFilters,
+    sourceId,
+    expandedTypes,
   });
+
+  initFilterSectionInteractions(filtersContainer);
+  filtersContainer.querySelectorAll('.ws-category-checkbox[data-indeterminate="true"]').forEach(cb => {
+    cb.indeterminate = true;
+  });
+  initFilterListInteractions(filtersContainer, {
+    onAdd: (filterType, filterMode) => {
+      webSourceTestAdHocFilters = readTestAdHocFiltersFromUI();
+      const mode = filterMode || 'require';
+      webSourceTestAdHocFilters.push({ type: filterType, mode, values: [] });
+      renderTestAdHocFilters(new Set([`${filterType}:${mode}`]));
+    },
+    onRemove: (filterType, filterMode) => {
+      webSourceTestAdHocFilters = readTestAdHocFiltersFromUI().filter(f => !(f.type === filterType && (!filterMode || f.mode === filterMode)));
+      renderTestAdHocFilters();
+    },
+  });
+}
+
+/**
+ * Read ad-hoc filter values from the test panel UI.
+ */
+function readTestAdHocFiltersFromUI() {
+  const container = document.getElementById('ws-test-ad-hoc-filters');
+  if (!container) return [];
+  const sourceId = webSourceTestAdHocSourceId;
+  if (!sourceId) return [];
+
+  const filters = [];
+  container.querySelectorAll('.ws-filter-entry:not(.ws-filter-entry-locked)').forEach(entry => {
+    const filterType = entry.dataset.filterType;
+    if (!filterType) return;
+    // Core single-value filter (e.g. orientation)
+    const coreSelect = entry.querySelector('.ws-filter-core-value');
+    if (coreSelect) {
+      filters.push({ type: filterType, mode: 'require', values: [coreSelect.value] });
+      return;
+    }
+    // Search filter (single-value text input)
+    const searchInput = entry.querySelector('.ws-filter-search-value');
+    if (searchInput) {
+      const val = searchInput.value.trim();
+      if (val) filters.push({ type: filterType, mode: 'require', values: [val] });
+      return;
+    }
+    // Checkbox filter — read mode from entry's data-filter-mode (authoritative in dual-mode)
+    const entryMode = entry.dataset.filterMode;
+    const section = entry.querySelector(`.ws-filter-section[data-filter-type="${filterType}"]`);
+    const modeRadio = section?.querySelector('.ws-filter-mode-radio:checked');
+    const mode = entryMode || modeRadio?.value || 'require';
+    const checkedValues = [];
+    entry.querySelectorAll(`.ws-filter-checkbox[data-source-id="${sourceId}"][data-filter-type="${filterType}"]:checked:not(:disabled)`).forEach(cb => {
+      checkedValues.push(cb.value);
+    });
+    if (mode === 'exclude') {
+      if (checkedValues.length > 0) {
+        filters.push({ type: filterType, mode: 'exclude', values: checkedValues });
+      }
+    } else {
+      const allValues = [];
+      entry.querySelectorAll(`.ws-filter-checkbox[data-source-id="${sourceId}"][data-filter-type="${filterType}"]:not(:disabled)`).forEach(cb => {
+        allValues.push(cb.value);
+      });
+      if (checkedValues.length < allValues.length) {
+        filters.push({ type: filterType, mode: 'require', values: checkedValues });
+      }
+    }
+  });
+  return filters;
 }
 
 async function fetchTestWebSource() {
@@ -15914,14 +17105,33 @@ async function fetchTestWebSource() {
   if (btn) { btn.disabled = true; btn.textContent = 'Fetching…'; }
 
   try {
+    const body = { tvOrientation: webSourceTestOrientation };
+
+    if (webSourceTestMode === 'specific') {
+      if (!webSourceSpecificImage?.trim()) throw new Error('Enter an image URL or ID');
+      body.specificImage = webSourceSpecificImage;
+    } else if (webSourceTestMode === 'ad-hoc') {
+      if (!webSourceTestAdHocSourceId) throw new Error('Select a source');
+      body.sourceId = webSourceTestAdHocSourceId;
+      body.filters = readTestAdHocFiltersFromUI();
+    } else {
+      // virtual-tag mode
+      if (!webSourceTestVirtualTagId) throw new Error('Select a virtual tag');
+      body.virtualTagId = webSourceTestVirtualTagId;
+    }
+
     const response = await fetch(`${API_BASE}/web-sources/test-fetch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tvOrientation: webSourceTestOrientation, specificImage: webSourceSpecificImage || undefined }),
+      body: JSON.stringify(body),
     });
     const data = await response.json();
     if (!data.success) throw new Error(data.error || 'Failed to fetch test image');
     if (webSourcesConfig) webSourcesConfig.testCache = data.testCache;
+    // Preserve ad-hoc filters across re-render
+    if (webSourceTestMode === 'ad-hoc') {
+      webSourceTestAdHocFilters = readTestAdHocFiltersFromUI();
+    }
     renderWebSourcesTestSection();
   } catch (error) {
     console.error('Error fetching test image:', error);

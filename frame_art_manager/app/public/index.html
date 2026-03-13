@@ -433,6 +433,15 @@
             </div>
             <div id="web-sources-list" class="loading-indicator">Loading sources...</div>
           </div>
+          <!-- Virtual Tags -->
+          <div class="subsection subsection-no-card">
+            <div class="tagsets-header">
+              <h3>Virtual Tags</h3>
+              <button type="button" id="ws-add-virtual-tag-btn" class="btn-primary btn-small">Add Virtual Tag</button>
+            </div>
+            <p class="pool-health-description">Virtual tags let you create filtered presets for web sources. Each virtual tag targets a specific source with its own filter criteria, and appears as a tag (e.g. <code>ws:paintings</code>) that you can add to tagsets in the HA integration.</p>
+            <div id="ws-virtual-tags-list"></div>
+          </div>
           <!-- Test -->
           <div class="subsection subsection-no-card">
             <h3>Test</h3>
@@ -1337,6 +1346,20 @@
       <div class="ws-settings-modal-footer">
         <button type="button" id="web-source-settings-cancel" class="btn-secondary">Cancel</button>
         <button type="button" id="web-source-settings-save" class="btn-primary">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="ws-virtual-tag-modal" class="modal">
+    <div class="modal-content ws-settings-modal">
+      <div class="ws-settings-modal-header">
+        <h3 id="ws-virtual-tag-modal-title">New Virtual Tag</h3>
+        <button class="close close-simple" id="ws-virtual-tag-close">✕</button>
+      </div>
+      <div class="modal-body-scroll" id="ws-virtual-tag-modal-body"></div>
+      <div class="ws-settings-modal-footer">
+        <button type="button" id="ws-virtual-tag-cancel" class="btn-secondary">Cancel</button>
+        <button type="button" id="ws-virtual-tag-save" class="btn-primary">Save</button>
       </div>
     </div>
   </div>
