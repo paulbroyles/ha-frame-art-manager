@@ -18,9 +18,10 @@ Source modules are responsible only for fetching and filtering.
 1. Create `frame_art_manager/app/sources/<source_id>.js` following the contract below.
 2. Add the module to `SOURCE_MODULES` in `web_sources.js` (order matters — more-specific `canHandleIdentifier` patterns should come first).
 3. Add a `BUILTIN_SOURCES` entry in `web_sources.js`.
-4. If the source has configurable media categories, export `settingsSchema` and `buildFetcherOptions`.
-5. If the source has stable per-artwork identifiers, export `fetchByIdentifier` and `canHandleIdentifier`.
-6. Create `docs/art_sources/<SOURCE>.md` documenting the external API, selection strategy, and any limitations.
+4. If the source has filterable dimensions (e.g. media categories, object types), export `getFilterTypes()`.
+5. If the source has non-filter options derived from settings (e.g. fetchRichMetadata), export `getExtraOptions(settings)`.
+6. If the source has stable per-artwork identifiers, export `fetchByIdentifier` and `canHandleIdentifier`.
+7. Create `docs/art_sources/<SOURCE>.md` documenting the external API, selection strategy, and any limitations.
 
 ---
 
@@ -29,15 +30,19 @@ Source modules are responsible only for fetching and filtering.
 ### Required Export
 
 ```js
-async function fetchRandomArtwork(mediaFilter = null, options = {})
+async function fetchRandomArtwork(filters = [], options = {})
 ```
 
 **Parameters:**
 
 | Parameter | Type | Description |
 |---|---|---|
-| `mediaFilter` | `string[] \| null` | Source-specific filter values (e.g. classification names). `null` or `[]` means no filter. Defined by the source's own vocabulary — the route layer passes through whatever `buildFetcherOptions` returns. |
+| `filters` | `Array<{type, mode, values}>` | Generic filter objects. Each has `type` (string matching a declared filter type), `mode` (`'require'` or `'exclude'`), and `values` (string array). Empty array means no filtering. The route layer passes the source's stored filters (and any virtual tag filters layered on top). |
 | `options.aspectRatio` | `'all' \| 'landscape' \| 'portrait'` | Aspect ratio to enforce. Default `'all'`. See _Aspect Ratio_ below. |
+
+Sources must handle unknown filter types gracefully (ignore them). The route layer validates
+filters against `getFilterTypes()` when storing them, but virtual tag filters may introduce
+types the source doesn't know about — these should be silently skipped.
 
 **Return value:**
 
@@ -132,15 +137,46 @@ field will simply not recognize this source's URLs.
 ```js
 // Schema for the settings dialog (omit if source has no user-configurable options)
 const settingsSchema = {
-  mediaCategories: [
-    { name: 'Category Group', media: ['Type A', 'Type B'] },
+  fields: [
+    { key: 'myOption', type: 'boolean', default: false, label: '...', description: '...' },
   ],
 };
 
-// Convert stored settings to fetchRandomArtwork options (omit if not needed)
-function buildFetcherOptions(settings) {
-  // settings.disabledMedia: string[] of disabled category names
-  // Return { mediaFilter: string[] } or {}
+// Declare filterable dimensions for the UI filter builder.
+// Return [] if the source has no filterable dimensions.
+function getFilterTypes() {
+  return [
+    {
+      type: 'media',                // Unique type ID within this source
+      label: 'Medium',             // User-visible label
+      description: 'Filter by art medium',
+      modes: ['require', 'exclude'],  // Which modes this filter supports
+      multiValue: true,               // Can multiple values be selected?
+      values: [                        // Enumerated possible values
+        { value: 'Paintings', label: 'Paintings' },
+        { value: 'Sculpture', label: 'Sculpture' },
+      ],
+      groups: [                        // Optional grouping for the UI
+        { name: 'Fine Art', values: ['Paintings', 'Sculpture'] },
+      ],
+    },
+  ];
+}
+
+// Convert stored source settings to non-filter fetcher options.
+// Only needed when the source has settings that affect fetch behavior
+// but are not part of the filter system (e.g. fetchRichMetadata).
+function getExtraOptions(settings) {
+  return { fetchRichMetadata: !!settings?.fetchRichMetadata };
+}
+
+// If the source pre-processes images to final display resolution (e.g. fixed 3840×2160 crop),
+// export this to skip the image processing pipeline:
+const alreadyProcessed = true;
+
+// If metadata fields vary based on settings, export a function instead of the static array:
+function getMetadataFields(settings) {
+  // Return metadataFields, possibly augmented based on settings
 }
 ```
 
@@ -255,8 +291,8 @@ See existing docs in `docs/art_sources/` as examples.
 POST /api/web-sources/fetch-and-display
   → resolveAspectRatioFilter(webSources, tvOrientation)   // 'match_tv' → concrete value
   → isSourceCompatible(sourceId, aspectRatio)             // skip constrained sources
-  → buildFetcherOptions(sourceId, settings)               // source-specific media filter
-  → fetcher(mediaFilter, { aspectRatio })                 // your fetchRandomArtwork
+  → merge source filters + virtual tag filters            // if virtualTagId provided
+  → fetcher(mergedFilters, { aspectRatio, ...extraOpts }) // your fetchRandomArtwork
   → write image to cache file
   → displayImageOnTV(cachePath, deviceId)
 ```

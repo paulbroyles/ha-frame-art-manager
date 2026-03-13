@@ -67,11 +67,14 @@ const BROAD_QUERY = '*';
  * The free-text `medium` field (e.g. "Oil on canvas") is returned in metadata
  * regardless of how filtering was applied.
  *
- * @param {string[]} [mediaFilter] - Optional list of classification values to
- *   restrict selection (e.g. ['Paintings', 'Drawings']). If omitted or empty,
- *   all objects with images are eligible. Each value is queried separately and
- *   results are unioned — the Met API treats pipe-delimited medium values as
- *   AND (intersection), not OR, so multi-classification queries must be split.
+ * @param {Array<{type: string, mode: 'require'|'exclude', values: string[]}>} [filters=[]]
+ *   Filter objects applied to the eligible category pool.
+ *   Supported filter type: 'media' — values are user-visible category names from MEDIUM_TYPES
+ *   (e.g. 'Paintings', 'Sculpture').
+ *   - require: restrict to categories whose name appears in ALL require filter values (intersection).
+ *   - exclude: remove categories whose name appears in ANY exclude filter value (union).
+ *   Category names are matched case-insensitively and expanded to API classification values
+ *   via CLASSIFICATION_EXPANSIONS before the API search.
  * @param {object} [options]
  * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all'] - Filter by aspect ratio.
  *   Checked against the actual downloaded image dimensions via sharp.
@@ -80,11 +83,41 @@ const BROAD_QUERY = '*';
  * @returns {{ imageBuffer, contentType, metadata: { title, creator, medium, dateCreated, artworkUrl, source } }}
  * @throws {Error} on network/API failure or if no suitable artwork is found.
  */
-async function fetchRandomArtwork(mediaFilter = null, options = {}) {
+async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
   let objectIDs;
 
-  if (!mediaFilter || mediaFilter.length === 0) {
+  // Apply media filters to the eligible category pool.
+  // require: category must appear in ALL require sets (intersection).
+  // exclude: category removed if in ANY exclude set (union).
+  const requireSets = filters
+    .filter(f => f.type === 'media' && f.mode === 'require')
+    .map(f => new Set((f.values || []).map(v => v.toLowerCase())));
+  const excludeValues = new Set(
+    filters
+      .filter(f => f.type === 'media' && f.mode === 'exclude')
+      .flatMap(f => f.values || [])
+      .map(v => v.toLowerCase())
+  );
+
+  let eligibleCategories = MEDIUM_TYPES;
+  if (requireSets.length > 0) {
+    eligibleCategories = eligibleCategories.filter(c => requireSets.every(s => s.has(c.toLowerCase())));
+  }
+  if (excludeValues.size > 0) {
+    eligibleCategories = eligibleCategories.filter(c => !excludeValues.has(c.toLowerCase()));
+  }
+
+  // Derive classification values for the API from the filtered category list.
+  const classificationFilter = eligibleCategories.length < MEDIUM_TYPES.length
+    ? eligibleCategories.flatMap(c => CLASSIFICATION_EXPANSIONS[c] || [c])
+    : null;
+
+  if (eligibleCategories.length === 0) {
+    throw new Error('No categories eligible after applying filters');
+  }
+
+  if (!classificationFilter) {
     // No filter: single search for all public-domain objects with images
     try {
       const response = await axios.get(`${BASE_URL}/search`, {
@@ -100,7 +133,7 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
     // The API's medium= parameter acts as AND for pipe-delimited values,
     // so each classification must be queried separately.
     const idSet = new Set();
-    for (const classification of mediaFilter) {
+    for (const classification of classificationFilter) {
       try {
         const response = await axios.get(`${BASE_URL}/search`, {
           params: { q: BROAD_QUERY, hasImages: true, medium: classification },
@@ -206,27 +239,27 @@ const defaultMapping = {
   source:      null,
 };
 
-// Settings schema for the web source settings dialog.
-const settingsSchema = {
-  mediaCategories: MEDIUM_CATEGORIES,
-};
-
 /**
- * Convert stored source settings to fetcher call options.
+ * Returns the filter types this source supports.
+ * Consumed by GET /api/web-sources/sources/:sourceId/filter-types and the UI filter builder.
  *
- * settings.disabledMedia: string[] — category names to exclude.
- * Each category name is expanded to its full set of classification values
- * via CLASSIFICATION_EXPANSIONS before being passed to fetchRandomArtwork.
- * Returns { mediaFilter: string[] }, or {} if no restriction applies.
+ * 'media' filter: restrict or exclude artworks by collection category.
+ *   Values are user-visible category names from MEDIUM_TYPES (e.g. 'Paintings', 'Sculpture').
+ *   Internally each category expands to one or more API classification values via
+ *   CLASSIFICATION_EXPANSIONS. The groups field mirrors MEDIUM_CATEGORIES for UI grouping.
  */
-function buildFetcherOptions(settings) {
-  const disabledMedia = settings?.disabledMedia;
-  if (!disabledMedia || disabledMedia.length === 0) return {};
-  const disabledSet = new Set(disabledMedia.map(m => m.toLowerCase()));
-  const enabledCategories = MEDIUM_TYPES.filter(m => !disabledSet.has(m.toLowerCase()));
-  if (enabledCategories.length === MEDIUM_TYPES.length) return {};
-  const classificationFilter = enabledCategories.flatMap(c => CLASSIFICATION_EXPANSIONS[c] || [c]);
-  return classificationFilter.length > 0 ? { mediaFilter: classificationFilter } : {};
+function getFilterTypes() {
+  return [
+    {
+      type: 'media',
+      label: 'Category',
+      description: 'Restrict or exclude artworks by collection category. Each category covers one or more Met Museum classification values.',
+      modes: ['require', 'exclude'],
+      multiValue: true,
+      groups: MEDIUM_CATEGORIES.map(cat => ({ name: cat.name, values: cat.media })),
+      values: MEDIUM_TYPES.map(name => ({ value: name, label: name })),
+    },
+  ];
 }
 
 /**
@@ -296,4 +329,4 @@ async function fetchByIdentifier(identifier) {
   return _fetchByObjectIdOriginal(objectId);
 }
 
-module.exports = { fetchRandomArtwork, fetchByObjectId, fetchByIdentifier, canHandleIdentifier, MEDIUM_TYPES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };
+module.exports = { fetchRandomArtwork, fetchByObjectId, fetchByIdentifier, canHandleIdentifier, MEDIUM_TYPES, MEDIUM_CATEGORIES, getFilterTypes, metadataFields, defaultMapping };

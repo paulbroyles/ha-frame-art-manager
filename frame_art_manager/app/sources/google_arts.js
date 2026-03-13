@@ -614,33 +614,57 @@ async function fetchAssetDetails(assetId) {
  * discarding already-downloaded images. If no artwork on a fetched page matches the
  * filter, a new entity and offset are tried on the next attempt.
  *
- * @param {string[]} [mediaFilter] - Optional list of medium names to restrict selection.
- *   Names are matched case-insensitively against MEDIUM_ENTITIES. If omitted or empty,
- *   all 203 media are eligible. Pass e.g. ['oil paint', 'watercolor painting'] to
- *   restrict to specific media.
+ * @param {Array<{type: string, mode: 'require'|'exclude', values: string[]}>} [filters=[]]
+ *   Filter objects applied to the candidate entity pool and/or post-fetch type check.
+ *   Supported filter types:
+ *   - 'media' + 'require': restrict entity pool to names in values (intersection if multiple).
+ *   - 'media' + 'exclude': remove named entities from the pool (union across multiple).
+ *   - 'objectType' + 'exclude': skip artworks whose Type field matches any value
+ *     (case-insensitive). When non-empty, asset details are fetched before the image
+ *     download so excluded artworks never waste bandwidth. If no objectType-exclude
+ *     filter is supplied, the source's default excluded types are applied.
  * @param {object} [options]
  * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all'] - Filter by aspect ratio.
  *   'landscape' = width > height (ratio > 1). 'portrait' = height > width (ratio < 1).
  *   Artworks with no ratio metadata are excluded when filtering is active.
- * @param {string[]} [options.excludedTypes=[]] - Object types to skip, matched case-insensitively
- *   against the 'Type' structured field from /api/asset. When non-empty, asset details are fetched
- *   before the image download so excluded artworks never waste bandwidth.
  *
  * @returns {{ imageBuffer, contentType, metadata }} — metadata contains all fields defined in FIELD_DEFS plus artworkUrl.
- * @throws {Error} If the filter matches no known media, or on network/API failure.
+ * @throws {Error} If the filters match no known media, or on network/API failure.
  */
-async function fetchRandomArtwork(mediaFilter = null, options = {}) {
+async function fetchRandomArtwork(filters = [], options = {}) {
   await seedCookies();
-  const { aspectRatio = 'all', excludedTypes = [] } = options;
+  const { aspectRatio = 'all' } = options;
+
+  // Split filters by type and mode.
+  // require-media: entity must appear in ALL require sets (intersection semantics).
+  // exclude-media: entity excluded if it appears in ANY exclude set (union semantics).
+  // objectType-exclude: type values to skip post-fetch (union across all such filters).
+  // If no objectType-exclude filter is present, fall back to DEFAULT_EXCLUDED_TYPES.
+  const requireMediaSets = filters
+    .filter(f => f.type === 'media' && f.mode === 'require')
+    .map(f => new Set((f.values || []).map(v => v.toLowerCase())));
+  const excludeMediaValues = new Set(
+    filters
+      .filter(f => f.type === 'media' && f.mode === 'exclude')
+      .flatMap(f => f.values || [])
+      .map(v => v.toLowerCase())
+  );
+  const objectTypeExcludeFilters = filters.filter(f => f.type === 'objectType' && f.mode === 'exclude');
+  const excludedTypes = objectTypeExcludeFilters.length > 0
+    ? objectTypeExcludeFilters.flatMap(f => f.values || [])
+    : DEFAULT_EXCLUDED_TYPES;
   const excludedTypesLower = excludedTypes.map(t => t.toLowerCase());
 
+  // Build candidate entity pool by applying media filters.
   let candidates = MEDIUM_ENTITIES;
-  if (mediaFilter && mediaFilter.length > 0) {
-    const filterSet = new Set(mediaFilter.map(m => m.toLowerCase()));
-    candidates = MEDIUM_ENTITIES.filter(e => filterSet.has(e.name.toLowerCase()));
+  if (requireMediaSets.length > 0) {
+    candidates = candidates.filter(e => requireMediaSets.every(s => s.has(e.name.toLowerCase())));
     if (candidates.length === 0) {
-      throw new Error(`No known media matched filter: ${mediaFilter.join(', ')}`);
+      throw new Error(`No known media matched require filter: ${filters.filter(f => f.type === 'media' && f.mode === 'require').flatMap(f => f.values).join(', ')}`);
     }
+  }
+  if (excludeMediaValues.size > 0) {
+    candidates = candidates.filter(e => !excludeMediaValues.has(e.name.toLowerCase()));
   }
 
   const MAX_ATTEMPTS = 5;
@@ -783,33 +807,42 @@ const metadataFields = FIELD_DEFS.map(({ key, label, description }) => ({ key, l
 // Hint strings are matched case-insensitively against available HA attributes.
 const defaultMapping = Object.fromEntries(FIELD_DEFS.map(({ key, defaultMapHint }) => [key, defaultMapHint ?? null]));
 
-// Settings schema for the web source settings dialog.
-// Returned via GET /api/web-sources/config and consumed by the UI to render controls.
-const settingsSchema = {
-  mediaCategories: MEDIUM_CATEGORIES,
-  defaultExcludedTypes: DEFAULT_EXCLUDED_TYPES,
-};
-
 /**
- * Convert stored source settings to fetcher call options.
- * Called by web_sources.js before invoking fetchRandomArtwork.
+ * Returns the filter types this source supports.
+ * Consumed by GET /api/web-sources/sources/:sourceId/filter-types and the UI filter builder.
  *
- * settings.disabledMedia: string[] — medium entity names to exclude from selection.
- * settings.excludedTypes: string[] — Type field values to skip post-fetch (defaults to
- *   DEFAULT_EXCLUDED_TYPES when absent, allowing new installs to get sensible defaults).
+ * 'media' filter: restrict or exclude artworks by medium entity name.
+ *   - require: only sample from entities whose names are in values (intersection if multiple filters).
+ *   - exclude: never sample from entities whose names are in values (union if multiple filters).
+ *   Values come from MEDIUM_ENTITIES; the groups field mirrors MEDIUM_CATEGORIES for UI grouping.
+ *
+ * 'objectType' filter: skip artworks post-fetch if their museum-cataloged Type field matches.
+ *   - exclude only (require makes no sense for a free-text non-controlled vocabulary field).
+ *   Values are free-text (user types their own); DEFAULT_EXCLUDED_TYPES are provided as suggestions.
+ *   When no objectType-exclude filter is configured, DEFAULT_EXCLUDED_TYPES are applied automatically.
  */
-function buildFetcherOptions(settings) {
-  const disabledMedia = settings?.disabledMedia;
-  const excludedTypes = settings?.excludedTypes ?? DEFAULT_EXCLUDED_TYPES;
-
-  let mediaFilter;
-  if (disabledMedia && disabledMedia.length > 0) {
-    const disabledSet = new Set(disabledMedia.map(m => m.toLowerCase()));
-    const enabledMedia = MEDIUM_ENTITIES.map(e => e.name).filter(n => !disabledSet.has(n.toLowerCase()));
-    if (enabledMedia.length > 0) mediaFilter = enabledMedia;
-  }
-
-  return { ...(mediaFilter ? { mediaFilter } : {}), excludedTypes };
+function getFilterTypes() {
+  return [
+    {
+      type: 'media',
+      label: 'Medium',
+      description: 'Restrict or exclude artworks by material or technique. Values are Google Arts & Culture medium entities.',
+      modes: ['require', 'exclude'],
+      multiValue: true,
+      groups: MEDIUM_CATEGORIES.map(cat => ({ name: cat.name, values: cat.media })),
+      values: MEDIUM_ENTITIES.map(e => ({ value: e.name, label: e.name, total: e.total })),
+    },
+    {
+      type: 'objectType',
+      label: 'Object Type',
+      description: 'Skip artworks whose museum-cataloged object type matches. Not a controlled vocabulary — type exactly as it appears in the metadata (case-insensitive). Common values are provided as suggestions.',
+      modes: ['exclude'],
+      multiValue: true,
+      inputStyle: 'text',
+      values: [],
+      suggestions: DEFAULT_EXCLUDED_TYPES,
+    },
+  ];
 }
 
 /**
@@ -988,4 +1021,4 @@ async function fetchArtworkMetadata(identifier) {
   return fetchAssetDetails(assetId);
 }
 
-module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, DEFAULT_EXCLUDED_TYPES, getFilterTypes, metadataFields, defaultMapping };

@@ -28,7 +28,7 @@ const HTTP_HEADERS = {
  *
  * Throws on network errors, if the list is empty, or if aspectRatio is 'portrait'.
  */
-async function fetchRandomArtwork(_mediaFilter = null, options = {}) {
+async function fetchRandomArtwork(_filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
   if (aspectRatio === 'portrait') {
     throw new Error(
@@ -145,9 +145,19 @@ const settingsSchema = {
 };
 
 /**
- * Convert stored source settings to fetcher call options.
+ * Returns the filter types this source supports.
+ * Google Art Wallpaper is a fixed curated list with no filterable dimensions,
+ * so no filter types are supported.
  */
-function buildFetcherOptions(settings) {
+function getFilterTypes() {
+  return [];
+}
+
+/**
+ * Returns non-filter fetch options derived from stored source settings.
+ * Called by the route layer to pass source-specific options to fetchRandomArtwork.
+ */
+function getExtraOptions(settings) {
   return { fetchRichMetadata: !!settings?.fetchRichMetadata };
 }
 
@@ -278,4 +288,4 @@ function canHandleIdentifier(identifier) {
   return /artsandculture\.google\.com/i.test(t) && !/artsandculture\.google\.com\/asset\//i.test(t);
 }
 
-module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, getMetadataFields, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions, alreadyProcessed };
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, getMetadataFields, getFilterTypes, getExtraOptions, metadataFields, defaultMapping, settingsSchema, alreadyProcessed };
