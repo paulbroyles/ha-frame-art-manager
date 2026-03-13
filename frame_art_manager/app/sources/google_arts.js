@@ -957,7 +957,11 @@ function canHandleIdentifier(identifier) {
  * without downloading the image. Intended for use by other sources (e.g. Google Art
  * Wallpaper) that already have an image but want richer metadata.
  *
- * @param {string} identifier - Full Google Arts URL (/asset/<slug>/<id>) or bare asset ID
+ * @param {string} identifier - Full Google Arts URL or bare asset ID.
+ *   Accepted URL formats:
+ *   - /asset/<slug>/<id>  (standard Google Arts format)
+ *   - asset/<id>          (Google Art Wallpaper list format, single segment, no slug)
+ *   - bare asset ID       (alphanumeric/hyphen, 6+ chars)
  * @returns {Promise<object>} Metadata fields (dateCreated, type, medium, creatorNationality,
  *   dimensions, description), or {} if the identifier cannot be resolved or the call fails.
  */
@@ -966,7 +970,9 @@ async function fetchArtworkMetadata(identifier) {
   await seedCookies();
 
   let assetId;
-  const assetPathMatch = identifier.match(/\/asset\/[^/?#]+\/([^/?#]+)/i);
+  // Match /asset/<slug>/<id> or /asset/<id> (wallpaper list uses single-segment form).
+  // The slug group is made optional so both formats are captured correctly.
+  const assetPathMatch = identifier.match(/\/asset\/(?:[^/?#]+\/)?([^/?#]+)/i);
   if (assetPathMatch) {
     assetId = assetPathMatch[1];
   } else if (/^[\w\-]{6,}$/.test(identifier)) {
