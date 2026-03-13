@@ -125,6 +125,7 @@ Known labels (confirmed via API inspection):
 | `Collection` | Internal museum collection name, e.g. `"MED - Manuscript Illuminations"`. Museum-specific. |
 | `Department` | Museum department, e.g. `"Medieval Art"`. Museum-specific. |
 | `tag / style` | Semicolon-separated AI-generated tags (long, noisy). **Not present on all artworks** — absent on confirmed manuscript examples. |
+| `Repository` | Museum or holding institution (may also appear in `cobject[12]`) |
 | `Rights` | Provenance/acquisition info |
 | `External Link` | URL and label for the object on the museum's own website |
 | `Terms of Use` | License info (e.g. `"Open Content"`) and URL |
@@ -138,13 +139,27 @@ Known labels (confirmed via API inspection):
 
 Implemented as `parseStructuredFields(av[12])` in `sources/google_arts.js` — returns `{ label: joinedValues }` (display text only; entity links in `v[2][1]` are not currently extracted).
 
-**Fields extracted in this project** (`fetchAssetDetails`):
-- `dateCreated` ← `av[3]` or structured `"Date Created"`
-- `type` ← structured `"Type"` (object classification; used for exclusion filtering)
-- `medium` ← structured `"Medium"` (free-prose materials description)
-- `creatorNationality` ← structured `"Creator Nationality"`
-- `dimensions` ← structured `"Physical Dimensions"`
-- `description` ← `av[5][1]` with HTML stripped
+**Fields extracted in this project** (via `parseAvBlock(av)`, used by `fetchAssetDetails` and `fetchByIdentifier`):
+
+| Project field | Source |
+|---|---|
+| `title` | structured `"Title"` |
+| `creator` | structured `"Creator"` |
+| `dateCreated` | `av[3]` or structured `"Date Created"` |
+| `type` | structured `"Type"` (object classification; used for exclusion filtering) |
+| `medium` | structured `"Medium"` (free-prose materials description) |
+| `creatorNationality` | structured `"Creator Nationality"` |
+| `creatorLifespan` | structured `"Creator Lifespan"` |
+| `creatorGender` | structured `"Creator Gender"` |
+| `style` | structured `"tag / style"` |
+| `repository` | structured `"Repository"` |
+| `dimensions` | structured `"Physical Dimensions"` |
+| `rights` | structured `"Rights"` |
+| `description` | `av[5][1]` with HTML stripped |
+| `artistBio` | structured `"Artist biographical information"` |
+| `additionalInfo` | structured `"Additional artwork information"` |
+
+Additionally, `fetchRandomArtwork` and `fetchByIdentifier` add `title`, `creator`, and `repository` from the `cobject` listing record (preferred over structured fields when present), plus `color` from `cobject[8]` and `artworkUrl` from the canonical asset path.
 
 ---
 

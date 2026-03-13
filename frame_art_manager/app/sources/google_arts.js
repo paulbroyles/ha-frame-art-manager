@@ -538,6 +538,40 @@ function parseStructuredFields(av12) {
  *
  * Returns {} on network failure or unexpected response structure.
  */
+/**
+ * Parse all available metadata fields from a stella.av block.
+ * Used by both fetchAssetDetails and fetchByIdentifier so extraction logic
+ * stays in one place. Returns the subset of FIELD_DEFS fields that come from
+ * the API response (excludes color/source/artworkUrl which are added by callers).
+ *
+ * @param {Array} av - The stella.av array from the parsed API response
+ * @returns {object} Extracted metadata fields (values are strings or null)
+ */
+function parseAvBlock(av) {
+  const structured = parseStructuredFields(av[12]);
+  const rawDesc = Array.isArray(av[5]) ? av[5][1] : null;
+  const description = typeof rawDesc === 'string'
+    ? rawDesc.replace(/<[^>]+>/g, '').trim() || null
+    : null;
+  return {
+    title:              structured['Title'] || null,
+    creator:            structured['Creator'] || null,
+    dateCreated:        av[3] || structured['Date Created'] || null,
+    type:               structured['Type'] || null,
+    medium:             structured['Medium'] || null,
+    creatorNationality: structured['Creator Nationality'] || null,
+    creatorLifespan:    structured['Creator Lifespan'] || null,
+    creatorGender:      structured['Creator Gender'] || null,
+    style:              structured['tag / style'] || null,
+    repository:         structured['Repository'] || null,
+    dimensions:         structured['Physical Dimensions'] || null,
+    rights:             structured['Rights'] || null,
+    artistBio:          structured['Artist biographical information'] || null,
+    additionalInfo:     structured['Additional artwork information'] || null,
+    description,
+  };
+}
+
 async function fetchAssetDetails(assetId) {
   if (!assetId) return {};
 
@@ -564,22 +598,7 @@ async function fetchAssetDetails(assetId) {
   const av = ap[2]; // stella.av
   if (!Array.isArray(av) || av[0] !== 'stella.av') return {};
 
-  const structured = parseStructuredFields(av[12]);
-
-  // Strip HTML tags from av[5][1] (description block)
-  const rawDesc = Array.isArray(av[5]) ? av[5][1] : null;
-  const description = typeof rawDesc === 'string'
-    ? rawDesc.replace(/<[^>]+>/g, '').trim() || null
-    : null;
-
-  return {
-    dateCreated:        av[3] || structured['Date Created'] || null,
-    type:               structured['Type'] || null,
-    medium:             structured['Medium'] || null,
-    creatorNationality: structured['Creator Nationality'] || null,
-    dimensions:         structured['Physical Dimensions'] || null,
-    description,
-  };
+  return parseAvBlock(av);
 }
 
 /**
@@ -607,7 +626,7 @@ async function fetchAssetDetails(assetId) {
  *   against the 'Type' structured field from /api/asset. When non-empty, asset details are fetched
  *   before the image download so excluded artworks never waste bandwidth.
  *
- * @returns {{ imageBuffer, contentType, metadata: { title, creator, type, medium, creatorNationality, repository, dateCreated, dimensions, description, color, artworkUrl, source } }}
+ * @returns {{ imageBuffer, contentType, metadata }} — metadata contains all fields defined in FIELD_DEFS plus artworkUrl.
  * @throws {Error} If the filter matches no known media, or on network/API failure.
  */
 async function fetchRandomArtwork(mediaFilter = null, options = {}) {
@@ -715,16 +734,15 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
       imageBuffer,
       contentType,
       metadata: {
-        title: artwork.title,
-        creator: artwork.creator,
-        repository: artwork.repository,
-        dateCreated: details.dateCreated || null,
-        type: details.type || null,
-        medium: details.medium || null,
-        creatorNationality: details.creatorNationality || null,
-        dimensions: details.dimensions || null,
-        description: details.description || null,
-        color: artwork.color || null,
+        // Spread all fields from fetchAssetDetails (which uses parseAvBlock) so new
+        // fields flow through automatically without updating this return site.
+        ...details,
+        // cobject (artwork) is the authoritative source for title/creator/repository/color
+        // when available — it comes from the entity listing that identified this artwork.
+        title:      artwork.title || details.title || null,
+        creator:    artwork.creator || details.creator || null,
+        repository: artwork.repository || details.repository || null,
+        color:      artwork.color || null,
         artworkUrl,
         source: 'Google Arts & Culture',
       },
@@ -734,38 +752,36 @@ async function fetchRandomArtwork(mediaFilter = null, options = {}) {
   throw new Error(`Could not find a${aspectRatio !== 'all' ? ` ${aspectRatio}` : 'n'} artwork after ${MAX_ATTEMPTS} attempts`);
 }
 
-// Metadata fields this source can provide.
-// Consumed by the UI to render the per-source metadata mapping controls.
-const metadataFields = [
-  { key: 'title',              label: 'Title',              description: 'Artwork title' },
-  { key: 'creator',            label: 'Creator',            description: 'Artist or creator name' },
-  { key: 'type',               label: 'Type',               description: 'Object type from the museum catalog (e.g. "Paintings", "Drawing", "Folio")' },
-  { key: 'medium',             label: 'Medium',             description: 'Materials and technique as described by the museum (e.g. "Tempera colors, gold leaf, and ink on parchment")' },
-  { key: 'creatorNationality', label: 'Nationality',        description: 'Nationality of the artist' },
-  { key: 'repository',         label: 'Repository',         description: 'Museum or holding institution' },
-  { key: 'dateCreated',        label: 'Date Created',       description: 'Date or year the artwork was created' },
-  { key: 'dimensions',         label: 'Dimensions',         description: 'Physical dimensions (e.g. "w1345 x h2390 cm")' },
-  { key: 'description',        label: 'Description',        description: 'Artwork description or commentary (plain text, HTML stripped)' },
-  { key: 'color',              label: 'Dominant Color',     description: 'Dominant color of the image as a hex string (e.g. "#17120c")' },
-  { key: 'source',             label: 'Source',             description: 'Source collection name (always "Google Arts & Culture")' },
+// Single source of truth for all metadata fields this source can provide.
+// label/description feed the UI mapping controls (metadataFields).
+// defaultMapHint is the suggested HA attribute name for auto-detection (null = no suggestion).
+// NOTE: parseAvBlock() extracts the non-cobject fields listed here; keep the two in sync.
+const FIELD_DEFS = [
+  { key: 'title',              label: 'Title',            description: 'Artwork title',                                                  defaultMapHint: 'title'  },
+  { key: 'creator',            label: 'Creator',          description: 'Artist or creator name',                                         defaultMapHint: 'artist' },
+  { key: 'creatorLifespan',    label: 'Creator Lifespan', description: 'Birth and death years of the artist (e.g. "1452 - 1519")',        defaultMapHint: null     },
+  { key: 'creatorNationality', label: 'Nationality',      description: 'Nationality of the artist',                                      defaultMapHint: null     },
+  { key: 'creatorGender',      label: 'Creator Gender',   description: 'Gender of the artist as cataloged',                              defaultMapHint: null     },
+  { key: 'type',               label: 'Type',             description: 'Object type from the museum catalog (e.g. "Paintings", "Folio")', defaultMapHint: null     },
+  { key: 'medium',             label: 'Medium',           description: 'Materials and technique (e.g. "Tempera colors, gold leaf")',      defaultMapHint: 'medium' },
+  { key: 'style',              label: 'Style',            description: 'Art movement or style (e.g. "Impressionism", "Baroque")',         defaultMapHint: null     },
+  { key: 'dateCreated',        label: 'Date Created',     description: 'Date or year the artwork was created',                           defaultMapHint: 'year'   },
+  { key: 'repository',         label: 'Repository',       description: 'Museum or holding institution',                                  defaultMapHint: 'museum' },
+  { key: 'dimensions',         label: 'Dimensions',       description: 'Physical dimensions (e.g. "w1345 x h2390 cm")',                  defaultMapHint: null     },
+  { key: 'rights',             label: 'Rights',           description: 'Copyright or rights statement as provided by the museum',        defaultMapHint: null     },
+  { key: 'description',        label: 'Description',      description: 'Artwork description or commentary (plain text, HTML stripped)',   defaultMapHint: null     },
+  { key: 'artistBio',          label: 'Artist Bio',       description: 'Biographical information about the artist',                      defaultMapHint: null     },
+  { key: 'additionalInfo',     label: 'Additional Info',  description: 'Additional artwork information as provided by the museum',       defaultMapHint: null     },
+  { key: 'color',              label: 'Dominant Color',   description: 'Dominant color of the image as a hex string (e.g. "#17120c")',   defaultMapHint: null     },
+  { key: 'source',             label: 'Source',           description: 'Source collection name (always "Google Arts & Culture")',        defaultMapHint: null     },
 ];
+
+const metadataFields = FIELD_DEFS.map(({ key, label, description }) => ({ key, label, description }));
 
 // Default mapping hints: source field key → suggested HA attribute name.
 // Used to auto-detect mappings when no user override is set.
 // Hint strings are matched case-insensitively against available HA attributes.
-const defaultMapping = {
-  title:              'title',
-  creator:            'artist',
-  type:               null,
-  medium:             'medium',
-  creatorNationality: null,
-  repository:         'museum',
-  dateCreated:        'year',
-  dimensions:         null,
-  description:        null,
-  color:              null,
-  source:             null,
-};
+const defaultMapping = Object.fromEntries(FIELD_DEFS.map(({ key, defaultMapHint }) => [key, defaultMapHint ?? null]));
 
 // Settings schema for the web source settings dialog.
 // Returned via GET /api/web-sources/config and consumed by the UI to render controls.
@@ -868,19 +884,7 @@ async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
       if (typeof rawImageUrl === 'string' && rawImageUrl) {
         imageBase = rawImageUrl.startsWith('//') ? `https:${rawImageUrl}` : rawImageUrl;
       }
-      const structured = parseStructuredFields(av[12]);
-      const rawDesc = Array.isArray(av[5]) ? av[5][1] : null;
-      extendedDetails = {
-        dateCreated:        av[3] || structured['Date Created'] || null,
-        type:               structured['Type'] || null,
-        medium:             structured['Medium'] || null,
-        creatorNationality: structured['Creator Nationality'] || null,
-        dimensions:         structured['Physical Dimensions'] || null,
-        description:        typeof rawDesc === 'string' ? rawDesc.replace(/<[^>]+>/g, '').trim() || null : null,
-        title:              structured['Title'] || null,
-        creator:            structured['Creator'] || null,
-        repository:         structured['Repository'] || null,
-      };
+      extendedDetails = parseAvBlock(av);
     }
     // Secondary fallback: ap[1] sometimes contains the image URL directly
     if (!imageBase) {
@@ -927,16 +931,17 @@ async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
     imageBuffer,
     contentType,
     metadata: {
-      title:              cobject?.title || extendedDetails.title || null,
-      creator:            cobject?.creator || extendedDetails.creator || null,
-      repository:         cobject?.repository || extendedDetails.repository || null,
-      dateCreated:        extendedDetails.dateCreated || null,
-      type:               extendedDetails.type || null,
-      medium:             extendedDetails.medium || null,
-      creatorNationality: extendedDetails.creatorNationality || null,
-      dimensions:         extendedDetails.dimensions || null,
-      description:        extendedDetails.description || null,
-      color:              cobject?.color || null,
+      // Spread all fields from parseAvBlock (extendedDetails) so new fields added
+      // there flow through automatically without updating this return site.
+      ...extendedDetails,
+      // cobject (from the entity listing) is the more authoritative source for
+      // title/creator/repository when available, since it's the canonical listing
+      // record for the asset. extendedDetails values are fallbacks only.
+      title:      cobject?.title || extendedDetails.title || null,
+      creator:    cobject?.creator || extendedDetails.creator || null,
+      repository: cobject?.repository || extendedDetails.repository || null,
+      // color and artworkUrl come exclusively from sources outside parseAvBlock.
+      color:      cobject?.color || null,
       artworkUrl,
       source: 'Google Arts & Culture',
     },
