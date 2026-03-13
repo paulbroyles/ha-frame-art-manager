@@ -610,6 +610,7 @@ router.post('/fetch-and-display', async (req, res) => {
     }
 
     const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
+    const { mediaFilter: _mediaFilter, excludedTypes: _excludedTypes = [], ...extraFetcherOpts } = fetcherOpts;
 
     // Fetch, with optional retry when the image is below the minimum resolution threshold.
     // skipLowRes is off by default; when on, images whose short side is < minResolution
@@ -618,7 +619,7 @@ router.post('/fetch-and-display', async (req, res) => {
     const MAX_LOW_RES_ATTEMPTS = 3;
     let fetchResult;
     for (let attempt = 0; attempt < MAX_LOW_RES_ATTEMPTS; attempt++) {
-      fetchResult = await fetcher(fetcherOpts.mediaFilter, { aspectRatio, excludedTypes: fetcherOpts.excludedTypes || [] });
+      fetchResult = await fetcher(_mediaFilter, { aspectRatio, excludedTypes: _excludedTypes, ...extraFetcherOpts });
       if (!skipLowRes) break;
       const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
       const shortSide = Math.min(width, height);
@@ -793,7 +794,8 @@ router.post('/test-fetch', async (req, res) => {
       }
 
       const fetcherOpts = buildFetcherOptions(chosenSourceId, webSources.sources[chosenSourceId]?.settings);
-      ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(fetcherOpts.mediaFilter, { aspectRatio, excludedTypes: fetcherOpts.excludedTypes || [] }));
+      const { mediaFilter: _mediaFilter, excludedTypes: _excludedTypes = [], ...extraFetcherOpts } = fetcherOpts;
+      ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(_mediaFilter, { aspectRatio, excludedTypes: _excludedTypes, ...extraFetcherOpts }));
     }
 
     const orientation = tvOrientation || 'landscape';
