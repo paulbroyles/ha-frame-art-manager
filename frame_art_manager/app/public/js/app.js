@@ -15147,15 +15147,18 @@ function renderGoogleArtWallpaperSettings(schema, currentSettings) {
   let html = '';
   for (const field of schema.fields) {
     if (field.type !== 'boolean') continue;
-    const requiredSourceEnabled = !field.requiresSource
-      || !!webSourcesConfig?.sources?.[field.requiresSource]?.enabled;
+    // Check whether the required source module is installed (present in sourceMetadata),
+    // not whether it's enabled as an active web source — enrichment works regardless of
+    // whether the user is actively shuffling from that source.
+    const requiredSourceAvailable = !field.requiresSource
+      || !!webSourceMetadata[field.requiresSource];
     const currentVal = currentSettings?.[field.key] ?? field.default ?? false;
-    const disabledAttr = requiredSourceEnabled ? '' : 'disabled';
-    const disabledNote = requiredSourceEnabled ? '' :
-      ` <em>(requires ${webSourcesConfig?.sources?.[field.requiresSource]?.name || field.requiresSource} to be enabled)</em>`;
+    const disabledAttr = requiredSourceAvailable ? '' : 'disabled';
+    const disabledNote = requiredSourceAvailable ? '' :
+      ` <em>(requires the ${field.requiresSource} source module to be installed)</em>`;
     html += `
       <div style="margin-bottom:12px;">
-        <label class="ws-global-label" style="${requiredSourceEnabled ? '' : 'opacity:0.5;'}">
+        <label class="ws-global-label" style="${requiredSourceAvailable ? '' : 'opacity:0.5;'}">
           <input type="checkbox"
                  class="ws-boolean-setting"
                  data-setting-key="${escapeHtml(field.key)}"
