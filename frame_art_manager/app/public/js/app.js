@@ -10963,7 +10963,7 @@ function imageMatchesTagset(imageData, tagset) {
   // treat it the same as having no include tags (all images eligible).
   const includeTags = (tagset.tags || [])
     .map(t => t.toLowerCase())
-    .filter(t => t !== WEB_SOURCES_VIRTUAL_TAG);
+    .filter(t => t !== WEB_SOURCES_VIRTUAL_TAG && !t.startsWith('ws:'));
   const excludeTags = (tagset.exclude_tags || []).map(t => t.toLowerCase());
 
   // If no library include tags specified, all images match (unless excluded)
@@ -13659,21 +13659,42 @@ function renderTagsetTagPool() {
   const tagCounts = getImageCountPerTag();
 
   // Filter out tags already in include or exclude
-  const availableTags = allTagNames.filter(tag =>
-    !tagsetModalIncludeTags.includes(tag) && !tagsetModalExcludeTags.includes(tag)
-  ).sort();
+  const assignedTags = new Set([...tagsetModalIncludeTags, ...tagsetModalExcludeTags]);
+  const availableTags = allTagNames.filter(tag => !assignedTags.has(tag)).sort();
 
-  // Virtual "Web Sources" tag: available in include mode when at least one source is enabled
-  const showWebSourcesVirtual = tagsetModalMode === 'include'
-    && hasEnabledWebSources()
-    && !tagsetModalIncludeTags.includes(WEB_SOURCES_VIRTUAL_TAG);
+  // Virtual tags: only available in include mode (exclude doesn't apply to virtual tags)
+  const virtualTags = webSourcesConfig?.virtualTags || {};
+  const hasSources = Object.keys(webSourcesConfig?.sources || {}).length > 0;
+  const availableVirtualPills = [];
 
-  if (allTagNames.length === 0 && !showWebSourcesVirtual) {
+  if (tagsetModalMode === 'include') {
+    // Umbrella "Web Sources" tag (picks random source)
+    if (hasSources && !assignedTags.has(WEB_SOURCES_VIRTUAL_TAG)) {
+      availableVirtualPills.push({
+        tag: WEB_SOURCES_VIRTUAL_TAG,
+        label: 'Web Sources',
+        title: 'Virtual tag: when selected during shuffle, displays a random image from any web source',
+      });
+    }
+    // Specific ws:tagId virtual tags
+    for (const [id, vt] of Object.entries(virtualTags)) {
+      const wsTag = `ws:${id}`;
+      if (!assignedTags.has(wsTag)) {
+        availableVirtualPills.push({
+          tag: wsTag,
+          label: vt.label || id,
+          title: `Virtual tag: ${vt.label || id} (${vt.sourceId || 'web source'})`,
+        });
+      }
+    }
+  }
+
+  if (allTagNames.length === 0 && availableVirtualPills.length === 0) {
     container.innerHTML = '<span class="no-tags-message">No tags available</span>';
     return;
   }
 
-  if (availableTags.length === 0 && !showWebSourcesVirtual) {
+  if (availableTags.length === 0 && availableVirtualPills.length === 0) {
     container.innerHTML = '<span class="no-tags-message">All tags assigned</span>';
     return;
   }
@@ -13683,11 +13704,11 @@ function renderTagsetTagPool() {
     return `<span class="tag-pill" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)} <span class="tag-count">(${count})</span></span>`;
   }).join('');
 
-  const webSourcesPill = showWebSourcesVirtual
-    ? `<span class="tag-pill web-sources-virtual-tag" data-tag="${WEB_SOURCES_VIRTUAL_TAG}" title="Virtual tag: when selected during shuffle, displays a random image from your enabled web sources">Web Sources <span class="tag-count">(virtual)</span></span>`
-    : '';
+  const virtualPillsHtml = availableVirtualPills.map(vt =>
+    `<span class="tag-pill web-sources-virtual-tag" data-tag="${escapeHtml(vt.tag)}" title="${escapeHtml(vt.title)}">${escapeHtml(vt.label)} <span class="tag-count">(virtual)</span></span>`
+  ).join('');
 
-  container.innerHTML = webSourcesPill + regularPills;
+  container.innerHTML = virtualPillsHtml + regularPills;
 
   // Add click handlers
   container.querySelectorAll('.tag-pill').forEach(pill => {
@@ -13725,11 +13746,15 @@ function renderTagsetSelectedTags(type) {
   const hasCustomWeights = type === 'include' && tags.some(t => (tagsetModalTagWeights[t] || 1) !== 1);
   const percentages = type === 'include' ? calculateTagPercentages(tags, tagsetModalTagWeights) : {};
   
+  const virtualTags = webSourcesConfig?.virtualTags || {};
   container.innerHTML = tags.map(tag => {
-    if (tag === WEB_SOURCES_VIRTUAL_TAG) {
+    // Virtual tags: umbrella or ws:tagId
+    if (tag === WEB_SOURCES_VIRTUAL_TAG || tag.startsWith('ws:')) {
+      const vtId = tag.startsWith('ws:') ? tag.slice(3) : null;
+      const vtLabel = vtId ? (virtualTags[vtId]?.label || vtId) : 'Web Sources';
       const percentStr = hasCustomWeights ? `<span class="tag-percent">${percentages[tag] || 0}%</span> ` : '';
-      return `<span class="tag-pill web-sources-virtual-tag" data-tag="${WEB_SOURCES_VIRTUAL_TAG}" title="Virtual tag: displays a random web source image when selected during shuffle">
-        Web Sources ${percentStr}<span class="tag-count">(virtual)</span>
+      return `<span class="tag-pill web-sources-virtual-tag" data-tag="${escapeHtml(tag)}" title="Virtual tag: ${escapeHtml(vtLabel)}">
+        ${escapeHtml(vtLabel)} ${percentStr}<span class="tag-count">(virtual)</span>
         <span class="tag-remove">×</span>
       </span>`;
     }
@@ -13946,8 +13971,8 @@ function renderTagsetWeightsTab() {
 function renderImageWeightedContent() {
   const includeTags = tagsetModalIncludeTags;
   const excludeTags = tagsetModalExcludeTags;
-  const hasWebSources = includeTags.includes(WEB_SOURCES_VIRTUAL_TAG);
-  const libraryIncludeTags = includeTags.filter(t => t !== WEB_SOURCES_VIRTUAL_TAG);
+  const hasWebSources = includeTags.some(t => t === WEB_SOURCES_VIRTUAL_TAG || t.startsWith('ws:'));
+  const libraryIncludeTags = includeTags.filter(t => t !== WEB_SOURCES_VIRTUAL_TAG && !t.startsWith('ws:'));
 
   // Get all images from global allImages (populated on app load)
   const images = allImages || {};
@@ -14077,6 +14102,7 @@ function renderImageWeightedContent() {
 function renderTagWeightedContent() {
   const tags = tagsetModalIncludeTags;
   const tagCounts = getImageCountPerTag();
+  const virtualTags = webSourcesConfig?.virtualTags || {};
   const percentages = calculateTagPercentages(tags, tagsetModalTagWeights);
   
   // Generate pie chart
@@ -14087,11 +14113,13 @@ function renderTagWeightedContent() {
     const sliderPos = weightToSliderPosition(weight);
     const pct = percentages[tag] || 0;
 
-    if (tag === WEB_SOURCES_VIRTUAL_TAG) {
+    if (tag === WEB_SOURCES_VIRTUAL_TAG || tag.startsWith('ws:')) {
+      const vtId = tag.startsWith('ws:') ? tag.slice(3) : null;
+      const vtLabel = vtId ? (virtualTags[vtId]?.label || vtId) : 'Web Sources';
       return `
-        <div class="weight-slider-row web-sources-slider-row" data-tag="${WEB_SOURCES_VIRTUAL_TAG}">
+        <div class="weight-slider-row web-sources-slider-row" data-tag="${escapeHtml(tag)}">
           <div class="weight-slider-header">
-            <span class="weight-slider-tag web-sources-virtual-tag">Web Sources <span class="tag-count">(virtual)</span></span>
+            <span class="weight-slider-tag web-sources-virtual-tag">${escapeHtml(vtLabel)} <span class="tag-count">(virtual)</span></span>
           </div>
           <div class="weight-slider-body">
             <span class="weight-slider-percent">${pct}%</span>
@@ -14103,7 +14131,7 @@ function renderTagWeightedContent() {
                      max="18"
                      step="1"
                      value="${sliderPos}"
-                     data-tag="${WEB_SOURCES_VIRTUAL_TAG}" />
+                     data-tag="${escapeHtml(tag)}" />
               <div class="weight-slider-ticks">
                 <span class="tick tick-start" style="left: 0"><span class="tick-label">0.1</span></span>
                 <span class="tick tick-center" style="left: 50%"><span class="tick-label">1</span></span>
