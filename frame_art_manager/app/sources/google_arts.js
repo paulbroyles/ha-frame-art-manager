@@ -952,4 +952,29 @@ function canHandleIdentifier(identifier) {
   return /artsandculture\.google\.com\/asset\//i.test(identifier.trim());
 }
 
-module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, clearCookies, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };
+/**
+ * Fetch extended metadata for a Google Arts & Culture artwork by URL or asset ID,
+ * without downloading the image. Intended for use by other sources (e.g. Google Art
+ * Wallpaper) that already have an image but want richer metadata.
+ *
+ * @param {string} identifier - Full Google Arts URL (/asset/<slug>/<id>) or bare asset ID
+ * @returns {Promise<object>} Metadata fields (dateCreated, type, medium, creatorNationality,
+ *   dimensions, description), or {} if the identifier cannot be resolved or the call fails.
+ */
+async function fetchArtworkMetadata(identifier) {
+  if (!identifier) return {};
+  await seedCookies();
+
+  let assetId;
+  const assetPathMatch = identifier.match(/\/asset\/[^/?#]+\/([^/?#]+)/i);
+  if (assetPathMatch) {
+    assetId = assetPathMatch[1];
+  } else if (/^[\w\-]{6,}$/.test(identifier)) {
+    assetId = identifier;
+  }
+
+  if (!assetId) return {};
+  return fetchAssetDetails(assetId);
+}
+
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions };

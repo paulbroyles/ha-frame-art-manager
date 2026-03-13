@@ -26,14 +26,23 @@ const SOURCE_SETTINGS_SCHEMAS = Object.fromEntries(
     .map(([id, mod]) => [id, mod.settingsSchema])
 );
 
-// Per-source metadata declarations: fields list + default mapping hints.
-// Exposed via GET /config so the UI can render per-source mapping controls.
-const SOURCE_METADATA = Object.fromEntries(
-  Object.entries(SOURCE_MODULES).map(([id, mod]) => [id, {
-    fields: mod.metadataFields || [],
-    defaultMapping: mod.defaultMapping || {},
-  }])
-);
+/**
+ * Compute per-source metadata declarations (fields + default mapping) given stored source settings.
+ * Sources that export getMetadataFields(settings) receive their stored settings so the field list
+ * can vary at runtime (e.g. google_art_wallpaper appends rich fields when fetchRichMetadata is on).
+ * Falls back to the static metadataFields export for sources that don't implement getMetadataFields.
+ */
+function buildSourceMetadata(webSources) {
+  return Object.fromEntries(
+    Object.entries(SOURCE_MODULES).map(([id, mod]) => {
+      const settings = webSources?.sources?.[id]?.settings;
+      const fields = mod.getMetadataFields
+        ? mod.getMetadataFields(settings)
+        : (mod.metadataFields || []);
+      return [id, { fields, defaultMapping: mod.defaultMapping || {} }];
+    })
+  );
+}
 
 const SUPERVISOR_TOKEN = process.env.SUPERVISOR_TOKEN;
 const HA_API_BASE = process.env.HA_URL || 'http://supervisor/core/api';
@@ -353,7 +362,7 @@ router.get('/config', async (req, res) => {
       webSources,
       settingsSchemas: SOURCE_SETTINGS_SCHEMAS,
       sourceConstraints,
-      sourceMetadata: SOURCE_METADATA,
+      sourceMetadata: buildSourceMetadata(webSources),
       imageProcessingSchema: IMAGE_PROCESSING_SCHEMA,
     });
   } catch (error) {
@@ -703,9 +712,11 @@ router.delete('/cache/:deviceId', async (req, res) => {
  * @param {object} [options]
  * @param {'landscape'|'portrait'} [options.tvOrientation] - TV orientation, passed to source
  *   modules that need it for resolution decisions (e.g. dezoomify threshold selection).
+ * @param {object} [options.webSources] - Web sources config; passed to source modules so
+ *   fetchByIdentifier can respect per-source settings (e.g. fetchRichMetadata).
  * @returns {{ chosenSourceId, imageBuffer, contentType, artMetadata }}
  */
-async function fetchSpecificImage(specificImage, { tvOrientation } = {}) {
+async function fetchSpecificImage(specificImage, { tvOrientation, webSources } = {}) {
   const trimmed = specificImage.trim();
 
   // Ask each source module if it can handle this identifier. Modules are checked
@@ -713,7 +724,8 @@ async function fetchSpecificImage(specificImage, { tvOrientation } = {}) {
   // before google_art_wallpaper for the shared artsandculture.google.com domain) win.
   for (const [sourceId, mod] of Object.entries(SOURCE_MODULES)) {
     if (mod.canHandleIdentifier?.(trimmed)) {
-      const result = await mod.fetchByIdentifier(trimmed, { tvOrientation });
+      const sourceSettings = webSources?.sources?.[sourceId]?.settings;
+      const result = await mod.fetchByIdentifier(trimmed, { tvOrientation, settings: sourceSettings });
       return { chosenSourceId: sourceId, ...result, artMetadata: result.metadata };
     }
   }
@@ -755,7 +767,7 @@ router.post('/test-fetch', async (req, res) => {
 
     if (specificImage && specificImage.trim()) {
       // Fetch a specific image rather than a random one from an enabled source.
-      ({ chosenSourceId, imageBuffer, contentType, artMetadata } = await fetchSpecificImage(specificImage, { tvOrientation }));
+      ({ chosenSourceId, imageBuffer, contentType, artMetadata } = await fetchSpecificImage(specificImage, { tvOrientation, webSources }));
       // If source could not be determined (direct URL), fall back to first enabled source for
       // processing pipeline metadata (alreadyProcessed flag, effectiveMapping).
       if (!chosenSourceId) {

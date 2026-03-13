@@ -23,7 +23,8 @@ const HTTP_HEADERS = {
  * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all']
  *
  * Returns:
- *   { imageBuffer, contentType, metadata: { title, creator, attribution, artworkUrl, source } }
+ *   { imageBuffer, contentType, metadata: { title, creator, attribution, artworkUrl, source, [rich fields] } }
+ *   Rich fields (type, medium, dateCreated, etc.) are included when options.fetchRichMetadata is true.
  *
  * Throws on network errors, if the list is empty, or if aspectRatio is 'portrait'.
  */
@@ -72,6 +73,10 @@ async function fetchRandomArtwork(_mediaFilter = null, options = {}) {
     throw new Error(`Failed to download wallpaper image: ${err.message}`);
   }
 
+  const richMetadata = options.fetchRichMetadata && artworkUrl
+    ? await enrichWithGoogleArts(artworkUrl)
+    : {};
+
   return {
     imageBuffer,
     contentType,
@@ -81,11 +86,12 @@ async function fetchRandomArtwork(_mediaFilter = null, options = {}) {
       attribution: entry.attribution || null,
       artworkUrl,
       source: 'Google Art Wallpaper',
+      ...richMetadata,
     },
   };
 }
 
-// Metadata fields this source can provide.
+// Base metadata fields always provided by this source.
 const metadataFields = [
   { key: 'title',       label: 'Title',       description: 'Artwork title' },
   { key: 'creator',     label: 'Creator',     description: 'Artist or creator name' },
@@ -100,6 +106,74 @@ const defaultMapping = {
   attribution: null,
   source:      null,
 };
+
+/**
+ * Returns the effective metadata fields for this source given its stored settings.
+ * When fetchRichMetadata is enabled, appends google_arts metadata fields (lazy-loaded)
+ * so the mapping UI reflects what will actually be fetched.
+ *
+ * @param {object} settings - Stored source settings
+ * @returns {Array} Metadata field descriptors
+ */
+function getMetadataFields(settings) {
+  if (!settings?.fetchRichMetadata) return metadataFields;
+
+  let googleArts;
+  try {
+    googleArts = require('./google_arts');
+  } catch (_) {
+    return metadataFields;
+  }
+
+  const baseKeys = new Set(metadataFields.map(f => f.key));
+  const richFields = (googleArts.metadataFields || []).filter(f => !baseKeys.has(f.key));
+  return [...metadataFields, ...richFields];
+}
+
+// Settings schema for the source's settings UI.
+const settingsSchema = {
+  fields: [
+    {
+      key:            'fetchRichMetadata',
+      type:           'boolean',
+      default:        false,
+      requiresSource: 'google_arts',
+      label:          'Fetch rich metadata from Google Arts & Culture',
+      description:    'Queries the Google Arts & Culture API for extended artwork details (type, medium, date, nationality, dimensions, description). Requires Google Arts & Culture to be enabled as a web source.',
+    },
+  ],
+};
+
+/**
+ * Convert stored source settings to fetcher call options.
+ */
+function buildFetcherOptions(settings) {
+  return { fetchRichMetadata: !!settings?.fetchRichMetadata };
+}
+
+/**
+ * Enrich basic wallpaper metadata with extended fields from Google Arts & Culture.
+ * Lazy-loads google_arts only when called. Returns {} on any failure.
+ */
+async function enrichWithGoogleArts(artworkUrl) {
+  let googleArts;
+  try {
+    googleArts = require('./google_arts');
+  } catch (err) {
+    console.warn('[google_art_wallpaper] Could not load google_arts module:', err.message);
+    return {};
+  }
+  if (typeof googleArts.fetchArtworkMetadata !== 'function') {
+    console.warn('[google_art_wallpaper] google_arts.fetchArtworkMetadata is not available');
+    return {};
+  }
+  try {
+    return await googleArts.fetchArtworkMetadata(artworkUrl);
+  } catch (err) {
+    console.warn('[google_art_wallpaper] Rich metadata fetch failed:', err.message);
+    return {};
+  }
+}
 
 // Images from this source are already cropped to 3840×2160 by the URL suffix.
 // The processing pipeline should skip them to avoid re-cropping pre-sized images.
@@ -117,10 +191,12 @@ const alreadyProcessed = true;
  * slashes on either side.
  *
  * @param {string} identifier - Full Google Arts URL previously shown as artworkUrl
+ * @param {object} [options]
+ * @param {object} [options.settings] - Stored source settings; respects fetchRichMetadata flag.
  * @returns {{ imageBuffer, contentType, metadata }}
  * @throws {Error} if no matching entry is found, or on download failure.
  */
-async function fetchByIdentifier(identifier) {
+async function fetchByIdentifier(identifier, { settings } = {}) {
   let wallpaperList;
   try {
     const response = await axios.get(WALLPAPER_LIST_URL, {
@@ -175,6 +251,8 @@ async function fetchByIdentifier(identifier) {
     throw new Error(`Failed to download wallpaper image: ${err.message}`);
   }
 
+  const richMetadata = settings?.fetchRichMetadata && artworkUrl ? await enrichWithGoogleArts(artworkUrl) : {};
+
   return {
     imageBuffer,
     contentType,
@@ -184,6 +262,7 @@ async function fetchByIdentifier(identifier) {
       attribution: entry.attribution || null,
       artworkUrl,
       source: 'Google Art Wallpaper',
+      ...richMetadata,
     },
   };
 }
@@ -199,4 +278,4 @@ function canHandleIdentifier(identifier) {
   return /artsandculture\.google\.com/i.test(t) && !/artsandculture\.google\.com\/asset\//i.test(t);
 }
 
-module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, metadataFields, defaultMapping, alreadyProcessed };
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, getMetadataFields, metadataFields, defaultMapping, settingsSchema, buildFetcherOptions, alreadyProcessed };

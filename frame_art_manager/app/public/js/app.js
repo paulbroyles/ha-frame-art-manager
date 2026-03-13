@@ -15138,6 +15138,38 @@ function renderWebSourcesList() {
 // ── Web Source Settings Modal ─────────────────────────────────────────────────
 
 /**
+ * Render the settings panel for Google Art Wallpaper.
+ * Handles a generic schema.fields array of boolean toggles, with optional
+ * requiresSource checks against currently-enabled sources.
+ */
+function renderGoogleArtWallpaperSettings(schema, currentSettings) {
+  if (!schema?.fields?.length) return '';
+  let html = '';
+  for (const field of schema.fields) {
+    if (field.type !== 'boolean') continue;
+    const requiredSourceEnabled = !field.requiresSource
+      || !!webSourcesConfig?.sources?.[field.requiresSource]?.enabled;
+    const currentVal = currentSettings?.[field.key] ?? field.default ?? false;
+    const disabledAttr = requiredSourceEnabled ? '' : 'disabled';
+    const disabledNote = requiredSourceEnabled ? '' :
+      ` <em>(requires ${webSourcesConfig?.sources?.[field.requiresSource]?.name || field.requiresSource} to be enabled)</em>`;
+    html += `
+      <div style="margin-bottom:12px;">
+        <label class="ws-global-label" style="${requiredSourceEnabled ? '' : 'opacity:0.5;'}">
+          <input type="checkbox"
+                 class="ws-boolean-setting"
+                 data-setting-key="${escapeHtml(field.key)}"
+                 ${currentVal ? 'checked' : ''}
+                 ${disabledAttr}>
+          ${escapeHtml(field.label)}
+        </label>
+        <p class="pool-health-description">${escapeHtml(field.description)}${disabledNote}</p>
+      </div>`;
+  }
+  return html;
+}
+
+/**
  * Renderers for source-specific settings UI.
  * Each function receives (schema, currentSettings) and returns an HTML string.
  * Add an entry here when adding a new source that needs a settings dialog.
@@ -15145,6 +15177,7 @@ function renderWebSourcesList() {
 const WEB_SOURCE_SETTINGS_RENDERERS = {
   google_arts: renderGoogleArtsSettings,
   met_museum: renderMetMuseumSettings,
+  google_art_wallpaper: renderGoogleArtWallpaperSettings,
 };
 
 /**
@@ -15296,7 +15329,18 @@ async function saveWebSourceSettings() {
       }
     }
 
-    closeWebSourceSettings();
+    // Re-fetch config so sourceMetadata reflects any settings-dependent field changes
+    // (e.g. google_art_wallpaper's fetchRichMetadata toggling the rich field list).
+    const configResp = await fetch(`${API_BASE}/web-sources/config`);
+    const configData = await configResp.json();
+    if (configData.success) {
+      webSourcesConfig = configData.webSources;
+      webSourceMetadata = configData.sourceMetadata || {};
+      // Re-render the open settings panel with the updated field list.
+      openWebSourceSettings(sourceId);
+    } else {
+      closeWebSourceSettings();
+    }
     showToast('Settings saved');
   } catch (error) {
     console.error('Error saving web source settings:', error);
@@ -15328,6 +15372,13 @@ function readWebSourceSettingsFromUI(sourceId) {
       if (!cb.checked) disabledMedia.push(cb.dataset.medium);
     });
     return { disabledMedia };
+  }
+  if (sourceId === 'google_art_wallpaper') {
+    const settings = {};
+    document.querySelectorAll('#web-source-settings-body .ws-boolean-setting').forEach(cb => {
+      settings[cb.dataset.settingKey] = cb.checked;
+    });
+    return settings;
   }
   return {};
 }
