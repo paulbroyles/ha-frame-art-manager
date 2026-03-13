@@ -132,3 +132,38 @@ portrait-mounted hardware.
 
 See the `POST /api/web-sources/test-fetch` route in `routes/web_sources.js` and
 the `tvOrientation` parameter.
+
+### Dual-mode filters (include + exclude on the same type at one level)
+
+Some filter types could benefit from allowing both an include and an exclude filter
+at the same cascade level. For example, a tag-like field (e.g., Object Type) might
+need: "include books, exclude manuscripts" — narrowing to objects that ARE books but
+ARE NOT manuscripts. This requires two filter entries of the same type with different
+modes.
+
+**Backend support**: Already present. `mergeFilterCascade` keys on
+`${filter.type}:${filter.mode}`, so `objectType:require` and `objectType:exclude`
+are tracked and merged independently. The data model (`[{type, mode, values}]`)
+allows multiple entries with the same `type` but different `mode`. Sources receive
+the full merged filter array and can apply both constraints.
+
+**UI gap**: The current `renderFilterList` allows one filter entry per type at a
+given level (the "Add filter" list excludes types already active). Supporting
+dual-mode would require either:
+1. Two separate entries (one include, one exclude) for the same type — would need
+   the `addableTypes` logic to allow adding a second entry if the existing one has
+   a different mode.
+2. A split UI within one entry — e.g., an include section and an exclude section
+   side by side or stacked.
+
+**Validation**: Values selected in one mode should be excluded from the other mode's
+picker at the same level (an item can't be both included and excluded).
+
+**Cascade interaction**: A parent's include filter defines the available universe; a
+child's exclude filter removes from that universe. This already works via
+`isAvailable` / `isLocked` semantics. The new case is both modes at the *same* level,
+which the backend handles but the UI does not yet expose.
+
+**When to implement**: When a concrete use case arises (e.g., a source with a
+tag-like field where users need fine-grained include+exclude at one level). The
+current single-mode-per-type UI is sufficient for medium/category/orientation.

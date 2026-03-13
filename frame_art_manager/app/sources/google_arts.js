@@ -547,18 +547,51 @@ function parseStructuredFields(av12) {
  * @param {Array} av - The stella.av array from the parsed API response
  * @returns {object} Extracted metadata fields (values are strings or null)
  */
+/**
+ * Parse entity associations from stella.av[21] — an array of cobjects representing
+ * entities linked to the artwork (artist, art movement, medium, etc.).
+ *
+ * Each cobject has a trailing metadata tuple [null, ["assetpage_chips", "<category>", "<kgId>", <index>]]
+ * where category is one of: "entity/ARTIST", "entity/ART_MOVEMENT", "entity/ART_MEDIUM".
+ * The KG ID (e.g. "/m/031cgw") is in cobject[7] and matches MEDIUM_ENTITIES IDs.
+ *
+ * @param {Array} av21 - The stella.av[21] array
+ * @returns {{ mediumEntities: string[], artMovements: string[] }}
+ */
+function parseEntityAssociations(av21) {
+  const mediumEntities = [];
+  const artMovements = [];
+  if (!Array.isArray(av21)) return { mediumEntities, artMovements };
+  for (const co of av21) {
+    if (!Array.isArray(co) || co[0] !== 'stella.common.cobject') continue;
+    const name = co[1];
+    // Category is embedded in the trailing metadata tuple
+    const chipsMeta = Array.isArray(co[22]) ? co[22] : null;
+    const category = chipsMeta?.[1]?.[1]; // e.g. "entity/ART_MEDIUM", "entity/ART_MOVEMENT"
+    if (category === 'entity/ART_MEDIUM') {
+      mediumEntities.push(name);
+    } else if (category === 'entity/ART_MOVEMENT') {
+      artMovements.push(name);
+    }
+  }
+  return { mediumEntities, artMovements };
+}
+
 function parseAvBlock(av) {
   const structured = parseStructuredFields(av[12]);
   const rawDesc = Array.isArray(av[5]) ? av[5][1] : null;
   const description = typeof rawDesc === 'string'
     ? rawDesc.replace(/<[^>]+>/g, '').trim() || null
     : null;
+  const { mediumEntities, artMovements } = parseEntityAssociations(av[21]);
   return {
     title:              structured['Title'] || null,
     creator:            structured['Creator'] || null,
     dateCreated:        av[3] || structured['Date Created'] || null,
     type:               structured['Type'] || null,
     medium:             structured['Medium'] || null,
+    mediumEntities:     mediumEntities.length > 0 ? mediumEntities.join('; ') : null,
+    artMovement:        artMovements.length > 0 ? artMovements.join('; ') : null,
     creatorNationality: structured['Creator Nationality'] || null,
     creatorLifespan:    structured['Creator Lifespan'] || null,
     creatorGender:      structured['Creator Gender'] || null,
@@ -631,6 +664,154 @@ async function fetchAssetDetails(assetId) {
  * @returns {{ imageBuffer, contentType, metadata }} — metadata contains all fields defined in FIELD_DEFS plus artworkUrl.
  * @throws {Error} If the filters match no known media, or on network/API failure.
  */
+
+/**
+ * Fetch a random artwork using /api/search.
+ * The search endpoint returns ~56–144 fixed results for a given query.
+ * We pick a random artwork from the result set.
+ *
+ * @param {string} query - Search query string
+ * @param {object} [options]
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all'] - Aspect ratio filter
+ * @param {string[]} [options.excludedTypesLower=[]] - Lowercase objectType values to exclude
+ * @param {Set<string>[]} [options.requireMediaSets=[]] - Each set contains lowercase entity names;
+ *   artwork must have at least one medium entity in ALL sets (intersection).
+ *   Artworks with no medium entities are rejected (require = must have field + match).
+ * @param {Set<string>} [options.excludeMediaValues=new Set()] - Lowercase entity names to exclude;
+ *   artwork rejected if any of its medium entities match. Empty medium entities pass through.
+ */
+async function fetchFromSearch(query, { aspectRatio = 'all', excludedTypesLower = [], requireMediaSets = [], excludeMediaValues = new Set() } = {}) {
+  await seedCookies();
+
+  const hasMediaFilters = requireMediaSets.length > 0 || excludeMediaValues.size > 0;
+  const MAX_ATTEMPTS = hasMediaFilters ? 5 : 3;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    let parsed;
+    try {
+      const response = await cookieClient.get(`${BASE_URL}/api/search`, {
+        params: { q: query, hl: 'en' },
+        headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
+        timeout: 15000,
+        responseType: 'text',
+      });
+      parsed = parseApiResponse(response.data);
+    } catch (err) {
+      console.warn(`[google_arts] Search attempt ${attempt + 1}: API error: ${err.message}`);
+      continue;
+    }
+
+    // Search results are in parsed[0][3] (stella.pr AssetsQuery).
+    // extractArtworks DFS finds all cobjects regardless of nesting.
+    let artworks = extractArtworks(parsed);
+    if (artworks.length === 0) {
+      console.warn(`[google_arts] Search attempt ${attempt + 1}: no artworks for query "${query}"`);
+      continue;
+    }
+
+    console.log(`[google_arts] Search for "${query}" returned ${artworks.length} artworks`);
+
+    // Filter by aspect ratio
+    if (aspectRatio !== 'all') {
+      artworks = artworks.filter(a => {
+        if (a.aspectRatio === null) return false;
+        if (aspectRatio === 'landscape') return a.aspectRatio > 1;
+        if (aspectRatio === 'portrait') return a.aspectRatio < 1;
+        return true;
+      });
+      if (artworks.length === 0) {
+        console.warn(`[google_arts] Search attempt ${attempt + 1}: no ${aspectRatio} artworks in results`);
+        continue;
+      }
+    }
+
+    const artwork = artworks[Math.floor(Math.random() * artworks.length)];
+    const imageUrl = buildDownloadUrl(artwork.imageBase, artwork.aspectRatio);
+    const artworkUrl = `${BASE_URL}${artwork.link}`;
+
+    // Fetch details for post-fetch filtering (objectType exclusion + media entity matching).
+    // Always fetch details when any post-fetch filter is active.
+    const detailsPromise = fetchAssetDetails(artwork.assetId);
+    if (excludedTypesLower.length > 0 || hasMediaFilters) {
+      const earlyDetails = await detailsPromise;
+
+      // objectType exclusion
+      if (excludedTypesLower.length > 0) {
+        const artworkType = (earlyDetails.type || '').toLowerCase();
+        if (excludedTypesLower.includes(artworkType)) {
+          console.warn(`[google_arts] Search attempt ${attempt + 1}: skipping excluded type "${earlyDetails.type}" ("${artwork.title}")`);
+          continue;
+        }
+      }
+
+      // Media entity filtering against av[21] controlled vocabulary
+      if (hasMediaFilters) {
+        const entityNames = (earlyDetails.mediumEntities || '').split('; ').filter(Boolean).map(n => n.toLowerCase());
+
+        // Require: artwork must have medium entities AND at least one must be in every require set
+        if (requireMediaSets.length > 0) {
+          if (entityNames.length === 0) {
+            console.warn(`[google_arts] Search attempt ${attempt + 1}: skipping "${artwork.title}" — no medium entities (require filter active)`);
+            continue;
+          }
+          const matchesAll = requireMediaSets.every(s => entityNames.some(n => s.has(n)));
+          if (!matchesAll) {
+            console.warn(`[google_arts] Search attempt ${attempt + 1}: skipping "${artwork.title}" — medium entities [${entityNames.join(', ')}] don't match require filter`);
+            continue;
+          }
+        }
+
+        // Exclude: reject if any entity matches; empty entities pass through
+        if (excludeMediaValues.size > 0 && entityNames.some(n => excludeMediaValues.has(n))) {
+          console.warn(`[google_arts] Search attempt ${attempt + 1}: skipping "${artwork.title}" — medium entity matches exclude filter`);
+          continue;
+        }
+      }
+    }
+
+    const imageResponse = await axios.get(imageUrl, {
+      responseType: 'arraybuffer',
+      headers: HTTP_HEADERS,
+      timeout: 30000,
+    }).catch(err => { throw new Error(`Failed to download artwork image: ${err.message}`); });
+
+    const details = await detailsPromise;
+
+    let imageBuffer = Buffer.from(imageResponse.data);
+    const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
+
+    // Dezoomify if below 4K target
+    const [targetW, targetH] = aspectRatio === 'portrait' ? [2160, 3840] : [3840, 2160];
+    const { width: dlW, height: dlH } = await sharp(imageBuffer).metadata();
+    if (dlW < targetW || dlH < targetH) {
+      console.log(`[google_arts] Search image is ${dlW}×${dlH} (below ${targetW}×${targetH} target); attempting dezoomify for ${artworkUrl}`);
+      const dezoomedBuffer = await dezoomify(artworkUrl, { maxWidth: 4801 });
+      if (dezoomedBuffer) {
+        imageBuffer = dezoomedBuffer;
+        console.log(`[google_arts] dezoomify succeeded for ${artworkUrl}`);
+      } else {
+        console.log(`[google_arts] dezoomify unavailable or failed; using ${dlW}×${dlH} image`);
+      }
+    }
+
+    return {
+      imageBuffer,
+      contentType,
+      metadata: {
+        ...details,
+        title:      artwork.title || details.title || null,
+        creator:    artwork.creator || details.creator || null,
+        repository: artwork.repository || details.repository || null,
+        color:      artwork.color || null,
+        artworkUrl,
+        source: 'Google Arts & Culture',
+      },
+    };
+  }
+
+  throw new Error(`Could not find an artwork via search "${query}" after ${MAX_ATTEMPTS} attempts`);
+}
+
 async function fetchRandomArtwork(filters = [], options = {}) {
   await seedCookies();
   const { aspectRatio = 'all' } = options;
@@ -654,6 +835,13 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     ? objectTypeExcludeFilters.flatMap(f => f.values || [])
     : DEFAULT_EXCLUDED_TYPES;
   const excludedTypesLower = excludedTypes.map(t => t.toLowerCase());
+
+  // Search mode: use /api/search instead of entity browsing.
+  // Media filters are applied post-fetch against av[21] entity associations.
+  const searchFilter = filters.find(f => f.type === 'search' && f.values?.length > 0);
+  if (searchFilter) {
+    return fetchFromSearch(searchFilter.values[0], { aspectRatio, excludedTypesLower, requireMediaSets, excludeMediaValues });
+  }
 
   // Build candidate entity pool by applying media filters.
   let candidates = MEDIUM_ENTITIES;
@@ -713,16 +901,31 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     const imageUrl = buildDownloadUrl(artwork.imageBase, artwork.aspectRatio);
     const artworkUrl = `${BASE_URL}${artwork.link}`;
 
-    // Start fetching asset details immediately. When type exclusion is active, await
-    // details before downloading the image so excluded artworks waste no bandwidth.
-    // Otherwise, image and details fetch concurrently for better performance.
+    // Start fetching asset details immediately. When post-fetch filters are active
+    // (type exclusion or media exclude), await details before downloading the image
+    // so filtered artworks waste no bandwidth.
     const detailsPromise = fetchAssetDetails(artwork.assetId);
-    if (excludedTypesLower.length > 0) {
+    if (excludedTypesLower.length > 0 || excludeMediaValues.size > 0) {
       const earlyDetails = await detailsPromise;
-      const artworkType = (earlyDetails.type || '').toLowerCase();
-      if (excludedTypesLower.includes(artworkType)) {
-        console.warn(`[google_arts] Attempt ${attempt + 1}: skipping excluded type "${earlyDetails.type}" ("${artwork.title}")`);
-        continue;
+
+      // objectType exclusion
+      if (excludedTypesLower.length > 0) {
+        const artworkType = (earlyDetails.type || '').toLowerCase();
+        if (excludedTypesLower.includes(artworkType)) {
+          console.warn(`[google_arts] Attempt ${attempt + 1}: skipping excluded type "${earlyDetails.type}" ("${artwork.title}")`);
+          continue;
+        }
+      }
+
+      // Media entity exclusion (post-fetch): the entity browse pre-filters by require,
+      // but an artwork on an "Oil paint" page may also have "Oak" as a medium entity.
+      // Exclude checks av[21] entities to reject unwanted secondary mediums.
+      if (excludeMediaValues.size > 0) {
+        const entityNames = (earlyDetails.mediumEntities || '').split('; ').filter(Boolean).map(n => n.toLowerCase());
+        if (entityNames.some(n => excludeMediaValues.has(n))) {
+          console.warn(`[google_arts] Attempt ${attempt + 1}: skipping "${artwork.title}" — medium entity matches exclude filter`);
+          continue;
+        }
       }
     }
 
@@ -788,7 +991,9 @@ const FIELD_DEFS = [
   { key: 'creatorGender',      label: 'Creator Gender',   description: 'Gender of the artist as cataloged',                              defaultMapHint: null     },
   { key: 'type',               label: 'Type',             description: 'Object type from the museum catalog (e.g. "Paintings", "Folio")', defaultMapHint: null     },
   { key: 'medium',             label: 'Medium',           description: 'Materials and technique (e.g. "Tempera colors, gold leaf")',      defaultMapHint: 'medium' },
-  { key: 'style',              label: 'Style',            description: 'Art movement or style (e.g. "Impressionism", "Baroque")',         defaultMapHint: null     },
+  { key: 'mediumEntities',     label: 'Medium Entities',  description: 'Google-categorized medium entities (e.g. "Oil paint; Canvas")',   defaultMapHint: null     },
+  { key: 'artMovement',        label: 'Art Movement',     description: 'Art movement or period (e.g. "Impressionism; Post-Impressionism")', defaultMapHint: null   },
+  { key: 'style',              label: 'Style',            description: 'AI-generated style tags (e.g. "Impressionism", "Baroque")',       defaultMapHint: null     },
   { key: 'dateCreated',        label: 'Date Created',     description: 'Date or year the artwork was created',                           defaultMapHint: 'year'   },
   { key: 'repository',         label: 'Repository',       description: 'Museum or holding institution',                                  defaultMapHint: 'museum' },
   { key: 'dimensions',         label: 'Dimensions',       description: 'Physical dimensions (e.g. "w1345 x h2390 cm")',                  defaultMapHint: null     },
@@ -823,6 +1028,16 @@ const defaultMapping = Object.fromEntries(FIELD_DEFS.map(({ key, defaultMapHint 
  */
 function getFilterTypes() {
   return [
+    {
+      type: 'search',
+      label: 'Search',
+      description: 'Search Google Arts & Culture by keyword. When set, artworks are fetched from search results instead of browsing by medium. Add style/subject/period words for diversity.',
+      modes: ['require'],
+      multiValue: false,
+      modeDetermining: true,
+      inputStyle: 'search',
+      values: [],
+    },
     {
       type: 'media',
       label: 'Medium',
@@ -1021,4 +1236,37 @@ async function fetchArtworkMetadata(identifier) {
   return fetchAssetDetails(assetId);
 }
 
-module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, DEFAULT_EXCLUDED_TYPES, getFilterTypes, metadataFields, defaultMapping };
+/**
+ * Examine the full merged filter set and determine the best API strategy.
+ *
+ * Modes:
+ * - 'search': When a search filter is present (mode-determining). Uses /api/search.
+ * - 'browse_medium': Default. Paginated entity browsing by medium via /api/entity/assets.
+ *
+ * @param {Array<{type, mode, values}>} filters - Merged filters from all cascade levels.
+ * @returns {{ mode: string, apiFilters: Array, postFilters: Array }}
+ */
+function selectMode(filters = []) {
+  const searchFilter = filters.find(f => f.type === 'search' && f.values?.length > 0);
+  if (searchFilter) {
+    // In search mode, media filters are applied post-fetch against av[21] entity associations
+    const postFilters = filters.filter(f => f.type === 'objectType' || f.type === 'media');
+    return { mode: 'search', apiFilters: [searchFilter], postFilters };
+  }
+
+  const apiFilters = filters.filter(f => f.type === 'media');
+  const postFilters = filters.filter(f => f.type === 'objectType');
+  return { mode: 'browse_medium', apiFilters, postFilters };
+}
+
+/**
+ * Returns default filters to apply when a source is first initialized and has no
+ * filters configured. Called by the route layer during config read.
+ */
+function getDefaultFilters() {
+  return [
+    { type: 'objectType', mode: 'exclude', values: DEFAULT_EXCLUDED_TYPES },
+  ];
+}
+
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, selectMode, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, DEFAULT_EXCLUDED_TYPES, getFilterTypes, getDefaultFilters, metadataFields, defaultMapping };

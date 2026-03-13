@@ -248,6 +248,19 @@ const defaultMapping = {
  *   Internally each category expands to one or more API classification values via
  *   CLASSIFICATION_EXPANSIONS. The groups field mirrors MEDIUM_CATEGORIES for UI grouping.
  */
+/**
+ * Examine the full merged filter set and determine the best API strategy.
+ * Met Museum always uses the search API; media filters translate to classification params.
+ *
+ * @param {Array<{type, mode, values}>} filters - Merged filters from all cascade levels.
+ * @returns {{ mode: string, apiFilters: Array, postFilters: Array }}
+ */
+function selectMode(filters = []) {
+  const apiFilters = filters.filter(f => f.type === 'media');
+  const postFilters = [];
+  return { mode: 'search', apiFilters, postFilters };
+}
+
 function getFilterTypes() {
   return [
     {
@@ -329,4 +342,4 @@ async function fetchByIdentifier(identifier) {
   return _fetchByObjectIdOriginal(objectId);
 }
 
-module.exports = { fetchRandomArtwork, fetchByObjectId, fetchByIdentifier, canHandleIdentifier, MEDIUM_TYPES, MEDIUM_CATEGORIES, getFilterTypes, metadataFields, defaultMapping };
+module.exports = { fetchRandomArtwork, fetchByObjectId, fetchByIdentifier, canHandleIdentifier, selectMode, MEDIUM_TYPES, MEDIUM_CATEGORIES, getFilterTypes, metadataFields, defaultMapping };

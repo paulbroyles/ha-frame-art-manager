@@ -149,6 +149,17 @@ const settingsSchema = {
  * Google Art Wallpaper is a fixed curated list with no filterable dimensions,
  * so no filter types are supported.
  */
+/**
+ * Examine the full merged filter set and determine the best API strategy.
+ * Google Art Wallpaper always uses the static curated list; no filters affect mode.
+ *
+ * @param {Array<{type, mode, values}>} filters - Merged filters from all cascade levels.
+ * @returns {{ mode: string, apiFilters: Array, postFilters: Array }}
+ */
+function selectMode(filters = []) {
+  return { mode: 'list', apiFilters: [], postFilters: [] };
+}
+
 function getFilterTypes() {
   return [];
 }
@@ -288,4 +299,7 @@ function canHandleIdentifier(identifier) {
   return /artsandculture\.google\.com/i.test(t) && !/artsandculture\.google\.com\/asset\//i.test(t);
 }
 
-module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, getMetadataFields, getFilterTypes, getExtraOptions, metadataFields, defaultMapping, settingsSchema, alreadyProcessed };
+// All entries are center-cropped to 3840×2160 — landscape only.
+const aspectRatioConstraint = 'landscape';
+
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, selectMode, getMetadataFields, getFilterTypes, getExtraOptions, metadataFields, defaultMapping, settingsSchema, alreadyProcessed, aspectRatioConstraint };

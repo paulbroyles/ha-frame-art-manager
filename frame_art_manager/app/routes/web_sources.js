@@ -6,7 +6,7 @@ const axios = require('axios');
 const sharp = require('sharp');
 const { processWebSourceImage, solidBorderStrip, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA } = require('../utils/imageProcessor');
 
-// Source modules — each must export fetchRandomArtwork, metadataFields, and defaultMapping.
+// Source modules — each must export fetchRandomArtwork, selectMode, metadataFields, and defaultMapping.
 // Optional: settingsSchema, getExtraOptions, getFilterTypes, getMetadataFields, alreadyProcessed.
 // web_sources.js delegates source-specific logic to these modules generically.
 const SOURCE_MODULES = {
@@ -48,6 +48,66 @@ function buildSourceMetadata(webSources) {
       return [id, { fields, defaultMapping: mod.defaultMapping || {} }];
     })
   );
+}
+
+// ── Core filter types (framework-level, not per-source) ───────────────────────
+// These filter types apply across all sources and are merged with per-source
+// filter types in the config response. Sources don't declare these — the
+// framework manages them.
+const CORE_FILTER_TYPES = [
+  {
+    type: 'orientation',
+    label: 'Orientation',
+    description: 'Filter by image aspect ratio (landscape or portrait)',
+    modes: ['require'],
+    multiValue: false,
+    core: true,
+    values: [
+      { value: 'landscape', label: 'Landscape' },
+      { value: 'portrait', label: 'Portrait' },
+      { value: 'match_tv', label: 'Match TV' },
+    ],
+  },
+];
+
+/**
+ * Merge filters from multiple cascade levels (global → source → virtual tag).
+ *
+ * Semantics:
+ *   - Same type + require: intersection of value sets (lower levels narrow).
+ *   - Same type + exclude: union of value sets (lower levels add exclusions).
+ *   - Different types coexist independently.
+ *
+ * @param {...Array<{type, mode, values}>} filterLevels - Filter arrays in cascade order.
+ * @returns {Array<{type, mode, values}>} Merged filter array.
+ */
+function mergeFilterCascade(...filterLevels) {
+  const merged = {};
+
+  for (const filters of filterLevels) {
+    for (const filter of (filters || [])) {
+      if (!filter.type || !filter.mode || !Array.isArray(filter.values) || filter.values.length === 0) continue;
+      const key = `${filter.type}:${filter.mode}`;
+      if (!merged[key]) {
+        merged[key] = { type: filter.type, mode: filter.mode, values: [...filter.values] };
+      } else if (filter.mode === 'require') {
+        // Intersection: only keep values present in BOTH sets
+        const existing = new Set(merged[key].values.map(v => v.toLowerCase()));
+        merged[key].values = filter.values.filter(v => existing.has(v.toLowerCase()));
+      } else {
+        // Union (exclude): add all new values
+        const existing = new Set(merged[key].values.map(v => v.toLowerCase()));
+        for (const v of filter.values) {
+          if (!existing.has(v.toLowerCase())) {
+            merged[key].values.push(v);
+            existing.add(v.toLowerCase());
+          }
+        }
+      }
+    }
+  }
+
+  return Object.values(merged).filter(f => f.values.length > 0);
 }
 
 const SUPERVISOR_TOKEN = process.env.SUPERVISOR_TOKEN;
@@ -157,6 +217,7 @@ async function readWebSourcesConfig(frameArtPath) {
   if (!config.perTvCache) config.perTvCache = {};
   if (!config.imageProcessing) config.imageProcessing = {};
   if (!config.virtualTags) config.virtualTags = {};
+  if (!config.globalFilters) config.globalFilters = [];
   const ip = config.imageProcessing;
   if (!ip.preProcessor)       ip.preProcessor       = 'corner_consensus';
   if (!ip.cropEngine)         ip.cropEngine         = 'sharp';
@@ -169,7 +230,7 @@ async function readWebSourcesConfig(frameArtPath) {
   // Ensure all builtin sources are present (add any missing ones with defaults)
   for (const [id, def] of Object.entries(BUILTIN_SOURCES)) {
     if (!config.sources[id]) {
-      config.sources[id] = { ...def, enabled: false };
+      config.sources[id] = { ...def };
     }
   }
 
@@ -179,6 +240,7 @@ async function readWebSourcesConfig(frameArtPath) {
   // Only runs when old keys are still present; harmless on already-migrated configs.
   for (const [id, sourceConfig] of Object.entries(config.sources)) {
     if (!sourceConfig.filters) sourceConfig.filters = [];
+    const mod = SOURCE_MODULES[id];
 
     // Migrate settings.disabledMedia → { type: 'media', mode: 'exclude', values }
     if (sourceConfig.settings?.disabledMedia?.length > 0) {
@@ -188,25 +250,52 @@ async function readWebSourcesConfig(frameArtPath) {
       delete sourceConfig.settings.disabledMedia;
     }
 
-    // Migrate google_arts settings.excludedTypes → { type: 'objectType', mode: 'exclude', values }
-    if (id === 'google_arts' && Object.prototype.hasOwnProperty.call(sourceConfig.settings || {}, 'excludedTypes')) {
-      if (!sourceConfig.filters.some(f => f.type === 'objectType')) {
+    // Migrate settings.excludedTypes → filter (for sources that declared an objectType filter type)
+    if (Object.prototype.hasOwnProperty.call(sourceConfig.settings || {}, 'excludedTypes')) {
+      const hasObjectTypeFilter = (mod?.getFilterTypes?.() || []).some(ft => ft.type === 'objectType');
+      if (hasObjectTypeFilter && !sourceConfig.filters.some(f => f.type === 'objectType')) {
         sourceConfig.filters.push({ type: 'objectType', mode: 'exclude', values: sourceConfig.settings.excludedTypes ?? [] });
       }
       delete sourceConfig.settings.excludedTypes;
     }
+
+    // Apply default filters from the source module for new/empty configs.
+    // Sources export getDefaultFilters() to declare filters that should be present
+    // out of the box (e.g. excluding unwanted object types).
+    if (mod?.getDefaultFilters) {
+      for (const defaultFilter of mod.getDefaultFilters()) {
+        if (!sourceConfig.filters.some(f => f.type === defaultFilter.type)) {
+          sourceConfig.filters.push(defaultFilter);
+        }
+      }
+    }
   }
 
-  // Pre-populate google_arts default objectType exclusions for new configs that have
-  // no objectType filter set. This preserves the previous default behavior of
-  // skipping folios, manuscripts, etc. without the user needing to configure anything.
-  const gaSource = config.sources['google_arts'];
-  if (gaSource && !gaSource.filters.some(f => f.type === 'objectType')) {
-    gaSource.filters.push({
-      type: 'objectType',
-      mode: 'exclude',
-      values: SOURCE_MODULES.google_arts.DEFAULT_EXCLUDED_TYPES,
-    });
+  // ── Config v2 migration ────────────────────────────────────────────────────
+  // Migrate from v1 (aspectRatioFilter + enabled sources) to v2
+  // (globalFilters + virtual tags replace source selection).
+  if (!config.configVersion || config.configVersion < 2) {
+    // Migrate aspectRatioFilter → globalFilters orientation entry
+    if (config.aspectRatioFilter && config.aspectRatioFilter !== 'all') {
+      if (!config.globalFilters.some(f => f.type === 'orientation')) {
+        config.globalFilters.push({
+          type: 'orientation',
+          mode: 'require',
+          values: [config.aspectRatioFilter],
+        });
+      }
+    }
+
+    // Remove the legacy enabled field from all sources.
+    // Sources are now active when referenced by virtual tags in tagsets.
+    for (const sourceConfig of Object.values(config.sources)) {
+      delete sourceConfig.enabled;
+    }
+
+    config.configVersion = 2;
+    // Persist migration so it only runs once
+    await writeWebSourcesConfig(frameArtPath, config);
+    console.log('[web_sources] Migrated config to v2 (globalFilters, removed enabled field)');
   }
 
   return config;
@@ -351,12 +440,20 @@ function buildHaMetadata(attributeSnapshot, entitySnapshot) {
 /**
  * Resolve the effective aspect ratio filter for a fetch operation.
  *
+ * Reads from globalFilters (v2 config) first, falling back to the legacy
+ * aspectRatioFilter field (v1 compat — should be gone after migration).
+ *
  * 'match_tv' requires the caller to pass tvOrientation ('landscape' or 'portrait').
  * When tvOrientation is not provided (e.g. the integration doesn't yet support
  * orientation detection), falls back to 'all'.
  */
 function resolveAspectRatioFilter(webSources, tvOrientation) {
-  const setting = webSources.aspectRatioFilter || 'all';
+  // v2: read from globalFilters orientation entry
+  const orientationFilter = (webSources.globalFilters || []).find(
+    f => f.type === 'orientation' && f.mode === 'require'
+  );
+  const setting = orientationFilter?.values?.[0] || webSources.aspectRatioFilter || 'all';
+
   if (setting === 'match_tv') {
     if (tvOrientation === 'landscape' || tvOrientation === 'portrait') return tvOrientation;
     console.warn('[web_sources] match_tv selected but tvOrientation not provided; falling back to "all"');
@@ -372,7 +469,9 @@ function resolveAspectRatioFilter(webSources, tvOrientation) {
  *   'portrait'  constraint → incompatible with 'landscape' filter
  */
 function isSourceCompatible(sourceId, aspectRatio) {
-  const constraint = BUILTIN_SOURCES[sourceId]?.aspectRatioConstraint;
+  // Check source module first (v2), fall back to BUILTIN_SOURCES (v1 compat)
+  const constraint = SOURCE_MODULES[sourceId]?.aspectRatioConstraint
+    || BUILTIN_SOURCES[sourceId]?.aspectRatioConstraint;
   if (!constraint) return true;
   if (constraint === 'landscape' && aspectRatio === 'portrait') return false;
   if (constraint === 'portrait'  && aspectRatio === 'landscape') return false;
@@ -386,16 +485,23 @@ router.get('/config', async (req, res) => {
   try {
     const webSources = await readWebSourcesConfig(req.frameArtPath);
     const sourceConstraints = Object.fromEntries(
-      Object.entries(BUILTIN_SOURCES)
-        .filter(([, s]) => s.aspectRatioConstraint)
-        .map(([id, s]) => [id, { aspectRatioConstraint: s.aspectRatioConstraint }])
+      Object.entries(SOURCE_MODULES)
+        .filter(([id, mod]) => mod.aspectRatioConstraint || BUILTIN_SOURCES[id]?.aspectRatioConstraint)
+        .map(([id, mod]) => [id, { aspectRatioConstraint: mod.aspectRatioConstraint || BUILTIN_SOURCES[id].aspectRatioConstraint }])
+    );
+    const sourceCapabilities = Object.fromEntries(
+      Object.entries(SOURCE_MODULES).map(([id, mod]) => [id, {
+        hasCookies: typeof mod.clearCookies === 'function',
+      }])
     );
     res.json({
       success: true,
       webSources,
       settingsSchemas: SOURCE_SETTINGS_SCHEMAS,
       filterTypes: SOURCE_FILTER_TYPES,
+      coreFilterTypes: CORE_FILTER_TYPES,
       sourceConstraints,
+      sourceCapabilities,
       sourceMetadata: buildSourceMetadata(webSources),
       imageProcessingSchema: IMAGE_PROCESSING_SCHEMA,
     });
@@ -463,6 +569,40 @@ router.put('/aspect-ratio-filter', async (req, res) => {
   } catch (error) {
     console.error('Error updating aspect ratio filter:', error);
     res.status(500).json({ error: 'Failed to update aspect ratio filter' });
+  }
+});
+
+// PUT /api/web-sources/global-filters
+// Body: { filters: [{type, mode, values}] }
+// Replaces the stored global filter array. Each filter is validated against CORE_FILTER_TYPES.
+// Global filters apply to ALL sources and cascade into per-source and virtual tag filters.
+router.put('/global-filters', async (req, res) => {
+  try {
+    const { filters } = req.body;
+    if (!Array.isArray(filters)) {
+      return res.status(400).json({ error: 'filters must be an array' });
+    }
+
+    for (const filter of filters) {
+      if (!filter.type || !filter.mode || !Array.isArray(filter.values)) {
+        return res.status(400).json({ error: 'Each filter must have type (string), mode (string), and values (array)' });
+      }
+      const typeDef = CORE_FILTER_TYPES.find(ct => ct.type === filter.type);
+      if (!typeDef) {
+        return res.status(400).json({ error: `Filter type "${filter.type}" is not a recognized global filter type` });
+      }
+      if (!typeDef.modes.includes(filter.mode)) {
+        return res.status(400).json({ error: `Mode "${filter.mode}" is not valid for global filter type "${filter.type}"` });
+      }
+    }
+
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+    webSources.globalFilters = filters;
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
+    res.json({ success: true, globalFilters: filters });
+  } catch (error) {
+    console.error('Error updating global filters:', error);
+    res.status(500).json({ error: 'Failed to update global filters' });
   }
 });
 
@@ -654,31 +794,9 @@ router.delete('/virtual-tags/:id', async (req, res) => {
   }
 });
 
-// PUT /api/web-sources/sources/:sourceId/enable
-router.put('/sources/:sourceId/enable', async (req, res) => {
-  try {
-    const { sourceId } = req.params;
-    const { enabled } = req.body;
-
-    if (typeof enabled !== 'boolean') {
-      return res.status(400).json({ error: 'enabled must be a boolean' });
-    }
-    if (!BUILTIN_SOURCES[sourceId]) {
-      return res.status(404).json({ error: `Unknown source: ${sourceId}` });
-    }
-
-    const webSources = await readWebSourcesConfig(req.frameArtPath);
-    webSources.sources[sourceId] = {
-      ...(webSources.sources[sourceId] || BUILTIN_SOURCES[sourceId]),
-      enabled,
-    };
-    await writeWebSourcesConfig(req.frameArtPath, webSources);
-    res.json({ success: true, source: webSources.sources[sourceId] });
-  } catch (error) {
-    console.error('Error updating web source:', error);
-    res.status(500).json({ error: 'Failed to update web source' });
-  }
-});
+// PUT /api/web-sources/sources/:sourceId/enable — REMOVED
+// Sources are now active via virtual tags (no enable/disable toggle).
+// The frontend manages default virtual tags directly via the virtual tag CRUD routes.
 
 // PUT /api/web-sources/sources/:sourceId/metadata-mapping
 // Body: { userMapping: { fieldKey: null|string|{entity,attribute} } }
@@ -791,17 +909,11 @@ router.post('/fetch-and-display', async (req, res) => {
       chosenSourceId = virtualTag.sourceId;
     }
 
-    // Determine which source to use
+    // Determine which source to use.
     if (!chosenSourceId) {
-      const enabledSources = Object.entries(webSources.sources)
-        .filter(([id, s]) => s.enabled && isSourceCompatible(id, aspectRatio))
-        .map(([id]) => id);
-      if (enabledSources.length === 0) {
-        return res.status(400).json({
-          error: 'No web sources are enabled and compatible with the current orientation filter. Enable at least one compatible source in Web Sources settings.',
-        });
-      }
-      chosenSourceId = enabledSources[Math.floor(Math.random() * enabledSources.length)];
+      return res.status(400).json({
+        error: 'Either virtualTagId or sourceId is required.',
+      });
     } else if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
       return res.status(400).json({
         error: `Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`,
@@ -817,11 +929,11 @@ router.post('/fetch-and-display', async (req, res) => {
       return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
     }
 
-    // Merge source-level filters with virtual tag filters (tag filters layer on top).
+    // Merge filters across cascade levels: global → source → virtual tag.
+    const globalFilters = webSources.globalFilters || [];
     const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
-    const mergedFilters = virtualTag?.filters?.length
-      ? [...sourceFilters, ...virtualTag.filters]
-      : sourceFilters;
+    const tagFilters = virtualTag?.filters || [];
+    const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
     const extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
 
     // Fetch, with optional retry when the image is below the minimum resolution threshold.
@@ -965,17 +1077,15 @@ async function fetchSpecificImage(specificImage, { tvOrientation, webSources } =
 // Fetch a test image from an enabled web source without sending it to any TV.
 // Stores the result in webSources.testCache (same structure as perTvCache entries).
 //
-// Body: { tvOrientation?: 'landscape'|'portrait', specificImage?: string, virtualTagId?: string }
-// virtualTagId: if provided, uses the virtual tag's sourceId and merges its filters.
-// tvOrientation is used when aspectRatioFilter is 'match_tv'. Pass the orientation
-// of the TV being simulated. If omitted and filter is 'match_tv', falls back to 'all'.
-// specificImage is a Met Museum object ID, Met Museum collection URL, or any image URL.
-//
-// TODO (docs/ROADMAP.md): Consider adding "virtual TV" support so users can test
-// portrait artwork without a portrait-mounted physical TV.
+// Body: { tvOrientation?, specificImage?, virtualTagId?, sourceId?, filters? }
+// - virtualTagId: use the virtual tag's sourceId and merge its filters through the cascade.
+// - sourceId + filters: ad-hoc mode — use the given source with the provided filters
+//   (merged with global + source-level filters). No virtual tag needed.
+// - specificImage: fetch a specific image (Met Museum ID, URL, etc.) — ignores source selection.
+// - tvOrientation: used when orientation filter is 'match_tv'. Defaults to 'landscape'.
 router.post('/test-fetch', async (req, res) => {
   try {
-    const { tvOrientation, specificImage, virtualTagId } = req.body || {};
+    const { tvOrientation, specificImage, virtualTagId, sourceId: adHocSourceId, filters: adHocFilters } = req.body || {};
     const webSources = await readWebSourcesConfig(req.frameArtPath);
     const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
 
@@ -989,31 +1099,46 @@ router.post('/test-fetch', async (req, res) => {
     }
 
     let chosenSourceId, imageBuffer, contentType, artMetadata;
+    const fetchTrace = { aspectRatio };
 
     if (specificImage && specificImage.trim()) {
-      // Fetch a specific image rather than a random one from an enabled source.
+      // Fetch a specific image rather than a random one.
+      fetchTrace.path = 'specific';
+      fetchTrace.specificImage = specificImage;
       ({ chosenSourceId, imageBuffer, contentType, artMetadata } = await fetchSpecificImage(specificImage, { tvOrientation, webSources }));
-      // If source could not be determined (direct URL), fall back to first enabled source for
-      // processing pipeline metadata (alreadyProcessed flag, effectiveMapping).
+      // If source could not be determined (direct URL), fall back to first source with
+      // a virtual tag for processing pipeline metadata (alreadyProcessed flag, effectiveMapping).
       if (!chosenSourceId) {
-        const enabledSources = Object.entries(webSources.sources)
-          .filter(([id, s]) => s.enabled)
-          .map(([id]) => id);
-        chosenSourceId = enabledSources[0] || Object.keys(SOURCE_MODULES)[0];
+        const firstTagSource = Object.values(webSources.virtualTags)[0]?.sourceId;
+        chosenSourceId = firstTagSource || Object.keys(SOURCE_MODULES)[0];
       }
+    } else if (adHocSourceId) {
+      // Ad-hoc mode: source + inline filters, no virtual tag needed.
+      chosenSourceId = adHocSourceId;
+      const fetcher = SOURCE_FETCHERS[chosenSourceId];
+      if (!fetcher) {
+        return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
+      }
+      const globalFilters = webSources.globalFilters || [];
+      const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
+      const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, adHocFilters || []);
+      const sourceModule = SOURCE_MODULES[chosenSourceId];
+      const modeInfo = sourceModule?.selectMode?.(mergedFilters) || { mode: 'unknown' };
+      fetchTrace.path = 'ad-hoc';
+      fetchTrace.mode = modeInfo.mode;
+      fetchTrace.globalFilters = globalFilters;
+      fetchTrace.sourceFilters = sourceFilters;
+      fetchTrace.adHocFilters = adHocFilters || [];
+      fetchTrace.mergedFilters = mergedFilters;
+      const extraOpts = sourceModule?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
+      ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(mergedFilters, { aspectRatio, ...extraOpts }));
     } else {
-      // Virtual tag determines source; otherwise pick a random enabled source.
+      // Virtual tag determines source.
       chosenSourceId = virtualTag?.sourceId || null;
       if (!chosenSourceId) {
-        const enabledSources = Object.entries(webSources.sources)
-          .filter(([id, s]) => s.enabled && isSourceCompatible(id, aspectRatio))
-          .map(([id]) => id);
-        if (enabledSources.length === 0) {
-          return res.status(400).json({
-            error: 'No web sources are enabled and compatible with the current orientation filter. Enable at least one compatible source in Web Sources settings.',
-          });
-        }
-        chosenSourceId = enabledSources[Math.floor(Math.random() * enabledSources.length)];
+        return res.status(400).json({
+          error: 'Select a virtual tag or source for random test fetches.',
+        });
       }
 
       const fetcher = SOURCE_FETCHERS[chosenSourceId];
@@ -1021,11 +1146,21 @@ router.post('/test-fetch', async (req, res) => {
         return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
       }
 
+      // Merge filters across cascade levels: global → source → virtual tag.
+      const globalFilters = webSources.globalFilters || [];
       const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
-      const mergedFilters = virtualTag?.filters?.length
-        ? [...sourceFilters, ...virtualTag.filters]
-        : sourceFilters;
-      const extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
+      const tagFilters = virtualTag?.filters || [];
+      const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
+      const sourceModule = SOURCE_MODULES[chosenSourceId];
+      const modeInfo = sourceModule?.selectMode?.(mergedFilters) || { mode: 'unknown' };
+      fetchTrace.path = 'virtual-tag';
+      fetchTrace.virtualTagId = virtualTagId;
+      fetchTrace.mode = modeInfo.mode;
+      fetchTrace.globalFilters = globalFilters;
+      fetchTrace.sourceFilters = sourceFilters;
+      fetchTrace.tagFilters = tagFilters;
+      fetchTrace.mergedFilters = mergedFilters;
+      const extraOpts = sourceModule?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
       ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(mergedFilters, { aspectRatio, ...extraOpts }));
     }
 
@@ -1079,6 +1214,7 @@ router.post('/test-fetch', async (req, res) => {
       ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
       fetchedAt: new Date().toISOString(),
       ...(activePreProcessor && { processingInfo: { configured: activePreProcessor, ...processingResult, preProcessorOptions, cropEngineOptions } }),
+      fetchTrace,
     };
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 

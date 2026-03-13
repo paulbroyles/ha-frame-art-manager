@@ -18,16 +18,18 @@ Source modules are responsible only for fetching and filtering.
 1. Create `frame_art_manager/app/sources/<source_id>.js` following the contract below.
 2. Add the module to `SOURCE_MODULES` in `web_sources.js` (order matters — more-specific `canHandleIdentifier` patterns should come first).
 3. Add a `BUILTIN_SOURCES` entry in `web_sources.js`.
-4. If the source has filterable dimensions (e.g. media categories, object types), export `getFilterTypes()`.
-5. If the source has non-filter options derived from settings (e.g. fetchRichMetadata), export `getExtraOptions(settings)`.
-6. If the source has stable per-artwork identifiers, export `fetchByIdentifier` and `canHandleIdentifier`.
-7. Create `docs/art_sources/<SOURCE>.md` documenting the external API, selection strategy, and any limitations.
+4. Export `selectMode(filters)` — even if the source has only one mode, this is required.
+5. If the source has filterable dimensions (e.g. media categories, object types), export `getFilterTypes()`.
+6. If the source has non-filter options derived from settings (e.g. fetchRichMetadata), export `getExtraOptions(settings)`.
+7. If the source has stable per-artwork identifiers, export `fetchByIdentifier` and `canHandleIdentifier`.
+8. If the source is orientation-constrained, export `aspectRatioConstraint` (see _Landscape-only sources_).
+9. Create `docs/art_sources/<SOURCE>.md` documenting the external API, selection strategy, and any limitations.
 
 ---
 
 ## Source Module Contract
 
-### Required Export
+### Required Exports
 
 ```js
 async function fetchRandomArtwork(filters = [], options = {})
@@ -72,6 +74,29 @@ All other fields returned in `metadata` should be declared in `metadataFields` s
 **Errors:** Throw a plain `Error` with a descriptive message on network failure, empty results, or
 an unsatisfiable filter (e.g. portrait requested from a landscape-only source). The route layer
 catches all errors and returns HTTP 500 with `error.message`.
+
+```js
+function selectMode(filters = [])
+```
+
+Examines the full merged filter set and returns the best API strategy for this source.
+Called internally by `fetchRandomArtwork` and also exported for introspection (the test
+panel can display which mode was selected).
+
+**Return value:**
+
+```js
+{
+  mode: string,       // Internal mode identifier (e.g. 'browse_medium', 'search', 'list')
+  apiFilters: Array,  // Subset of filters the API can enforce natively
+  postFilters: Array, // Subset of filters that must be checked after download
+}
+```
+
+Sources with only one mode can return a static result. Sources with multiple API strategies
+(e.g. search vs. browse) examine the filter set to pick the most efficient approach.
+Filter types with `modeDetermining: true` in their schema hint to the UI that configuring
+that filter changes the API strategy.
 
 ### Required metadata exports
 
@@ -152,6 +177,7 @@ function getFilterTypes() {
       description: 'Filter by art medium',
       modes: ['require', 'exclude'],  // Which modes this filter supports
       multiValue: true,               // Can multiple values be selected?
+      modeDetermining: false,         // If true, configuring this filter changes the API strategy
       values: [                        // Enumerated possible values
         { value: 'Paintings', label: 'Paintings' },
         { value: 'Sculpture', label: 'Sculpture' },
@@ -160,6 +186,14 @@ function getFilterTypes() {
         { name: 'Fine Art', values: ['Paintings', 'Sculpture'] },
       ],
     },
+  ];
+}
+
+// Return default filters applied when the source is first initialized with no filters.
+// Optional — omit if the source has no sensible defaults.
+function getDefaultFilters() {
+  return [
+    { type: 'objectType', mode: 'exclude', values: ['folio', 'codex'] },
   ];
 }
 
@@ -232,8 +266,9 @@ If a source can only ever produce landscape images (e.g. images are fixed-crop a
      throw new Error('This source only provides landscape artworks; portrait filter cannot be satisfied');
    }
    ```
-2. Declare `aspectRatioConstraint: 'landscape'` in its `BUILTIN_SOURCES` entry so the route layer
-   skips it automatically and the UI grays it out.
+2. Export `aspectRatioConstraint = 'landscape'` from the source module so the route layer
+   skips it automatically and the UI grays it out. (Also declared in `BUILTIN_SOURCES` for
+   backward compatibility during the migration period.)
 
 Similarly for a portrait-only source: fast-fail on `'landscape'` and set `aspectRatioConstraint: 'portrait'`.
 
@@ -291,11 +326,15 @@ See existing docs in `docs/art_sources/` as examples.
 POST /api/web-sources/fetch-and-display
   → resolveAspectRatioFilter(webSources, tvOrientation)   // 'match_tv' → concrete value
   → isSourceCompatible(sourceId, aspectRatio)             // skip constrained sources
-  → merge source filters + virtual tag filters            // if virtualTagId provided
+  → mergeFilterCascade(globalFilters, sourceFilters, tagFilters)  // 3-level cascade
   → fetcher(mergedFilters, { aspectRatio, ...extraOpts }) // your fetchRandomArtwork
   → write image to cache file
   → displayImageOnTV(cachePath, deviceId)
 ```
+
+Filters cascade through three levels: **global → per-source → per-virtual-tag**.
+The route layer merges them using `mergeFilterCascade()` (require = intersection, exclude = union).
+Sources receive the fully merged filter array and should not need to know which level a filter came from.
 
 The test-fetch path (`POST /api/web-sources/test-fetch`) uses the same filter and fetcher call
 but writes to a `_test.<ext>` cache file and does not call `displayImageOnTV`.

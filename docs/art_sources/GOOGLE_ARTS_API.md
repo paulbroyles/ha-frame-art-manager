@@ -42,6 +42,8 @@ Full-text search. Returns a fixed first page of results (~50–150 artworks) wit
 
 **Workaround for diversity**: Appending subject/style/period modifiers (e.g., `"oil paint portrait"`, `"watercolor landscape"`) shifts the result set substantially — empirically ~90%+ unique artworks compared to the base query. This is useful but not true randomness.
 
+**Medium filtering in search mode**: The search endpoint has no medium filter parameter. Instead, medium filters are applied post-fetch by checking the artwork's `stella.av[21]` entity associations (see `ART_MEDIUM` entities under `/api/asset` → Entity associations). Require mode rejects artworks whose medium entities don't match (or that have no medium entities at all). Exclude mode rejects artworks that have a matching medium entity but allows artworks with no medium entities through.
+
 ---
 
 ### `GET /api/asset`
@@ -80,7 +82,13 @@ parsed[0][0] = stella.ap = [
   [7]  <stella.common.cobject>               // institution/repository cobject
   [10] <aspectRatio>                         // float: width / height
   [12] [<structured metadata fields>]        // see below
-  [21] [<artist cobject>]                    // artist entity cobject
+  [13] [<cobject>, ...]                      // related artworks: "By same artist", "Uses same medium",
+                                             //   "Visually similar work", "Related story" — each is a
+                                             //   stella.common.cobject with a trailing metadata tuple
+                                             //   identifying the relationship type
+  [15] [<title>, <description>, <url>, ...]  // sharing/SEO metadata
+  [18] ["stella.pr", "<QueryType>:<uuid>"]   // server query identifier
+  [21] [<entity cobject>, ...]               // entity associations — see below
   [25] "<colorHex>"                          // dominant color WITHOUT "#" (e.g. "17120c")
                                              //   (also available from cobject[8] in listing)
 ]
@@ -139,6 +147,24 @@ Known labels (confirmed via API inspection):
 
 Implemented as `parseStructuredFields(av[12])` in `sources/google_arts.js` — returns `{ label: joinedValues }` (display text only; entity links in `v[2][1]` are not currently extracted).
 
+**Entity associations (`stella.av[21]`):**
+
+An array of `stella.common.cobject` entries representing entities linked to the artwork. Each cobject represents an artist, art movement, or medium entity from Google's Knowledge Graph. The entity name is in `cobject[1]`, the KG ID in `cobject[7]`, and the category is embedded in a trailing metadata tuple at `cobject[22]`.
+
+```
+cobject[22] = [null, ["assetpage_chips", "<category>", "<kgId>", <index>]]
+```
+
+Known categories:
+
+| Category | Description | Example |
+|---|---|---|
+| `entity/ARTIST` | Creator entity | "Jackson Pollock" (`/m/04510`) |
+| `entity/ART_MOVEMENT` | Art movement or period | "Northern Renaissance" (`/m/03mgmk`) |
+| `entity/ART_MEDIUM` | Medium/material entity | "Oil paint" (`/m/031cgw`), "Oak" (`/m/09wzt`) |
+
+The `ART_MEDIUM` entities use the same Freebase Knowledge Graph IDs as `MEDIUM_ENTITIES` — this is the authoritative mechanism for matching artworks to medium categories in search mode, where the entity-browse API path is not available. Implemented as `parseEntityAssociations(av[21])` in `sources/google_arts.js`.
+
 **Fields extracted in this project** (via `parseAvBlock(av)`, used by `fetchAssetDetails` and `fetchByIdentifier`):
 
 | Project field | Source |
@@ -148,10 +174,12 @@ Implemented as `parseStructuredFields(av[12])` in `sources/google_arts.js` — r
 | `dateCreated` | `av[3]` or structured `"Date Created"` |
 | `type` | structured `"Type"` (object classification; used for exclusion filtering) |
 | `medium` | structured `"Medium"` (free-prose materials description) |
+| `mediumEntities` | `av[21]` entities with category `entity/ART_MEDIUM` (semicolon-joined names) |
+| `artMovement` | `av[21]` entities with category `entity/ART_MOVEMENT` (semicolon-joined names) |
 | `creatorNationality` | structured `"Creator Nationality"` |
 | `creatorLifespan` | structured `"Creator Lifespan"` |
 | `creatorGender` | structured `"Creator Gender"` |
-| `style` | structured `"tag / style"` |
+| `style` | structured `"tag / style"` (AI-generated tags, distinct from `artMovement`) |
 | `repository` | structured `"Repository"` |
 | `dimensions` | structured `"Physical Dimensions"` |
 | `rights` | structured `"Rights"` |
