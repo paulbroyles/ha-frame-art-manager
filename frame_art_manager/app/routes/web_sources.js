@@ -971,21 +971,36 @@ router.post('/fetch-and-display', async (req, res) => {
     const ext = contentType.includes('png') ? 'png' : 'jpg';
     const cacheDir = cacheDirFor(req.frameArtPath);
     await fs.mkdir(cacheDir, { recursive: true });
-    await clearCacheForDevice(req.frameArtPath, deviceId);
-    const cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
-    await fs.writeFile(cacheFileFor(req.frameArtPath, deviceId, ext, '_original'), imageBuffer);
-    await fs.writeFile(cacheFile, processedBuffer);
+
+    // Write processed image to pending path — old cache files stay intact
+    // so the artwork page continues serving the previous (correct) image
+    // if display fails
+    const pendingFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_pending');
+    await fs.writeFile(pendingFile, processedBuffer);
 
     const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
     const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
     const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
 
-    // Display on TV first — only update perTvCache after successful display
-    // to keep cache in sync with what's actually on screen
-    await displayImageOnTV(cacheFile, deviceId, {
-      screenOn,
-      artworkMetadata: buildHaMetadata(attributeSnapshot, entitySnapshot),
-    });
+    // Display on TV using the pending file
+    try {
+      await displayImageOnTV(pendingFile, deviceId, {
+        screenOn,
+        artworkMetadata: buildHaMetadata(attributeSnapshot, entitySnapshot),
+      });
+    } catch (displayError) {
+      // Display failed — clean up pending file, leave old cache intact
+      await fs.unlink(pendingFile).catch(() => {});
+      throw displayError;
+    }
+
+    // Display succeeded — commit: clear old files, promote pending to final
+    await clearCacheForDevice(req.frameArtPath, deviceId);
+    const cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
+    await fs.rename(pendingFile, cacheFile);
+    await fs.writeFile(
+      cacheFileFor(req.frameArtPath, deviceId, ext, '_original'), imageBuffer
+    );
 
     webSources.perTvCache[deviceId] = {
       filename: path.basename(cacheFile),
