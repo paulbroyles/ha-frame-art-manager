@@ -144,8 +144,8 @@ function cacheDirFor(frameArtPath) {
   return path.join(frameArtPath, 'web_source_cache');
 }
 
-function cacheFileFor(frameArtPath, deviceId, ext = 'jpg') {
-  return path.join(cacheDirFor(frameArtPath), `${deviceId}.${ext}`);
+function cacheFileFor(frameArtPath, deviceId, ext = 'jpg', suffix = '') {
+  return path.join(cacheDirFor(frameArtPath), `${deviceId}${suffix}.${ext}`);
 }
 
 function webSourcesConfigPath(frameArtPath) {
@@ -316,10 +316,12 @@ async function writeWebSourcesConfig(frameArtPath, config) {
  */
 async function clearCacheForDevice(frameArtPath, deviceId) {
   for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
-    try {
-      await fs.unlink(cacheFileFor(frameArtPath, deviceId, ext));
-    } catch {
-      // File didn't exist – fine
+    for (const suffix of ['', '_original']) {
+      try {
+        await fs.unlink(cacheFileFor(frameArtPath, deviceId, ext, suffix));
+      } catch {
+        // File didn't exist – fine
+      }
     }
   }
 }
@@ -971,14 +973,23 @@ router.post('/fetch-and-display', async (req, res) => {
     await fs.mkdir(cacheDir, { recursive: true });
     await clearCacheForDevice(req.frameArtPath, deviceId);
     const cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
+    await fs.writeFile(cacheFileFor(req.frameArtPath, deviceId, ext, '_original'), imageBuffer);
     await fs.writeFile(cacheFile, processedBuffer);
 
     const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
     const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
     const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
 
+    // Display on TV first — only update perTvCache after successful display
+    // to keep cache in sync with what's actually on screen
+    await displayImageOnTV(cacheFile, deviceId, {
+      screenOn,
+      artworkMetadata: buildHaMetadata(attributeSnapshot, entitySnapshot),
+    });
+
     webSources.perTvCache[deviceId] = {
       filename: path.basename(cacheFile),
+      originalFilename: `${deviceId}_original.${ext}`,
       sourceId: chosenSourceId,
       ...(virtualTagId && { virtualTagId }),
       artworkUrl: artMetadata.artworkUrl,
@@ -988,11 +999,6 @@ router.post('/fetch-and-display', async (req, res) => {
       fetchedAt: new Date().toISOString(),
     };
     await writeWebSourcesConfig(req.frameArtPath, webSources);
-
-    await displayImageOnTV(cacheFile, deviceId, {
-      screenOn,
-      artworkMetadata: buildHaMetadata(attributeSnapshot, entitySnapshot),
-    });
 
     res.json({
       success: true,

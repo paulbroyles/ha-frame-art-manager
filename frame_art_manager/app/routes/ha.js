@@ -842,3 +842,4 @@ router.post('/set-recency-windows', requireHA, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.haRequest = haRequest;

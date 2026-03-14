@@ -730,6 +730,29 @@ class MetadataHelper {
     return metadata.customDataOrder;
   }
 
+  /**
+   * Set or clear the displayRole on a custom data entry.
+   * @param {string} type - 'attribute' or 'entity'
+   * @param {string} nameOrId - attribute name or entity id
+   * @param {string|null} role - 'primary', 'secondary', or null to clear
+   */
+  async setDisplayRole(type, nameOrId, role) {
+    const metadata = await this.readMetadata();
+    if (!metadata.customDataOrder) {
+      metadata.customDataOrder = this._buildDefaultCustomDataOrder(metadata);
+    }
+    const key = type === 'attribute' ? 'name' : 'id';
+    const entry = metadata.customDataOrder.find(e => e.type === type && e[key] === nameOrId);
+    if (!entry) throw new Error(`Custom data entry not found: ${type} ${nameOrId}`);
+    if (role) {
+      entry.displayRole = role;
+    } else {
+      delete entry.displayRole;
+    }
+    await this.writeMetadata(metadata);
+    return metadata.customDataOrder;
+  }
+
   // ============================================================
   // Entity Instances
   // ============================================================

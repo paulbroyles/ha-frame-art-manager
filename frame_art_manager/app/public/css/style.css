@@ -10965,6 +10965,22 @@ body.dropdown-open .image-card:hover {
   flex-shrink: 0;
 }
 
+.display-role-btn {
+  font-size: 13px;
+  color: var(--text-muted, #888);
+  opacity: 0.5;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.display-role-btn:hover {
+  opacity: 1;
+}
+
+.display-role-btn.role-active {
+  color: var(--accent-color, #4a90d9);
+  opacity: 1;
+}
+
 /* Entity type card */
 .entity-item-header {
   display: flex;

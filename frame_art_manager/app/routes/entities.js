@@ -45,6 +45,25 @@ router.put('/custom-data-order', async (req, res) => {
   }
 });
 
+// PUT set display role on a custom data entry
+router.put('/custom-data-order/display-role', async (req, res) => {
+  try {
+    const { type, nameOrId, role } = req.body;
+    if (!type || !nameOrId) {
+      return res.status(400).json({ error: 'type and nameOrId are required' });
+    }
+    if (role && !['primary', 'secondary'].includes(role)) {
+      return res.status(400).json({ error: 'role must be "primary", "secondary", or null' });
+    }
+    const helper = new MetadataHelper(req.frameArtPath);
+    const customDataOrder = await helper.setDisplayRole(type, nameOrId, role || null);
+    res.json({ success: true, customDataOrder });
+  } catch (error) {
+    console.error('Error setting display role:', error);
+    res.status(500).json({ error: error.message || 'Failed to set display role' });
+  }
+});
+
 // POST create new entity type
 router.post('/', async (req, res) => {
   try {

@@ -11991,17 +11991,20 @@ function renderCustomDataList() {
   let html = '<div class="custom-data-list" id="custom-data-list">';
   for (const item of order) {
     if (item.type === 'attribute' && allAttributes.includes(item.name)) {
+      const role = item.displayRole || '';
       html += `
-        <div class="custom-data-item item-attribute" draggable="true" data-type="attribute" data-name="${escapeHtml(item.name)}">
+        <div class="custom-data-item item-attribute" draggable="true" data-type="attribute" data-name="${escapeHtml(item.name)}" data-display-role="${escapeHtml(role)}">
           <span class="drag-handle" title="Drag to reorder">⠿</span>
           <span class="item-label item-attribute-name">${escapeHtml(item.name)}</span>
           <div class="item-actions">
+            <button class="btn-icon display-role-btn${role ? ' role-active' : ''}" data-type="attribute" data-name-or-id="${escapeHtml(item.name)}" title="Gallery page display role: ${role || 'detail'}">${role === 'primary' ? '①' : role === 'secondary' ? '②' : '·'}</button>
             <button class="btn-icon btn-danger-icon delete-attribute-btn" data-attribute="${escapeHtml(item.name)}" title="Delete attribute">✕</button>
           </div>
         </div>
       `;
     } else if (item.type === 'entity' && entityMap[item.id]) {
       const et = entityMap[item.id];
+      const role = item.displayRole || '';
       const collapsed = collapsedEntities.has(item.id);
       const attrRows = et.attributes.length === 0
         ? '<div class="entity-attr-empty">No attributes. Click "+ Attribute" to add one.</div>'
@@ -12017,12 +12020,13 @@ function renderCustomDataList() {
         `).join('');
 
       html += `
-        <div class="custom-data-item item-entity${collapsed ? ' collapsed' : ''}" draggable="true" data-type="entity" data-entity-id="${escapeHtml(et.id)}">
+        <div class="custom-data-item item-entity${collapsed ? ' collapsed' : ''}" draggable="true" data-type="entity" data-entity-id="${escapeHtml(et.id)}" data-display-role="${escapeHtml(role)}">
           <div class="entity-item-header">
             <span class="drag-handle" title="Drag to reorder">⠿</span>
             <button class="entity-toggle-btn btn-icon" data-entity-id="${escapeHtml(et.id)}" title="${collapsed ? 'Expand' : 'Collapse'}">${collapsed ? '▸' : '▾'}</button>
             <span class="item-label entity-type-name">${escapeHtml(et.name)}</span>
             <div class="item-actions">
+              <button class="btn-icon display-role-btn${role ? ' role-active' : ''}" data-type="entity" data-name-or-id="${escapeHtml(et.id)}" title="Gallery page display role: ${role || 'detail'}">${role === 'primary' ? '①' : role === 'secondary' ? '②' : '·'}</button>
               <button class="btn-secondary btn-small add-entity-attr-btn" data-entity-id="${escapeHtml(et.id)}">+ Attribute</button>
               <button class="btn-icon btn-danger-icon delete-entity-btn" data-entity-id="${escapeHtml(et.id)}" title="Delete entity type">✕</button>
             </div>
@@ -12053,6 +12057,9 @@ function renderCustomDataList() {
   });
   container.querySelectorAll('.delete-entity-attr-btn').forEach(btn => {
     btn.addEventListener('click', () => deleteEntityTypeAttribute(btn.dataset.entityId, btn.dataset.attribute));
+  });
+  container.querySelectorAll('.display-role-btn').forEach(btn => {
+    btn.addEventListener('click', () => cycleDisplayRole(btn));
   });
 
   initCustomDataDragAndDrop(list);
@@ -12193,13 +12200,52 @@ function initEntityAttrsDragAndDrop(sublist) {
   });
 }
 
+async function cycleDisplayRole(btn) {
+  const roles = ['', 'primary', 'secondary'];
+  const labels = { '': '·', 'primary': '①', 'secondary': '②' };
+  const item = btn.closest('.custom-data-item');
+  const currentRole = item.dataset.displayRole || '';
+  const nextRole = roles[(roles.indexOf(currentRole) + 1) % roles.length];
+
+  item.dataset.displayRole = nextRole;
+  btn.textContent = labels[nextRole];
+  btn.title = `Gallery page display role: ${nextRole || 'detail'}`;
+  btn.classList.toggle('role-active', !!nextRole);
+
+  // Update in-memory order
+  const type = btn.dataset.type;
+  const nameOrId = btn.dataset.nameOrId;
+  const entry = allCustomDataOrder.find(e =>
+    e.type === type && (type === 'attribute' ? e.name === nameOrId : e.id === nameOrId)
+  );
+  if (entry) {
+    if (nextRole) {
+      entry.displayRole = nextRole;
+    } else {
+      delete entry.displayRole;
+    }
+  }
+
+  try {
+    await fetch(`${API_BASE}/entities/custom-data-order/display-role`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, nameOrId, role: nextRole || null })
+    });
+  } catch (error) {
+    console.error('Error saving display role:', error);
+  }
+}
+
 async function saveCustomDataOrder(list) {
   const items = [...list.querySelectorAll(':scope > .custom-data-item')];
-  const order = items.map(item =>
-    item.dataset.type === 'attribute'
+  const order = items.map(item => {
+    const entry = item.dataset.type === 'attribute'
       ? { type: 'attribute', name: item.dataset.name }
-      : { type: 'entity', id: item.dataset.entityId }
-  );
+      : { type: 'entity', id: item.dataset.entityId };
+    if (item.dataset.displayRole) entry.displayRole = item.dataset.displayRole;
+    return entry;
+  });
   allCustomDataOrder = order;
   allAttributes = order.filter(i => i.type === 'attribute').map(i => i.name);
   const entityMap = Object.fromEntries(allEntityTypes.map(e => [e.id, e]));

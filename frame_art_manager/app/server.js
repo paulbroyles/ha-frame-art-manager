@@ -16,6 +16,7 @@ const haRouter = require('./routes/ha');
 const analyticsRouter = require('./routes/analytics');
 const entitiesRouter = require('./routes/entities');
 const webSourcesRouter = require('./routes/web_sources');
+const artworkRouter = require('./routes/artwork');
 
 const app = express();
 const PORT = process.env.PORT || 8099;
@@ -62,6 +63,9 @@ app.use((req, res, next) => {
   req.frameArtHome = FRAME_ART_HOME;
   next();
 });
+
+// Public artwork info page (no auth required)
+app.use('/artwork', artworkRouter);
 
 // API Routes
 app.use('/api/images', imagesRouter);
