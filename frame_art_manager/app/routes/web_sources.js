@@ -392,10 +392,8 @@ async function uploadImageToTV(imagePath, deviceId, { matte = null } = {}) {
     timeout: 120000,
   });
 
-  // HA REST API wraps service responses: { response: { ... } } for non-targeted services
-  // Log the full response for debugging during development
-  console.log('[web_sources] upload_image response:', JSON.stringify(response.data));
-  const serviceResponse = response.data?.response || response.data;
+  // HA Supervisor API returns: { changed_states: [], service_response: { content_id: "..." } }
+  const serviceResponse = response.data?.service_response || response.data?.response || response.data;
   const contentId = serviceResponse?.content_id;
   if (!contentId) {
     throw new Error(`upload_image service did not return a content_id. Response: ${JSON.stringify(response.data)}`);
