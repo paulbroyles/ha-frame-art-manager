@@ -316,7 +316,7 @@ async function writeWebSourcesConfig(frameArtPath, config) {
  */
 async function clearCacheForDevice(frameArtPath, deviceId) {
   for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
-    for (const suffix of ['', '_original', '_staged_pending']) {
+    for (const suffix of ['', '_original']) {
       try {
         await fs.unlink(cacheFileFor(frameArtPath, deviceId, ext, suffix));
       } catch {
