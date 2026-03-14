@@ -316,7 +316,7 @@ async function writeWebSourcesConfig(frameArtPath, config) {
  */
 async function clearCacheForDevice(frameArtPath, deviceId) {
   for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
-    for (const suffix of ['', '_original']) {
+    for (const suffix of ['', '_original', '_staged_pending']) {
       try {
         await fs.unlink(cacheFileFor(frameArtPath, deviceId, ext, suffix));
       } catch {
@@ -1146,8 +1146,9 @@ router.post('/fetch-and-upload', async (req, res) => {
     const cacheDir = cacheDirFor(req.frameArtPath);
     await fs.mkdir(cacheDir, { recursive: true });
 
-    // Write to pending path (same pattern as fetch-and-display)
-    const pendingFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_pending');
+    // Write to staged pending path (different from _pending used by fetch-and-display
+    // to avoid race conditions when pre-upload and shuffle run concurrently)
+    const pendingFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_staged_pending');
     await fs.writeFile(pendingFile, processedBuffer);
 
     const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
@@ -1193,7 +1194,7 @@ router.post('/fetch-and-upload', async (req, res) => {
       cacheFile: path.basename(cacheFile),
     });
   } catch (error) {
-    console.error('Error in fetch-and-upload:', error);
+    console.error('Error in fetch-and-upload:', error.message || error);
     res.status(500).json({ error: error.message || 'Failed to fetch and upload web source image' });
   }
 });
