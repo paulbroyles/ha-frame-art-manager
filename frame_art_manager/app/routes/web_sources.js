@@ -379,7 +379,7 @@ async function uploadImageToTV(imagePath, deviceId, { matte = null } = {}) {
 
   const response = await axios({
     method: 'POST',
-    url: `${HA_API_BASE}/services/frame_art_shuffler/upload_image`,
+    url: `${HA_API_BASE}/services/frame_art_shuffler/upload_image?return_response`,
     headers: {
       Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
       'Content-Type': 'application/json',
@@ -388,7 +388,6 @@ async function uploadImageToTV(imagePath, deviceId, { matte = null } = {}) {
       device_id: deviceId,
       image_path: imagePath,
       ...(matte && { matte }),
-      return_response: true,
     },
     timeout: 120000,
   });
