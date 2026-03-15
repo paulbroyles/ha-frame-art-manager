@@ -146,6 +146,83 @@ test('circa slash range', () => {
 });
 
 // ---------------------------------------------------------------------------
+// formatDate — verbose date components (month names)
+// ---------------------------------------------------------------------------
+
+test('verbose date DD MonthName YYYY extracts year', () => {
+  assert.strictEqual(formatDate('08 April 1867'), '1867');
+});
+
+test('verbose date MonthName DD, YYYY extracts year', () => {
+  assert.strictEqual(formatDate('April 8, 1867'), '1867');
+});
+
+test('verbose range with 2-digit year expands via context', () => {
+  assert.strictEqual(formatDate('08 April 1867 - 2-Sep-43'), '1867-1943');
+});
+
+test('verbose range: plain year left, compact verbose right', () => {
+  assert.strictEqual(formatDate('1867 - 2-Sep-43'), '1867-1943');
+});
+
+test('verbose range: 2-digit year in same century as context', () => {
+  // 1910 + 45 → 1945; 1945 >= 1910 so same century applies
+  assert.strictEqual(formatDate('12 March 1910 - 5-Jun-45'), '1910-1945');
+});
+
+test('circa preserved in verbose date', () => {
+  assert.strictEqual(formatDate('ca. March 1920'), 'ca. 1920');
+});
+
+// ---------------------------------------------------------------------------
+// formatDate — century formats
+// ---------------------------------------------------------------------------
+
+test('Roman numeral century lowercase', () => {
+  assert.strictEqual(formatDate('xx century'), '20th c.');
+});
+
+test('Roman numeral century uppercase', () => {
+  assert.strictEqual(formatDate('XX Century'), '20th c.');
+});
+
+test('Roman numeral century XIX', () => {
+  assert.strictEqual(formatDate('XIX century'), '19th c.');
+});
+
+test('Arabic ordinal century', () => {
+  assert.strictEqual(formatDate('20th century'), '20th c.');
+});
+
+test('Arabic ordinal century capital C', () => {
+  assert.strictEqual(formatDate('19th Century'), '19th c.');
+});
+
+test('century with early qualifier', () => {
+  assert.strictEqual(formatDate('early 20th century'), 'early 20th c.');
+});
+
+test('century with late qualifier', () => {
+  assert.strictEqual(formatDate('late 19th century'), 'late 19th c.');
+});
+
+test('century with mid- qualifier', () => {
+  assert.strictEqual(formatDate('mid-20th century'), 'mid-20th c.');
+});
+
+test('Roman numeral century pair slash-separated', () => {
+  assert.strictEqual(formatDate('XIX/XX century'), '19th-20th c.');
+});
+
+test('Arabic ordinal century pair slash-separated', () => {
+  assert.strictEqual(formatDate('19th/20th century'), '19th-20th c.');
+});
+
+test('circa with century', () => {
+  assert.strictEqual(formatDate('circa 19th century'), 'ca. 19th c.');
+});
+
+// ---------------------------------------------------------------------------
 // formatDate — non-date strings
 // ---------------------------------------------------------------------------
 
