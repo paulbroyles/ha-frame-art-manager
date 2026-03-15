@@ -993,8 +993,6 @@ function switchToAdvancedSubTab(tabName) {
       loadSyncStatus();
       loadSyncLogs();
     }, 0);
-  } else if (targetTab === 'metadata') {
-    loadMetadata();
   } else if (targetTab === 'tags') {
     loadTagsTab();
   } else if (targetTab === 'custom-data') {
@@ -1331,7 +1329,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   initUploadForm();
   initBatchUploadForm(); // Initialize batch upload
   initModal();
-  initMetadataViewer();
   initSyncDetail();
   initBulkActions();
   initSettingsNavigation();
@@ -1910,7 +1907,6 @@ function switchToTab(tabName) {
   if (tabName === 'advanced') {
     loadLibraryPath();
     loadTags();
-    loadMetadata();
   }
   if (tabName === 'upload') {
     // Render suggested tags when entering upload tab
@@ -8430,31 +8426,6 @@ async function deleteImage() {
   }
 }
 
-// Metadata Viewer Functions
-function initMetadataViewer() {
-  const btn = document.getElementById('refresh-metadata-btn');
-  btn.addEventListener('click', loadMetadata);
-  
-  // Load metadata on initial page load
-  loadMetadata();
-}
-
-async function loadMetadata() {
-  const contentDiv = document.getElementById('metadata-content');
-  contentDiv.textContent = 'Loading metadata...';
-
-  try {
-    const response = await fetch(`${API_BASE}/metadata`);
-    const metadata = await response.json();
-    
-    // Pretty print the JSON with syntax highlighting
-    contentDiv.textContent = JSON.stringify(metadata, null, 2);
-  } catch (error) {
-    console.error('Error loading metadata:', error);
-    contentDiv.textContent = 'Error loading metadata: ' + error.message;
-  }
-}
-
 // Sync Detail Functions
 function initSyncDetail() {
   // Load initial data
@@ -8764,45 +8735,39 @@ async function loadSyncStatus() {
       if (uncommittedCount > 0) {
         badges += '<span class="status-badge uncommitted">● Uncommitted</span>';
         
-        // Fetch detailed changes for metadata.json
         const modFiles = status.modified || [];
         let detailedDescription = '';
-        
-        if (modFiles.includes('metadata.json')) {
-          // Fetch detailed metadata changes
+
+        if (modFiles.includes('gallery.json')) {
+          // Fetch detailed gallery changes
           try {
             const detailsResponse = await fetch(`${API_BASE}/sync/uncommitted-details`);
             const detailsData = await detailsResponse.json();
-            
+
             if (detailsData.success && detailsData.changes && detailsData.changes.length > 0) {
-              // Format the changes as a readable list
               detailedDescription = detailsData.changes.join('; ');
             } else {
-              detailedDescription = 'modified: metadata.json';
+              detailedDescription = 'modified: gallery.json';
             }
           } catch (detailsError) {
             console.warn('Could not fetch uncommitted details:', detailsError);
-            detailedDescription = 'modified: metadata.json';
+            detailedDescription = 'modified: gallery.json';
           }
         } else {
-          // For non-metadata files, list them
           let fileDetails = [];
-          
+
           if (modFiles.length > 0) {
-            const fileNames = modFiles.map(f => f.split('/').pop()).join(', ');
-            fileDetails.push(`modified: ${fileNames}`);
+            fileDetails.push(`modified: ${modFiles.map(f => f.split('/').pop()).join(', ')}`);
           }
           const addFiles = status.created || [];
           if (addFiles.length > 0) {
-            const fileNames = addFiles.map(f => f.split('/').pop()).join(', ');
-            fileDetails.push(`new: ${fileNames}`);
+            fileDetails.push(`new: ${addFiles.map(f => f.split('/').pop()).join(', ')}`);
           }
           const delFiles = status.deleted || [];
           if (delFiles.length > 0) {
-            const fileNames = delFiles.map(f => f.split('/').pop()).join(', ');
-            fileDetails.push(`deleted: ${fileNames}`);
+            fileDetails.push(`deleted: ${delFiles.map(f => f.split('/').pop()).join(', ')}`);
           }
-          
+
           detailedDescription = fileDetails.join('; ');
         }
         
@@ -9068,7 +9033,7 @@ function renderTvList(tvs) {
     const borderStyle = index === tvs.length - 1 ? '' : 'border-bottom: 1px solid #eee;';
     
     return `
-    <div class="tv-item" onclick="displayOnTv('${safeId}', '${idType}')" style="display: flex; align-items: center; padding: 15px; ${borderStyle} cursor: pointer; transition: background 0.2s;">
+    <div class="tv-item" onclick="selectOnTv('${safeId}', '${idType}')" style="display: flex; align-items: center; padding: 15px; ${borderStyle} cursor: pointer; transition: background 0.2s;">
       <div class="tv-info" style="flex: 1;">
         <div class="tv-name" style="font-weight: bold; font-size: 1.1em;">${tv.name}</div>
       </div>
@@ -9084,8 +9049,8 @@ function renderTvList(tvs) {
   });
 }
 
-// Make displayOnTv globally available since it's called from onclick
-window.displayOnTv = async function(id, type) {
+// Make selectOnTv globally available since it's called from onclick
+window.selectOnTv = async function(id, type) {
   if (!currentImage) return;
   
   const tvModal = document.getElementById('tv-select-modal');
@@ -9168,7 +9133,7 @@ window.displayOnTv = async function(id, type) {
       payload.entity_id = id;
     }
 
-    const response = await fetch(`${API_BASE}/ha/display`, {
+    const response = await fetch(`${API_BASE}/ha/select`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -11501,6 +11466,29 @@ async function loadCustomDataTab() {
   renderCustomDataList();
   initNewAttributeButton();
   initNewEntityButton();
+  document.getElementById('restore-custom-metadata-defaults-btn')
+    ?.addEventListener('click', restoreCustomMetadataDefaults);
+}
+
+async function restoreCustomMetadataDefaults() {
+  if (!confirm('Restore default Custom Metadata fields (title, artist, year, museum, medium) and reset all web source metadata mappings to defaults? Any custom attributes and mapping overrides will be replaced.')) return;
+
+  try {
+    const response = await fetch(`${API_BASE}/entities/restore-defaults`, { method: 'POST' });
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'Failed to restore defaults');
+
+    // Reload custom data and web sources config
+    await loadCustomDataTab();
+    if (webSourcesConfig) {
+      const cfg = await fetch(`${API_BASE}/web-sources/config`).then(r => r.json());
+      webSourcesConfig = cfg;
+    }
+    showToast('Custom Metadata fields and web source mappings restored to defaults');
+  } catch (error) {
+    console.error('Error restoring custom metadata defaults:', error);
+    showToast(`Error: ${error.message}`, 'error');
+  }
 }
 
 function renderAttributesTable() {
@@ -15146,6 +15134,41 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
       }
     });
   }
+
+  // Metadata formatting settings
+  const currentFormatDates = webSourcesConfig?.formatDates !== false;
+  const formattingHtml = `
+    <div class="ws-global-setting" style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color,#e0e0e0);">
+      <label class="ws-global-label">Metadata Formatting</label>
+      <p class="pool-health-description">Normalize metadata fields before they are mapped to Home Assistant attributes. Raw values are always preserved in the Testing view.</p>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:4px;">
+        <input type="checkbox" id="ws-format-dates-toggle" ${currentFormatDates ? 'checked' : ''}>
+        <span>Format dates</span>
+      </label>
+      <p class="pool-health-description" style="margin-top:4px;">Normalize date fields to year-only display (e.g. "ca. 1920", "1872-1926"). Applies to Date Created, Creator Lifespan, and any other date-type fields.</p>
+    </div>`;
+  container.insertAdjacentHTML('beforeend', formattingHtml);
+
+  document.getElementById('ws-format-dates-toggle')?.addEventListener('change', async (e) => {
+    const enabled = e.target.checked;
+    try {
+      const response = await fetch(`${API_BASE}/web-sources/format-dates`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        if (webSourcesConfig) webSourcesConfig.formatDates = enabled;
+        showToast(`Date formatting ${enabled ? 'enabled' : 'disabled'}`);
+      } else {
+        throw new Error(data.error || 'Failed to update setting');
+      }
+    } catch (error) {
+      console.error('Error updating format-dates setting:', error);
+      showToast(`Error: ${error.message}`, 'error');
+    }
+  });
 }
 
 function hasEnabledWebSources() {
@@ -16152,7 +16175,7 @@ function renderSourceMappingSection(sourceId, fields) {
 
   html += `</tbody></table>`;
   html += `<div style="margin-top:8px;">
-    <button type="button" class="btn-secondary btn-small ws-reset-mapping-btn" data-source-id="${escapeHtml(sourceId)}">Reset to Auto-detected</button>
+    <button type="button" class="btn-secondary btn-small ws-reset-mapping-btn" data-source-id="${escapeHtml(sourceId)}">Restore Defaults</button>
   </div>`;
   html += `</div>`;
   return html;
@@ -16462,6 +16485,9 @@ function buildMappingOptionsHtml(currentValue) {
 }
 
 async function resetSourceMapping(sourceId) {
+  const sourceName = webSourcesConfig?.sources?.[sourceId]?.name || sourceId;
+  if (!confirm(`Restore default metadata mapping for ${sourceName}? Your current mapping will be replaced with the source defaults.`)) return;
+
   try {
     const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/metadata-mapping`, {
       method: 'DELETE',
@@ -16479,13 +16505,12 @@ async function resetSourceMapping(sourceId) {
         document.querySelector('#web-source-settings-body .ws-reset-mapping-btn')
           ?.addEventListener('click', () => resetSourceMapping(sourceId));
       }
-      const sourceName = webSourcesConfig?.sources?.[sourceId]?.name || sourceId;
-      showToast(`Mapping reset to auto-detected for ${sourceName}`);
+      showToast(`Metadata mapping restored to defaults for ${sourceName}`);
     } else {
-      throw new Error(data.error || 'Failed to reset');
+      throw new Error(data.error || 'Failed to restore defaults');
     }
   } catch (error) {
-    console.error('Error resetting metadata mapping:', error);
+    console.error('Error restoring default metadata mapping:', error);
     showToast(`Error: ${error.message}`, 'error');
   }
 }

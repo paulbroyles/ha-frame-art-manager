@@ -638,7 +638,7 @@ router.post('/:filename/rename', async (req, res) => {
     }
 
     await helper.renameImage(oldFilename, newFilename);
-    await git.git.add('metadata.json');
+    await git.git.add('gallery.json');
 
     res.json({
       success: true,

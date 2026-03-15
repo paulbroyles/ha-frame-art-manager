@@ -749,7 +749,7 @@ router.get('/uncommitted-details', async (req, res) => {
     let detailedChanges = [];
     
     // If metadata.json is modified, parse the diff to get detailed changes
-    if (status.modified.includes('metadata.json')) {
+    if (status.modified.includes('gallery.json')) {
       detailedChanges = await git.getMetadataChanges();
     }
     

@@ -5,6 +5,7 @@ const fs = require('fs').promises;
 const axios = require('axios');
 const sharp = require('sharp');
 const { processWebSourceImage, solidBorderStrip, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA } = require('../utils/imageProcessor');
+const { applyFieldFormat } = require('../utils/fieldFormatters');
 
 // Source modules — each must export fetchRandomArtwork, selectMode, metadataFields, and defaultMapping.
 // Optional: settingsSchema, getExtraOptions, getFilterTypes, getMetadataFields, alreadyProcessed.
@@ -157,6 +158,10 @@ function webSourcesConfigPath(frameArtPath) {
  * Called automatically on first read when web_sources.json does not exist.
  * The old global metadataMapping is dropped — per-source userMapping replaces it.
  * Returns the migrated config object, or null if nothing to migrate.
+ *
+ * Note: metadata.json itself is replaced by gallery.json + custom_metadata.json
+ * (see MetadataHelper._migrateFromLegacy). If that migration ran first, this
+ * function will find no metadata.json and return null gracefully.
  */
 async function migrateFromMetadata(frameArtPath) {
   const metadataPath = path.join(frameArtPath, 'metadata.json');
@@ -271,6 +276,19 @@ async function readWebSourcesConfig(frameArtPath) {
     }
   }
 
+  // ── Seed default userMapping ──────────────────────────────────────────────
+  // For any source that has no userMapping yet, initialize it from the source
+  // module's defaultMapping so defaults become explicit, editable entries.
+  // Sources without a defaultMapping are left as-is.
+  for (const [id, sourceConfig] of Object.entries(config.sources)) {
+    if (!Object.prototype.hasOwnProperty.call(sourceConfig, 'userMapping')) {
+      const defaultMapping = SOURCE_MODULES[id]?.defaultMapping;
+      if (defaultMapping) {
+        sourceConfig.userMapping = { ...defaultMapping };
+      }
+    }
+  }
+
   // ── Config v2 migration ────────────────────────────────────────────────────
   // Migrate from v1 (aspectRatioFilter + enabled sources) to v2
   // (globalFilters + virtual tags replace source selection).
@@ -312,11 +330,26 @@ async function writeWebSourcesConfig(frameArtPath, config) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Delete any existing cache file(s) for a device.
+ * Delete any existing display cache file(s) for a device.
  */
 async function clearCacheForDevice(frameArtPath, deviceId) {
   for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
     for (const suffix of ['', '_original']) {
+      try {
+        await fs.unlink(cacheFileFor(frameArtPath, deviceId, ext, suffix));
+      } catch {
+        // File didn't exist – fine
+      }
+    }
+  }
+}
+
+/**
+ * Delete any existing staged cache file(s) for a device.
+ */
+async function clearStagedForDevice(frameArtPath, deviceId) {
+  for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
+    for (const suffix of ['_staged', '_staged_original']) {
       try {
         await fs.unlink(cacheFileFor(frameArtPath, deviceId, ext, suffix));
       } catch {
@@ -342,17 +375,27 @@ async function clearTestCacheFile(frameArtPath) {
 }
 
 /**
- * Call the HA display_image service to show an image on a TV.
+ * Call the HA send_image service to upload an image to a TV.
+ *
+ * When select=true (default): uploads and selects the image as current artwork.
+ * When select=false: uploads only (pre-upload pipeline).
+ *
+ * Always returns the content_id from the service response.
  */
-async function displayImageOnTV(imagePath, deviceId, { screenOn = true, artworkMetadata = null } = {}) {
+async function sendImageToTV(imagePath, deviceId, {
+  select = true,
+  screenOn = true,
+  matte = null,
+  artworkMetadata = null,
+} = {}) {
   if (!SUPERVISOR_TOKEN && process.env.NODE_ENV === 'development') {
-    console.log(`[DEV] Would display ${imagePath} on device ${deviceId} (screenOn=${screenOn})`);
-    return;
+    console.log(`[DEV] Would send ${imagePath} to device ${deviceId} (select=${select}, screenOn=${screenOn})`);
+    return 'DEV_CONTENT_ID';
   }
 
-  await axios({
+  const response = await axios({
     method: 'POST',
-    url: `${HA_API_BASE}/services/frame_art_shuffler/display_image`,
+    url: `${HA_API_BASE}/services/frame_art_shuffler/send_image?return_response`,
     headers: {
       Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
       'Content-Type': 'application/json',
@@ -360,11 +403,20 @@ async function displayImageOnTV(imagePath, deviceId, { screenOn = true, artworkM
     data: {
       device_id: deviceId,
       image_path: imagePath,
-      screen_on: screenOn,
+      select,
+      ...(select && { screen_on: screenOn }),
+      ...(matte && { matte }),
       ...(artworkMetadata && { artwork_metadata: artworkMetadata }),
     },
-    timeout: 60000,
+    timeout: select ? 60000 : 120000,
   });
+
+  const serviceResponse = response.data?.service_response || response.data?.response || response.data;
+  const contentId = serviceResponse?.content_id;
+  if (!contentId) {
+    throw new Error(`send_image service did not return a content_id. Response: ${JSON.stringify(response.data)}`);
+  }
+  return contentId;
 }
 
 /**
@@ -380,21 +432,10 @@ async function displayImageOnTV(imagePath, deviceId, { screenOn = true, artworkM
  * @param {object} userMapping - Stored user overrides from config.sources[id].userMapping
  * @returns {object} Merged mapping: { fieldKey: null|string|{entity,attribute} }
  */
-function getEffectiveMapping(sourceId, userMapping) {
-  const defaultMapping = SOURCE_MODULES[sourceId]?.defaultMapping || {};
-  const effective = {};
-
-  // Apply source defaults (hints are bare attribute name strings)
-  for (const [key, hint] of Object.entries(defaultMapping)) {
-    effective[key] = hint || null;
-  }
-
-  // Apply user overrides
-  for (const [key, target] of Object.entries(userMapping || {})) {
-    effective[key] = target;
-  }
-
-  return effective;
+function getEffectiveMapping(_sourceId, userMapping) {
+  // userMapping is the sole source of truth — defaults are seeded into it at
+  // config-read time (readWebSourcesConfig), so no implicit fallback is needed.
+  return { ...(userMapping || {}) };
 }
 
 /**
@@ -402,21 +443,33 @@ function getEffectiveMapping(sourceId, userMapping) {
  *
  * @param {object} artMetadata - Raw metadata from the source fetcher
  * @param {object} effectiveMapping - { fieldKey: null|string|{entity,attribute} }
+ * @param {object} [options]
+ * @param {Array}  [options.fieldDefs=[]] - Source field definitions (used to look up format types)
+ * @param {boolean} [options.applyFormatting=true] - Whether to apply field formatters
  * @returns {{ attributeSnapshot, entitySnapshot }}
  */
-function buildWebSourceSnapshot(artMetadata, effectiveMapping) {
+function buildWebSourceSnapshot(artMetadata, effectiveMapping, { fieldDefs = [], applyFormatting = true } = {}) {
   const attributeSnapshot = {};
   const entitySnapshot = {};
+
+  // Build a lookup from field key to format type (e.g. 'date') for quick access
+  const formatMap = Object.fromEntries(
+    fieldDefs.filter(f => f.format).map(f => [f.key, f.format])
+  );
 
   for (const [sourceField, target] of Object.entries(effectiveMapping || {})) {
     const value = artMetadata[sourceField];
     if (value == null || target == null) continue;
 
+    const formatted = applyFormatting
+      ? applyFieldFormat(value, formatMap[sourceField])
+      : String(value);
+
     if (typeof target === 'string') {
-      attributeSnapshot[target] = String(value);
+      attributeSnapshot[target] = formatted;
     } else if (target.entity && target.attribute) {
       if (!entitySnapshot[target.entity]) entitySnapshot[target.entity] = {};
-      entitySnapshot[target.entity][target.attribute] = String(value);
+      entitySnapshot[target.entity][target.attribute] = formatted;
     }
   }
 
@@ -571,6 +624,25 @@ router.put('/aspect-ratio-filter', async (req, res) => {
   } catch (error) {
     console.error('Error updating aspect ratio filter:', error);
     res.status(500).json({ error: 'Failed to update aspect ratio filter' });
+  }
+});
+
+// PUT /api/web-sources/format-dates
+// Body: { enabled: boolean }
+// Controls whether date fields are normalized on mapping (formatDates setting).
+router.put('/format-dates', async (req, res) => {
+  try {
+    const { enabled } = req.body;
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+    webSources.formatDates = enabled;
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
+    res.json({ success: true, formatDates: enabled });
+  } catch (error) {
+    console.error('Error updating format-dates setting:', error);
+    res.status(500).json({ error: 'Failed to update format-dates setting' });
   }
 });
 
@@ -843,7 +915,8 @@ router.put('/sources/:sourceId/metadata-mapping', async (req, res) => {
 });
 
 // DELETE /api/web-sources/sources/:sourceId/metadata-mapping
-// Clears all user mapping overrides, restoring auto-detected defaults.
+// Clears all user mapping overrides. On next config read, defaults from the
+// source module's defaultMapping are re-seeded into userMapping.
 router.delete('/sources/:sourceId/metadata-mapping', async (req, res) => {
   try {
     const { sourceId } = req.params;
@@ -884,147 +957,208 @@ router.post('/sources/:sourceId/clear-cookies', async (req, res) => {
   }
 });
 
-// POST /api/web-sources/fetch-and-display
-// Body: { deviceId, sourceId?, virtualTagId?, screenOn?, tvOrientation? }
-// virtualTagId: if provided, uses the virtual tag's sourceId and merges its filters
-//   on top of the source-level filters. Takes precedence over sourceId.
-// tvOrientation ('landscape'|'portrait') is used when aspectRatioFilter is 'match_tv'.
-router.post('/fetch-and-display', async (req, res) => {
-  const { deviceId, sourceId, virtualTagId, screenOn = true, tvOrientation } = req.body;
+/**
+ * Shared setup for fetch-and-send: config read, virtual tag resolution, source
+ * validation, filter cascade, fetch with low-res retry, image processing,
+ * metadata mapping, and snapshot creation.
+ *
+ * Returns everything the endpoint needs to send to TV and commit cache.
+ */
+async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation }) {
+  const webSources = await readWebSourcesConfig(req.frameArtPath);
+  const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
+
+  // Resolve virtual tag → sourceId + extra filters
+  let virtualTag = null;
+  let chosenSourceId = sourceId;
+  if (virtualTagId) {
+    virtualTag = webSources.virtualTags[virtualTagId];
+    if (!virtualTag) {
+      const err = new Error(`Virtual tag "${virtualTagId}" not found`);
+      err.statusCode = 404;
+      throw err;
+    }
+    chosenSourceId = virtualTag.sourceId;
+  }
+
+  if (!chosenSourceId) {
+    const err = new Error('Either virtualTagId or sourceId is required.');
+    err.statusCode = 400;
+    throw err;
+  } else if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
+    const err = new Error(`Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!BUILTIN_SOURCES[chosenSourceId]) {
+    const err = new Error(`Unknown source: ${chosenSourceId}`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const fetcher = SOURCE_FETCHERS[chosenSourceId];
+  if (!fetcher) {
+    const err = new Error(`Source "${chosenSourceId}" is not yet implemented`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // Merge filters across cascade levels: global → source → virtual tag.
+  const globalFilters = webSources.globalFilters || [];
+  const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
+  const tagFilters = virtualTag?.filters || [];
+  const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
+  const extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
+
+  // Fetch, with optional retry when the image is below the minimum resolution threshold.
+  const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
+  const MAX_LOW_RES_ATTEMPTS = 3;
+  let fetchResult;
+  for (let attempt = 0; attempt < MAX_LOW_RES_ATTEMPTS; attempt++) {
+    fetchResult = await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
+    if (!skipLowRes) break;
+    const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
+    const shortSide = Math.min(width, height);
+    if (shortSide >= minResolution) break;
+    console.warn(`[web_sources] Skipping low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_LOW_RES_ATTEMPTS})`);
+    if (attempt === MAX_LOW_RES_ATTEMPTS - 1) {
+      console.warn(`[web_sources] All ${MAX_LOW_RES_ATTEMPTS} attempts returned low-res images; using last result`);
+    }
+  }
+  const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
+
+  const orientation = tvOrientation || 'landscape';
+  const { preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
+  const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
+    ? imageBuffer
+    : await processWebSourceImage(imageBuffer, orientation, {
+        preProcess: preProcessor !== 'none' ? preProcessor : null,
+        preProcessOptions: { label: artMetadata?.artworkUrl, ...preProcessorOptions },
+        cropEngine,
+        cropEngineOptions,
+      });
+
+  const ext = contentType.includes('png') ? 'png' : 'jpg';
+
+  const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
+  const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
+  const sourceMod = SOURCE_MODULES[chosenSourceId];
+  const fieldDefs = sourceMod?.getMetadataFields
+    ? sourceMod.getMetadataFields(webSources.sources?.[chosenSourceId]?.settings)
+    : (sourceMod?.metadataFields || []);
+  const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping, {
+    fieldDefs,
+    applyFormatting: webSources.formatDates !== false,
+  });
+
+  return {
+    processedBuffer, imageBuffer, ext, artMetadata,
+    attributeSnapshot, entitySnapshot, chosenSourceId,
+    virtualTagId, webSources,
+  };
+}
+
+// POST /api/web-sources/fetch-and-send
+// Body: { deviceId, select: true|false, screenOn?, matte?, virtualTagId?, sourceId?, tvOrientation? }
+//
+// select=true (default): fetch, process, upload+select on TV, commit cache.
+// select=false: fetch, process, upload only (pre-upload pipeline), commit cache.
+//
+// Always returns { success, contentId, sourceId, virtualTagId?, metadata,
+//   artworkMetadata, cacheFile }.
+router.post('/fetch-and-send', async (req, res) => {
+  const { deviceId, select = true, sourceId, virtualTagId, screenOn = true, matte, tvOrientation } = req.body;
 
   if (!deviceId) {
     return res.status(400).json({ error: 'deviceId is required' });
   }
 
   try {
-    const webSources = await readWebSourcesConfig(req.frameArtPath);
-    const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
+    const {
+      processedBuffer, imageBuffer, ext, artMetadata,
+      attributeSnapshot, entitySnapshot, chosenSourceId,
+      virtualTagId: resolvedVirtualTagId, webSources,
+    } = await fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation });
 
-    // Resolve virtual tag → sourceId + extra filters
-    let virtualTag = null;
-    let chosenSourceId = sourceId;
-    if (virtualTagId) {
-      virtualTag = webSources.virtualTags[virtualTagId];
-      if (!virtualTag) {
-        return res.status(404).json({ error: `Virtual tag "${virtualTagId}" not found` });
-      }
-      chosenSourceId = virtualTag.sourceId;
-    }
-
-    // Determine which source to use.
-    if (!chosenSourceId) {
-      return res.status(400).json({
-        error: 'Either virtualTagId or sourceId is required.',
-      });
-    } else if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
-      return res.status(400).json({
-        error: `Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`,
-      });
-    }
-
-    if (!BUILTIN_SOURCES[chosenSourceId]) {
-      return res.status(400).json({ error: `Unknown source: ${chosenSourceId}` });
-    }
-
-    const fetcher = SOURCE_FETCHERS[chosenSourceId];
-    if (!fetcher) {
-      return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
-    }
-
-    // Merge filters across cascade levels: global → source → virtual tag.
-    const globalFilters = webSources.globalFilters || [];
-    const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
-    const tagFilters = virtualTag?.filters || [];
-    const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
-    const extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
-
-    // Fetch, with optional retry when the image is below the minimum resolution threshold.
-    // skipLowRes is off by default; when on, images whose short side is < minResolution
-    // are discarded and the fetcher is called again (up to MAX_LOW_RES_ATTEMPTS times).
-    const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
-    const MAX_LOW_RES_ATTEMPTS = 3;
-    let fetchResult;
-    for (let attempt = 0; attempt < MAX_LOW_RES_ATTEMPTS; attempt++) {
-      fetchResult = await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
-      if (!skipLowRes) break;
-      const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
-      const shortSide = Math.min(width, height);
-      if (shortSide >= minResolution) break;
-      console.warn(`[web_sources] Skipping low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_LOW_RES_ATTEMPTS})`);
-      if (attempt === MAX_LOW_RES_ATTEMPTS - 1) {
-        console.warn(`[web_sources] All ${MAX_LOW_RES_ATTEMPTS} attempts returned low-res images; using last result`);
-      }
-    }
-    const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
-
-    const orientation = tvOrientation || 'landscape';
-    const { preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
-    const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
-      ? imageBuffer
-      : await processWebSourceImage(imageBuffer, orientation, {
-          preProcess: preProcessor !== 'none' ? preProcessor : null,
-          preProcessOptions: { label: artMetadata?.artworkUrl, ...preProcessorOptions },
-          cropEngine,
-          cropEngineOptions,
-        });
-
-    const ext = contentType.includes('png') ? 'png' : 'jpg';
     const cacheDir = cacheDirFor(req.frameArtPath);
     await fs.mkdir(cacheDir, { recursive: true });
 
-    // Write processed image to pending path — old cache files stay intact
-    // so the artwork page continues serving the previous (correct) image
-    // if display fails
-    const pendingFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_pending');
+    // Use different pending suffixes to avoid race conditions when
+    // pre-upload (select=false) and shuffle (select=true) run concurrently
+    const pendingSuffix = select ? '_pending' : '_staged_pending';
+    const pendingFile = cacheFileFor(req.frameArtPath, deviceId, ext, pendingSuffix);
     await fs.writeFile(pendingFile, processedBuffer);
 
-    const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
-    const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
-    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
+    const artworkMetadata = buildHaMetadata(attributeSnapshot, entitySnapshot);
 
-    // Display on TV using the pending file
+    // Send to TV
+    let contentId;
     try {
-      await displayImageOnTV(pendingFile, deviceId, {
+      contentId = await sendImageToTV(pendingFile, deviceId, {
+        select,
         screenOn,
-        artworkMetadata: buildHaMetadata(attributeSnapshot, entitySnapshot),
+        matte,
+        artworkMetadata,
       });
-    } catch (displayError) {
-      // Display failed — clean up pending file, leave old cache intact
+    } catch (sendError) {
       await fs.unlink(pendingFile).catch(() => {});
-      throw displayError;
+      throw sendError;
     }
 
-    // Display succeeded — commit: clear old files, promote pending to final
-    await clearCacheForDevice(req.frameArtPath, deviceId);
-    const cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
-    await fs.rename(pendingFile, cacheFile);
-    await fs.writeFile(
-      cacheFileFor(req.frameArtPath, deviceId, ext, '_original'), imageBuffer
-    );
-
-    webSources.perTvCache[deviceId] = {
-      filename: path.basename(cacheFile),
+    // Send succeeded — commit cache.
+    // select=true: commit to display cache (perTvCache + main files).
+    // select=false: commit to staging area (stagedCache + _staged files).
+    //   The staged cache is promoted to display cache when the fast-path
+    //   shuffle selects the image via POST /cache/:deviceId/promote.
+    const cacheEntry = {
+      filename: `${deviceId}.${ext}`,
       originalFilename: `${deviceId}_original.${ext}`,
       sourceId: chosenSourceId,
-      ...(virtualTagId && { virtualTagId }),
+      ...(resolvedVirtualTagId && { virtualTagId: resolvedVirtualTagId }),
       artworkUrl: artMetadata.artworkUrl,
       metadata: artMetadata,
       ...(Object.keys(attributeSnapshot).length > 0 && { attributeSnapshot }),
       ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
       fetchedAt: new Date().toISOString(),
     };
+
+    let cacheFile;
+    if (select) {
+      await clearCacheForDevice(req.frameArtPath, deviceId);
+      await clearStagedForDevice(req.frameArtPath, deviceId);
+      cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
+      await fs.rename(pendingFile, cacheFile);
+      await fs.writeFile(
+        cacheFileFor(req.frameArtPath, deviceId, ext, '_original'), imageBuffer
+      );
+      webSources.perTvCache[deviceId] = cacheEntry;
+      delete webSources.stagedCache?.[deviceId];
+    } else {
+      await clearStagedForDevice(req.frameArtPath, deviceId);
+      cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_staged');
+      await fs.rename(pendingFile, cacheFile);
+      await fs.writeFile(
+        cacheFileFor(req.frameArtPath, deviceId, ext, '_staged_original'), imageBuffer
+      );
+      if (!webSources.stagedCache) webSources.stagedCache = {};
+      webSources.stagedCache[deviceId] = cacheEntry;
+    }
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 
     res.json({
       success: true,
+      contentId,
       sourceId: chosenSourceId,
-      ...(virtualTagId && { virtualTagId }),
+      ...(resolvedVirtualTagId && { virtualTagId: resolvedVirtualTagId }),
       metadata: artMetadata,
+      artworkMetadata,
       cacheFile: path.basename(cacheFile),
     });
   } catch (error) {
-    console.error('Error in fetch-and-display:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch and display web source image' });
+    const status = error.statusCode || 500;
+    console.error('Error in fetch-and-send:', error.message || error);
+    res.status(status).json({ error: error.message || 'Failed to fetch and send web source image' });
   }
 });
 
@@ -1036,16 +1170,66 @@ router.delete('/cache/:deviceId', async (req, res) => {
     const webSources = await readWebSourcesConfig(req.frameArtPath);
 
     await clearCacheForDevice(req.frameArtPath, deviceId);
+    await clearStagedForDevice(req.frameArtPath, deviceId);
 
+    let dirty = false;
     if (webSources.perTvCache?.[deviceId]) {
       delete webSources.perTvCache[deviceId];
-      await writeWebSourcesConfig(req.frameArtPath, webSources);
+      dirty = true;
     }
+    if (webSources.stagedCache?.[deviceId]) {
+      delete webSources.stagedCache[deviceId];
+      dirty = true;
+    }
+    if (dirty) await writeWebSourcesConfig(req.frameArtPath, webSources);
 
     res.json({ success: true });
   } catch (error) {
     console.error('Error clearing web source cache:', error);
     res.status(500).json({ error: 'Failed to clear cache' });
+  }
+});
+
+// POST /api/web-sources/cache/:deviceId/promote
+// Promotes a staged pre-upload cache entry to the display cache.
+// Called by the fast-path shuffle after select_and_cleanup succeeds.
+router.post('/cache/:deviceId/promote', async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+
+    const staged = webSources.stagedCache?.[deviceId];
+    if (!staged) {
+      return res.status(404).json({ error: 'No staged cache for this device' });
+    }
+
+    // Determine extension from staged filename
+    const ext = path.extname(staged.filename).slice(1) || 'jpg';
+    const stagedFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_staged');
+    const stagedOriginal = cacheFileFor(req.frameArtPath, deviceId, ext, '_staged_original');
+
+    // Move staged files to display cache
+    await clearCacheForDevice(req.frameArtPath, deviceId);
+    try {
+      await fs.rename(stagedFile, cacheFileFor(req.frameArtPath, deviceId, ext));
+    } catch {
+      // Staged file missing — metadata-only promote is still useful
+    }
+    try {
+      await fs.rename(stagedOriginal, cacheFileFor(req.frameArtPath, deviceId, ext, '_original'));
+    } catch {
+      // Original file missing — not fatal
+    }
+
+    // Promote metadata
+    webSources.perTvCache[deviceId] = staged;
+    delete webSources.stagedCache[deviceId];
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error promoting staged cache:', error);
+    res.status(500).json({ error: 'Failed to promote staged cache' });
   }
 });
 
@@ -1221,7 +1405,14 @@ router.post('/test-fetch', async (req, res) => {
 
     const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
     const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
-    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
+    const testSourceMod = SOURCE_MODULES[chosenSourceId];
+    const testFieldDefs = testSourceMod?.getMetadataFields
+      ? testSourceMod.getMetadataFields(webSources.sources?.[chosenSourceId]?.settings)
+      : (testSourceMod?.metadataFields || []);
+    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping, {
+      fieldDefs: testFieldDefs,
+      applyFormatting: webSources.formatDates !== false,
+    });
 
     webSources.testCache = {
       filename: testFilename,
@@ -1292,6 +1483,18 @@ router.post('/test-reprocess', async (req, res) => {
     }
     await fs.writeFile(path.join(cacheDir, testFilename), processedBuffer);
 
+    // Remap metadata using current settings (formatDates may have changed since last fetch).
+    const remapSourceMod = SOURCE_MODULES[testCache.sourceId];
+    const remapFieldDefs = remapSourceMod?.getMetadataFields
+      ? remapSourceMod.getMetadataFields(webSources.sources?.[testCache.sourceId]?.settings)
+      : (remapSourceMod?.metadataFields || []);
+    const remapUserMapping = webSources.sources[testCache.sourceId]?.userMapping || {};
+    const remapEffectiveMapping = getEffectiveMapping(testCache.sourceId, remapUserMapping);
+    const { attributeSnapshot: newAttrSnapshot, entitySnapshot: newEntitySnapshot } = buildWebSourceSnapshot(
+      testCache.metadata || {}, remapEffectiveMapping,
+      { fieldDefs: remapFieldDefs, applyFormatting: webSources.formatDates !== false }
+    );
+
     webSources.testCache = { ...testCache, filename: testFilename };
     if (preprocessedFilename) {
       webSources.testCache.preprocessedFilename = preprocessedFilename;
@@ -1302,6 +1505,16 @@ router.post('/test-reprocess', async (req, res) => {
       webSources.testCache.processingInfo = { configured: activePreProcessor, ...processingResult, preProcessorOptions, cropEngineOptions };
     } else {
       delete webSources.testCache.processingInfo;
+    }
+    if (Object.keys(newAttrSnapshot).length > 0) {
+      webSources.testCache.attributeSnapshot = newAttrSnapshot;
+    } else {
+      delete webSources.testCache.attributeSnapshot;
+    }
+    if (Object.keys(newEntitySnapshot).length > 0) {
+      webSources.testCache.entitySnapshot = newEntitySnapshot;
+    } else {
+      delete webSources.testCache.entitySnapshot;
     }
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 

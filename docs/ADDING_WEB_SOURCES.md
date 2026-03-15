@@ -323,13 +323,16 @@ See existing docs in `docs/art_sources/` as examples.
 ## How the Route Layer Calls a Source
 
 ```
-POST /api/web-sources/fetch-and-display
-  → resolveAspectRatioFilter(webSources, tvOrientation)   // 'match_tv' → concrete value
-  → isSourceCompatible(sourceId, aspectRatio)             // skip constrained sources
-  → mergeFilterCascade(globalFilters, sourceFilters, tagFilters)  // 3-level cascade
-  → fetcher(mergedFilters, { aspectRatio, ...extraOpts }) // your fetchRandomArtwork
-  → write image to cache file
-  → displayImageOnTV(cachePath, deviceId)
+POST /api/web-sources/fetch-and-send
+  → fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation })
+      → resolveAspectRatioFilter(webSources, tvOrientation)   // 'match_tv' → concrete value
+      → isSourceCompatible(sourceId, aspectRatio)             // skip constrained sources
+      → mergeFilterCascade(globalFilters, sourceFilters, tagFilters)  // 3-level cascade
+      → fetcher(mergedFilters, { aspectRatio, ...extraOpts }) // your fetchRandomArtwork
+      → process image (crop/trim)
+      → build metadata snapshots
+  → write processed image to pending cache file
+  → sendImageToTV(pendingFile, deviceId, { select, screenOn, matte, artworkMetadata })
 ```
 
 Filters cascade through three levels: **global → per-source → per-virtual-tag**.
@@ -337,4 +340,4 @@ The route layer merges them using `mergeFilterCascade()` (require = intersection
 Sources receive the fully merged filter array and should not need to know which level a filter came from.
 
 The test-fetch path (`POST /api/web-sources/test-fetch`) uses the same filter and fetcher call
-but writes to a `_test.<ext>` cache file and does not call `displayImageOnTV`.
+but writes to a `_test.<ext>` cache file and does not call `sendImageToTV`.

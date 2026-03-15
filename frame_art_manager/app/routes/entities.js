@@ -1,6 +1,13 @@
 const express = require('express');
 const router = express.Router();
+const path = require('path');
+const fs = require('fs').promises;
 const MetadataHelper = require('../metadata_helper');
+
+const DEFAULT_ATTRIBUTES = ['title', 'date', 'museum', 'medium'];
+const DEFAULT_ENTITY_TYPES = [
+  { id: 'creator', name: 'Creator', attributes: ['name', 'lifespan', 'nationality'] },
+];
 
 // GET all entity types
 router.get('/', async (req, res) => {
@@ -173,6 +180,64 @@ router.post('/:entityId/instances', async (req, res) => {
   } catch (error) {
     console.error('Error upserting entity instance:', error);
     res.status(500).json({ error: error.message || 'Failed to save entity instance' });
+  }
+});
+
+// POST /restore-defaults
+// Resets Custom Metadata attributes to defaults and clears all web source
+// userMapping entries (they will be re-seeded from defaultMapping on next read).
+router.post('/restore-defaults', async (req, res) => {
+  try {
+    const helper = new MetadataHelper(req.frameArtPath);
+    const metadata = await helper.readMetadata();
+
+    // Replace attributes with defaults
+    metadata.attributes = [...DEFAULT_ATTRIBUTES];
+
+    // Seed default entity types (add if missing, update attributes if present)
+    if (!metadata.entityTypes) metadata.entityTypes = [];
+    if (!metadata.entityInstances) metadata.entityInstances = {};
+    for (const def of DEFAULT_ENTITY_TYPES) {
+      const existing = metadata.entityTypes.find(e => e.id === def.id);
+      if (existing) {
+        existing.name = def.name;
+        existing.attributes = [...def.attributes];
+      } else {
+        metadata.entityTypes.push({ id: def.id, name: def.name, attributes: [...def.attributes] });
+      }
+      if (!metadata.entityInstances[def.id]) metadata.entityInstances[def.id] = {};
+    }
+
+    // Rebuild customDataOrder: default attributes first, then default entities,
+    // then any non-default entity entries that were already present
+    const defaultEntityIds = new Set(DEFAULT_ENTITY_TYPES.map(e => e.id));
+    const extraEntityEntries = (metadata.customDataOrder || [])
+      .filter(e => e.type === 'entity' && !defaultEntityIds.has(e.id));
+    metadata.customDataOrder = [
+      ...DEFAULT_ATTRIBUTES.map(name => ({ type: 'attribute', name })),
+      ...DEFAULT_ENTITY_TYPES.map(({ id }) => ({ type: 'entity', id })),
+      ...extraEntityEntries,
+    ];
+
+    await helper.writeMetadata(metadata);
+
+    // Clear userMapping from all web sources so they get re-seeded on next read
+    const webSourcesPath = path.join(req.frameArtPath, 'web_sources.json');
+    try {
+      const raw = await fs.readFile(webSourcesPath, 'utf8');
+      const webSources = JSON.parse(raw);
+      for (const sourceConfig of Object.values(webSources.sources || {})) {
+        delete sourceConfig.userMapping;
+      }
+      await fs.writeFile(webSourcesPath, JSON.stringify(webSources, null, 2));
+    } catch {
+      // web_sources.json may not exist yet; seeding will happen on first read
+    }
+
+    res.json({ success: true, attributes: metadata.attributes });
+  } catch (error) {
+    console.error('Error restoring custom metadata defaults:', error);
+    res.status(500).json({ error: 'Failed to restore defaults' });
   }
 });
 
