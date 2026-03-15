@@ -1191,6 +1191,7 @@ router.post('/fetch-and-upload', async (req, res) => {
       sourceId: chosenSourceId,
       ...(virtualTagId && { virtualTagId }),
       metadata: artMetadata,
+      artworkMetadata: buildHaMetadata(attributeSnapshot, entitySnapshot),
       cacheFile: path.basename(cacheFile),
     });
   } catch (error) {
