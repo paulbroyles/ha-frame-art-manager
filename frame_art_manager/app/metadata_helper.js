@@ -70,6 +70,14 @@ class MetadataHelper {
         await this.writeMetadata(parsed);
       }
 
+      // Seed default Custom Data attributes if none have been defined yet.
+      // Covers fresh installs and configs created before attributes existed.
+      // Only runs when 'attributes' is absent (user has never touched Custom Data).
+      if (!parsed.attributes) {
+        parsed.attributes = ['title', 'artist', 'year', 'museum', 'medium'];
+        await this.writeMetadata(parsed);
+      }
+
       return parsed;
     } catch (error) {
       console.error('Error reading metadata:', error);

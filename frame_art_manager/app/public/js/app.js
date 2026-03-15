@@ -16187,7 +16187,7 @@ function renderSourceMappingSection(sourceId, fields) {
 
   html += `</tbody></table>`;
   html += `<div style="margin-top:8px;">
-    <button type="button" class="btn-secondary btn-small ws-reset-mapping-btn" data-source-id="${escapeHtml(sourceId)}">Reset to Auto-detected</button>
+    <button type="button" class="btn-secondary btn-small ws-reset-mapping-btn" data-source-id="${escapeHtml(sourceId)}">Restore Defaults</button>
   </div>`;
   html += `</div>`;
   return html;
@@ -16497,6 +16497,9 @@ function buildMappingOptionsHtml(currentValue) {
 }
 
 async function resetSourceMapping(sourceId) {
+  const sourceName = webSourcesConfig?.sources?.[sourceId]?.name || sourceId;
+  if (!confirm(`Restore default metadata mapping for ${sourceName}? Your current mapping will be replaced with the source defaults.`)) return;
+
   try {
     const response = await fetch(`${API_BASE}/web-sources/sources/${encodeURIComponent(sourceId)}/metadata-mapping`, {
       method: 'DELETE',
@@ -16514,13 +16517,12 @@ async function resetSourceMapping(sourceId) {
         document.querySelector('#web-source-settings-body .ws-reset-mapping-btn')
           ?.addEventListener('click', () => resetSourceMapping(sourceId));
       }
-      const sourceName = webSourcesConfig?.sources?.[sourceId]?.name || sourceId;
-      showToast(`Mapping reset to auto-detected for ${sourceName}`);
+      showToast(`Metadata mapping restored to defaults for ${sourceName}`);
     } else {
-      throw new Error(data.error || 'Failed to reset');
+      throw new Error(data.error || 'Failed to restore defaults');
     }
   } catch (error) {
-    console.error('Error resetting metadata mapping:', error);
+    console.error('Error restoring default metadata mapping:', error);
     showToast(`Error: ${error.message}`, 'error');
   }
 }

@@ -272,6 +272,19 @@ async function readWebSourcesConfig(frameArtPath) {
     }
   }
 
+  // ── Seed default userMapping ──────────────────────────────────────────────
+  // For any source that has no userMapping yet, initialize it from the source
+  // module's defaultMapping so defaults become explicit, editable entries.
+  // Sources without a defaultMapping are left as-is.
+  for (const [id, sourceConfig] of Object.entries(config.sources)) {
+    if (!Object.prototype.hasOwnProperty.call(sourceConfig, 'userMapping')) {
+      const defaultMapping = SOURCE_MODULES[id]?.defaultMapping;
+      if (defaultMapping) {
+        sourceConfig.userMapping = { ...defaultMapping };
+      }
+    }
+  }
+
   // ── Config v2 migration ────────────────────────────────────────────────────
   // Migrate from v1 (aspectRatioFilter + enabled sources) to v2
   // (globalFilters + virtual tags replace source selection).
@@ -415,21 +428,10 @@ async function sendImageToTV(imagePath, deviceId, {
  * @param {object} userMapping - Stored user overrides from config.sources[id].userMapping
  * @returns {object} Merged mapping: { fieldKey: null|string|{entity,attribute} }
  */
-function getEffectiveMapping(sourceId, userMapping) {
-  const defaultMapping = SOURCE_MODULES[sourceId]?.defaultMapping || {};
-  const effective = {};
-
-  // Apply source defaults (hints are bare attribute name strings)
-  for (const [key, hint] of Object.entries(defaultMapping)) {
-    effective[key] = hint || null;
-  }
-
-  // Apply user overrides
-  for (const [key, target] of Object.entries(userMapping || {})) {
-    effective[key] = target;
-  }
-
-  return effective;
+function getEffectiveMapping(_sourceId, userMapping) {
+  // userMapping is the sole source of truth — defaults are seeded into it at
+  // config-read time (readWebSourcesConfig), so no implicit fallback is needed.
+  return { ...(userMapping || {}) };
 }
 
 /**
@@ -909,7 +911,8 @@ router.put('/sources/:sourceId/metadata-mapping', async (req, res) => {
 });
 
 // DELETE /api/web-sources/sources/:sourceId/metadata-mapping
-// Clears all user mapping overrides, restoring auto-detected defaults.
+// Clears all user mapping overrides. On next config read, defaults from the
+// source module's defaultMapping are re-seeded into userMapping.
 router.delete('/sources/:sourceId/metadata-mapping', async (req, res) => {
   try {
     const { sourceId } = req.params;
