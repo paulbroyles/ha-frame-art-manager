@@ -993,8 +993,6 @@ function switchToAdvancedSubTab(tabName) {
       loadSyncStatus();
       loadSyncLogs();
     }, 0);
-  } else if (targetTab === 'metadata') {
-    loadMetadata();
   } else if (targetTab === 'tags') {
     loadTagsTab();
   } else if (targetTab === 'custom-data') {
@@ -1909,7 +1907,6 @@ function switchToTab(tabName) {
   if (tabName === 'advanced') {
     loadLibraryPath();
     loadTags();
-    loadMetadata();
   }
   if (tabName === 'upload') {
     // Render suggested tags when entering upload tab
