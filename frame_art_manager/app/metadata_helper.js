@@ -70,11 +70,24 @@ class MetadataHelper {
         await this.writeMetadata(parsed);
       }
 
-      // Seed default Custom Data attributes if none have been defined yet.
+      // Seed default Custom Metadata fields if none have been defined yet.
       // Covers fresh installs and configs created before attributes existed.
-      // Only runs when 'attributes' is absent (user has never touched Custom Data).
+      // Only runs when 'attributes' is absent (user has never touched Custom Metadata).
       if (!parsed.attributes) {
-        parsed.attributes = ['title', 'artist', 'year', 'museum', 'medium'];
+        parsed.attributes = ['title', 'date', 'museum', 'medium'];
+        if (!parsed.entityTypes) parsed.entityTypes = [];
+        if (!parsed.entityTypes.some(e => e.id === 'creator')) {
+          parsed.entityTypes.push({ id: 'creator', name: 'Creator', attributes: ['name', 'lifespan', 'nationality'] });
+        }
+        if (!parsed.entityInstances) parsed.entityInstances = {};
+        if (!parsed.entityInstances.creator) parsed.entityInstances.creator = {};
+        parsed.customDataOrder = [
+          { type: 'attribute', name: 'title' },
+          { type: 'attribute', name: 'date' },
+          { type: 'attribute', name: 'museum' },
+          { type: 'attribute', name: 'medium' },
+          { type: 'entity', id: 'creator' },
+        ];
         await this.writeMetadata(parsed);
       }
 

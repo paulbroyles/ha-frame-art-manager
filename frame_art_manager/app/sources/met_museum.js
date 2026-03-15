@@ -233,9 +233,9 @@ const metadataFields = [
 // Default mapping hints: source field key → suggested HA attribute name.
 const defaultMapping = {
   title:       'title',
-  creator:     'artist',
+  creator:     { entity: 'creator', attribute: 'name' },
   medium:      'medium',
-  dateCreated: 'year',
+  dateCreated: 'date',
   source:      null,
 };
 

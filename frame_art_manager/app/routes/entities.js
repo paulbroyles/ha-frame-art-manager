@@ -4,7 +4,10 @@ const path = require('path');
 const fs = require('fs').promises;
 const MetadataHelper = require('../metadata_helper');
 
-const DEFAULT_ATTRIBUTES = ['title', 'artist', 'year', 'museum', 'medium'];
+const DEFAULT_ATTRIBUTES = ['title', 'date', 'museum', 'medium'];
+const DEFAULT_ENTITY_TYPES = [
+  { id: 'creator', name: 'Creator', attributes: ['name', 'lifespan', 'nationality'] },
+];
 
 // GET all entity types
 router.get('/', async (req, res) => {
@@ -191,11 +194,29 @@ router.post('/restore-defaults', async (req, res) => {
     // Replace attributes with defaults
     metadata.attributes = [...DEFAULT_ATTRIBUTES];
 
-    // Rebuild customDataOrder: keep entity entries, replace attribute entries
-    const entityEntries = (metadata.customDataOrder || []).filter(e => e.type === 'entity');
+    // Seed default entity types (add if missing, update attributes if present)
+    if (!metadata.entityTypes) metadata.entityTypes = [];
+    if (!metadata.entityInstances) metadata.entityInstances = {};
+    for (const def of DEFAULT_ENTITY_TYPES) {
+      const existing = metadata.entityTypes.find(e => e.id === def.id);
+      if (existing) {
+        existing.name = def.name;
+        existing.attributes = [...def.attributes];
+      } else {
+        metadata.entityTypes.push({ id: def.id, name: def.name, attributes: [...def.attributes] });
+      }
+      if (!metadata.entityInstances[def.id]) metadata.entityInstances[def.id] = {};
+    }
+
+    // Rebuild customDataOrder: default attributes first, then default entities,
+    // then any non-default entity entries that were already present
+    const defaultEntityIds = new Set(DEFAULT_ENTITY_TYPES.map(e => e.id));
+    const extraEntityEntries = (metadata.customDataOrder || [])
+      .filter(e => e.type === 'entity' && !defaultEntityIds.has(e.id));
     metadata.customDataOrder = [
       ...DEFAULT_ATTRIBUTES.map(name => ({ type: 'attribute', name })),
-      ...entityEntries,
+      ...DEFAULT_ENTITY_TYPES.map(({ id }) => ({ type: 'entity', id })),
+      ...extraEntityEntries,
     ];
 
     await helper.writeMetadata(metadata);
