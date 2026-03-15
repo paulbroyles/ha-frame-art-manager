@@ -1476,6 +1476,18 @@ router.post('/test-reprocess', async (req, res) => {
     }
     await fs.writeFile(path.join(cacheDir, testFilename), processedBuffer);
 
+    // Remap metadata using current settings (formatDates may have changed since last fetch).
+    const remapSourceMod = SOURCE_MODULES[testCache.sourceId];
+    const remapFieldDefs = remapSourceMod?.getMetadataFields
+      ? remapSourceMod.getMetadataFields(webSources.sources?.[testCache.sourceId]?.settings)
+      : (remapSourceMod?.metadataFields || []);
+    const remapUserMapping = webSources.sources[testCache.sourceId]?.userMapping || {};
+    const remapEffectiveMapping = getEffectiveMapping(testCache.sourceId, remapUserMapping);
+    const { attributeSnapshot: newAttrSnapshot, entitySnapshot: newEntitySnapshot } = buildWebSourceSnapshot(
+      testCache.metadata || {}, remapEffectiveMapping,
+      { fieldDefs: remapFieldDefs, applyFormatting: webSources.formatDates !== false }
+    );
+
     webSources.testCache = { ...testCache, filename: testFilename };
     if (preprocessedFilename) {
       webSources.testCache.preprocessedFilename = preprocessedFilename;
@@ -1486,6 +1498,16 @@ router.post('/test-reprocess', async (req, res) => {
       webSources.testCache.processingInfo = { configured: activePreProcessor, ...processingResult, preProcessorOptions, cropEngineOptions };
     } else {
       delete webSources.testCache.processingInfo;
+    }
+    if (Object.keys(newAttrSnapshot).length > 0) {
+      webSources.testCache.attributeSnapshot = newAttrSnapshot;
+    } else {
+      delete webSources.testCache.attributeSnapshot;
+    }
+    if (Object.keys(newEntitySnapshot).length > 0) {
+      webSources.testCache.entitySnapshot = newEntitySnapshot;
+    } else {
+      delete webSources.testCache.entitySnapshot;
     }
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 
