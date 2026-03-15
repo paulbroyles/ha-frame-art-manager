@@ -226,7 +226,7 @@ const metadataFields = [
   { key: 'title',       label: 'Title',        description: 'Artwork title' },
   { key: 'creator',     label: 'Creator',      description: 'Artist or creator name' },
   { key: 'medium',      label: 'Medium',       description: 'Material or technique (e.g. "Oil on canvas")' },
-  { key: 'dateCreated', label: 'Date Created', description: 'Date or year the artwork was created' },
+  { key: 'dateCreated', label: 'Date Created', description: 'Date or year the artwork was created', format: 'date' },
   { key: 'source',      label: 'Source',       description: 'Source collection name (always "The Metropolitan Museum of Art")' },
 ];
 

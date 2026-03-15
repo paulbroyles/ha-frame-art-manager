@@ -15146,6 +15146,41 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
       }
     });
   }
+
+  // Metadata formatting settings
+  const currentFormatDates = webSourcesConfig?.formatDates !== false;
+  const formattingHtml = `
+    <div class="ws-global-setting" style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color,#e0e0e0);">
+      <label class="ws-global-label">Metadata Formatting</label>
+      <p class="pool-health-description">Normalize metadata fields before they are mapped to Home Assistant attributes. Raw values are always preserved in the Testing view.</p>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:4px;">
+        <input type="checkbox" id="ws-format-dates-toggle" ${currentFormatDates ? 'checked' : ''}>
+        <span>Format dates</span>
+      </label>
+      <p class="pool-health-description" style="margin-top:4px;">Normalize date fields to year-only display (e.g. "ca. 1920", "1872-1926"). Applies to Date Created, Creator Lifespan, and any other date-type fields.</p>
+    </div>`;
+  container.insertAdjacentHTML('beforeend', formattingHtml);
+
+  document.getElementById('ws-format-dates-toggle')?.addEventListener('change', async (e) => {
+    const enabled = e.target.checked;
+    try {
+      const response = await fetch(`${API_BASE}/web-sources/format-dates`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        if (webSourcesConfig) webSourcesConfig.formatDates = enabled;
+        showToast(`Date formatting ${enabled ? 'enabled' : 'disabled'}`);
+      } else {
+        throw new Error(data.error || 'Failed to update setting');
+      }
+    } catch (error) {
+      console.error('Error updating format-dates setting:', error);
+      showToast(`Error: ${error.message}`, 'error');
+    }
+  });
 }
 
 function hasEnabledWebSources() {

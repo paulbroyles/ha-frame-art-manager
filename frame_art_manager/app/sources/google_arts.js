@@ -986,7 +986,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 const FIELD_DEFS = [
   { key: 'title',              label: 'Title',            description: 'Artwork title',                                                  defaultMapHint: 'title'  },
   { key: 'creator',            label: 'Creator',          description: 'Artist or creator name',                                         defaultMapHint: 'artist' },
-  { key: 'creatorLifespan',    label: 'Creator Lifespan', description: 'Birth and death years of the artist (e.g. "1452 - 1519")',        defaultMapHint: null     },
+  { key: 'creatorLifespan',    label: 'Creator Lifespan', description: 'Birth and death years of the artist (e.g. "1452 - 1519")',        defaultMapHint: null,    format: 'date' },
   { key: 'creatorNationality', label: 'Nationality',      description: 'Nationality of the artist',                                      defaultMapHint: null     },
   { key: 'creatorGender',      label: 'Creator Gender',   description: 'Gender of the artist as cataloged',                              defaultMapHint: null     },
   { key: 'type',               label: 'Type',             description: 'Object type from the museum catalog (e.g. "Paintings", "Folio")', defaultMapHint: null     },
@@ -994,7 +994,7 @@ const FIELD_DEFS = [
   { key: 'mediumEntities',     label: 'Medium Entities',  description: 'Google-categorized medium entities (e.g. "Oil paint; Canvas")',   defaultMapHint: null     },
   { key: 'artMovement',        label: 'Art Movement',     description: 'Art movement or period (e.g. "Impressionism; Post-Impressionism")', defaultMapHint: null   },
   { key: 'style',              label: 'Style',            description: 'AI-generated style tags (e.g. "Impressionism", "Baroque")',       defaultMapHint: null     },
-  { key: 'dateCreated',        label: 'Date Created',     description: 'Date or year the artwork was created',                           defaultMapHint: 'year'   },
+  { key: 'dateCreated',        label: 'Date Created',     description: 'Date or year the artwork was created',                           defaultMapHint: 'year',  format: 'date' },
   { key: 'repository',         label: 'Repository',       description: 'Museum or holding institution',                                  defaultMapHint: 'museum' },
   { key: 'dimensions',         label: 'Dimensions',       description: 'Physical dimensions (e.g. "w1345 x h2390 cm")',                  defaultMapHint: null     },
   { key: 'rights',             label: 'Rights',           description: 'Copyright or rights statement as provided by the museum',        defaultMapHint: null     },
@@ -1005,7 +1005,7 @@ const FIELD_DEFS = [
   { key: 'source',             label: 'Source',           description: 'Source collection name (always "Google Arts & Culture")',        defaultMapHint: null     },
 ];
 
-const metadataFields = FIELD_DEFS.map(({ key, label, description }) => ({ key, label, description }));
+const metadataFields = FIELD_DEFS.map(({ key, label, description, format }) => ({ key, label, description, ...(format && { format }) }));
 
 // Default mapping hints: source field key → suggested HA attribute name.
 // Used to auto-detect mappings when no user override is set.

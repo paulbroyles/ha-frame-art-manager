@@ -5,6 +5,7 @@ const fs = require('fs').promises;
 const axios = require('axios');
 const sharp = require('sharp');
 const { processWebSourceImage, solidBorderStrip, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA } = require('../utils/imageProcessor');
+const { applyFieldFormat } = require('../utils/fieldFormatters');
 
 // Source modules — each must export fetchRandomArtwork, selectMode, metadataFields, and defaultMapping.
 // Optional: settingsSchema, getExtraOptions, getFilterTypes, getMetadataFields, alreadyProcessed.
@@ -436,21 +437,33 @@ function getEffectiveMapping(sourceId, userMapping) {
  *
  * @param {object} artMetadata - Raw metadata from the source fetcher
  * @param {object} effectiveMapping - { fieldKey: null|string|{entity,attribute} }
+ * @param {object} [options]
+ * @param {Array}  [options.fieldDefs=[]] - Source field definitions (used to look up format types)
+ * @param {boolean} [options.applyFormatting=true] - Whether to apply field formatters
  * @returns {{ attributeSnapshot, entitySnapshot }}
  */
-function buildWebSourceSnapshot(artMetadata, effectiveMapping) {
+function buildWebSourceSnapshot(artMetadata, effectiveMapping, { fieldDefs = [], applyFormatting = true } = {}) {
   const attributeSnapshot = {};
   const entitySnapshot = {};
+
+  // Build a lookup from field key to format type (e.g. 'date') for quick access
+  const formatMap = Object.fromEntries(
+    fieldDefs.filter(f => f.format).map(f => [f.key, f.format])
+  );
 
   for (const [sourceField, target] of Object.entries(effectiveMapping || {})) {
     const value = artMetadata[sourceField];
     if (value == null || target == null) continue;
 
+    const formatted = applyFormatting
+      ? applyFieldFormat(value, formatMap[sourceField])
+      : String(value);
+
     if (typeof target === 'string') {
-      attributeSnapshot[target] = String(value);
+      attributeSnapshot[target] = formatted;
     } else if (target.entity && target.attribute) {
       if (!entitySnapshot[target.entity]) entitySnapshot[target.entity] = {};
-      entitySnapshot[target.entity][target.attribute] = String(value);
+      entitySnapshot[target.entity][target.attribute] = formatted;
     }
   }
 
@@ -605,6 +618,25 @@ router.put('/aspect-ratio-filter', async (req, res) => {
   } catch (error) {
     console.error('Error updating aspect ratio filter:', error);
     res.status(500).json({ error: 'Failed to update aspect ratio filter' });
+  }
+});
+
+// PUT /api/web-sources/format-dates
+// Body: { enabled: boolean }
+// Controls whether date fields are normalized on mapping (formatDates setting).
+router.put('/format-dates', async (req, res) => {
+  try {
+    const { enabled } = req.body;
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+    webSources.formatDates = enabled;
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
+    res.json({ success: true, formatDates: enabled });
+  } catch (error) {
+    console.error('Error updating format-dates setting:', error);
+    res.status(500).json({ error: 'Failed to update format-dates setting' });
   }
 });
 
@@ -1004,7 +1036,14 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
 
   const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
   const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
-  const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
+  const sourceMod = SOURCE_MODULES[chosenSourceId];
+  const fieldDefs = sourceMod?.getMetadataFields
+    ? sourceMod.getMetadataFields(webSources.sources?.[chosenSourceId]?.settings)
+    : (sourceMod?.metadataFields || []);
+  const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping, {
+    fieldDefs,
+    applyFormatting: webSources.formatDates !== false,
+  });
 
   return {
     processedBuffer, imageBuffer, ext, artMetadata,
@@ -1359,7 +1398,14 @@ router.post('/test-fetch', async (req, res) => {
 
     const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
     const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
-    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
+    const testSourceMod = SOURCE_MODULES[chosenSourceId];
+    const testFieldDefs = testSourceMod?.getMetadataFields
+      ? testSourceMod.getMetadataFields(webSources.sources?.[chosenSourceId]?.settings)
+      : (testSourceMod?.metadataFields || []);
+    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping, {
+      fieldDefs: testFieldDefs,
+      applyFormatting: webSources.formatDates !== false,
+    });
 
     webSources.testCache = {
       filename: testFilename,
