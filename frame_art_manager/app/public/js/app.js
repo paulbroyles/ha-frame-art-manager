@@ -1331,7 +1331,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   initUploadForm();
   initBatchUploadForm(); // Initialize batch upload
   initModal();
-  initMetadataViewer();
   initSyncDetail();
   initBulkActions();
   initSettingsNavigation();
@@ -8430,31 +8429,6 @@ async function deleteImage() {
   }
 }
 
-// Metadata Viewer Functions
-function initMetadataViewer() {
-  const btn = document.getElementById('refresh-metadata-btn');
-  btn.addEventListener('click', loadMetadata);
-  
-  // Load metadata on initial page load
-  loadMetadata();
-}
-
-async function loadMetadata() {
-  const contentDiv = document.getElementById('metadata-content');
-  contentDiv.textContent = 'Loading metadata...';
-
-  try {
-    const response = await fetch(`${API_BASE}/metadata`);
-    const metadata = await response.json();
-    
-    // Pretty print the JSON with syntax highlighting
-    contentDiv.textContent = JSON.stringify(metadata, null, 2);
-  } catch (error) {
-    console.error('Error loading metadata:', error);
-    contentDiv.textContent = 'Error loading metadata: ' + error.message;
-  }
-}
-
 // Sync Detail Functions
 function initSyncDetail() {
   // Load initial data
@@ -8764,45 +8738,39 @@ async function loadSyncStatus() {
       if (uncommittedCount > 0) {
         badges += '<span class="status-badge uncommitted">● Uncommitted</span>';
         
-        // Fetch detailed changes for metadata.json
         const modFiles = status.modified || [];
         let detailedDescription = '';
-        
-        if (modFiles.includes('metadata.json')) {
-          // Fetch detailed metadata changes
+
+        if (modFiles.includes('gallery.json')) {
+          // Fetch detailed gallery changes
           try {
             const detailsResponse = await fetch(`${API_BASE}/sync/uncommitted-details`);
             const detailsData = await detailsResponse.json();
-            
+
             if (detailsData.success && detailsData.changes && detailsData.changes.length > 0) {
-              // Format the changes as a readable list
               detailedDescription = detailsData.changes.join('; ');
             } else {
-              detailedDescription = 'modified: metadata.json';
+              detailedDescription = 'modified: gallery.json';
             }
           } catch (detailsError) {
             console.warn('Could not fetch uncommitted details:', detailsError);
-            detailedDescription = 'modified: metadata.json';
+            detailedDescription = 'modified: gallery.json';
           }
         } else {
-          // For non-metadata files, list them
           let fileDetails = [];
-          
+
           if (modFiles.length > 0) {
-            const fileNames = modFiles.map(f => f.split('/').pop()).join(', ');
-            fileDetails.push(`modified: ${fileNames}`);
+            fileDetails.push(`modified: ${modFiles.map(f => f.split('/').pop()).join(', ')}`);
           }
           const addFiles = status.created || [];
           if (addFiles.length > 0) {
-            const fileNames = addFiles.map(f => f.split('/').pop()).join(', ');
-            fileDetails.push(`new: ${fileNames}`);
+            fileDetails.push(`new: ${addFiles.map(f => f.split('/').pop()).join(', ')}`);
           }
           const delFiles = status.deleted || [];
           if (delFiles.length > 0) {
-            const fileNames = delFiles.map(f => f.split('/').pop()).join(', ');
-            fileDetails.push(`deleted: ${fileNames}`);
+            fileDetails.push(`deleted: ${delFiles.map(f => f.split('/').pop()).join(', ')}`);
           }
-          
+
           detailedDescription = fileDetails.join('; ');
         }
         
