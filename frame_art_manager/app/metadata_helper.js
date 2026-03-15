@@ -12,10 +12,16 @@ const DEFAULT_SETTINGS = {
   duplicateThreshold: 10
 };
 
+// Fields that belong in gallery.json (local image library data).
+// Everything else goes in custom_metadata.json (shared schema for attributes, entities, etc.).
+const GALLERY_FIELDS = new Set(['version', 'images', 'tags', 'settings']);
+
 class MetadataHelper {
   constructor(frameArtPath) {
     this.frameArtPath = frameArtPath;
-    this.metadataPath = path.join(frameArtPath, 'metadata.json');
+    this.metadataPath = path.join(frameArtPath, 'metadata.json'); // legacy path (for migration)
+    this.galleryPath = path.join(frameArtPath, 'gallery.json');
+    this.customMetadataPath = path.join(frameArtPath, 'custom_metadata.json');
     this.libraryPath = path.join(frameArtPath, 'library');
     this.thumbsPath = path.join(frameArtPath, 'thumbs');
     this.originalsPath = path.join(frameArtPath, 'originals');
@@ -45,17 +51,71 @@ class MetadataHelper {
   }
 
   /**
-   * Read metadata.json
+   * One-time migration: split legacy metadata.json into gallery.json + custom_metadata.json.
+   * Deletes metadata.json after writing the two new files.
+   */
+  async _migrateFromLegacy() {
+    let parsed;
+    try {
+      const data = await fs.readFile(this.metadataPath, 'utf8');
+      parsed = JSON.parse(data);
+    } catch {
+      return; // nothing to migrate
+    }
+
+    delete parsed.tvs; // deprecated — never carry forward
+
+    const gallery = {};
+    const customMetadata = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (GALLERY_FIELDS.has(key)) {
+        gallery[key] = value;
+      } else {
+        customMetadata[key] = value;
+      }
+    }
+
+    await Promise.all([
+      fs.writeFile(this.galleryPath, JSON.stringify(gallery, null, 2)),
+      fs.writeFile(this.customMetadataPath, JSON.stringify(customMetadata, null, 2)),
+    ]);
+    await fs.unlink(this.metadataPath);
+    console.log('[metadata] Migrated metadata.json → gallery.json + custom_metadata.json');
+  }
+
+  /**
+   * Read metadata (merged from gallery.json + custom_metadata.json).
+   * Automatically migrates from legacy metadata.json on first call.
    */
   async readMetadata() {
     try {
-      const data = await fs.readFile(this.metadataPath, 'utf8');
-      const parsed = JSON.parse(data);
-      
-      // Deprecate 'tvs' array - remove it if present
-      if (parsed.tvs) {
-        delete parsed.tvs;
+      // Migrate from legacy metadata.json if it still exists
+      try {
+        await fs.access(this.metadataPath);
+        await this._migrateFromLegacy();
+      } catch {
+        // Already migrated or no legacy file
       }
+
+      // Read gallery.json
+      let gallery = { version: "1.0", images: {}, tags: [] };
+      try {
+        const data = await fs.readFile(this.galleryPath, 'utf8');
+        gallery = JSON.parse(data);
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+      }
+
+      // Read custom_metadata.json
+      let customMetadata = {};
+      try {
+        const data = await fs.readFile(this.customMetadataPath, 'utf8');
+        customMetadata = JSON.parse(data);
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+      }
+
+      const parsed = { ...gallery, ...customMetadata };
 
       // Migrate 'fields' → 'attributes' (one-time rename)
       if (parsed.fields !== undefined && parsed.attributes === undefined) {
@@ -99,11 +159,23 @@ class MetadataHelper {
   }
 
   /**
-   * Write metadata.json
+   * Write metadata: splits into gallery.json (images/tags/settings) and custom_metadata.json (attributes/entities).
    */
   async writeMetadata(data) {
     try {
-      await fs.writeFile(this.metadataPath, JSON.stringify(data, null, 2));
+      const gallery = {};
+      const customMetadata = {};
+      for (const [key, value] of Object.entries(data)) {
+        if (GALLERY_FIELDS.has(key)) {
+          gallery[key] = value;
+        } else {
+          customMetadata[key] = value;
+        }
+      }
+      await Promise.all([
+        fs.writeFile(this.galleryPath, JSON.stringify(gallery, null, 2)),
+        fs.writeFile(this.customMetadataPath, JSON.stringify(customMetadata, null, 2)),
+      ]);
       return true;
     } catch (error) {
       console.error('Error writing metadata:', error);

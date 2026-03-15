@@ -7,6 +7,8 @@ const path = require('path');
 const fs = require('fs').promises;
 const os = require('os');
 
+const MetadataHelper = require('./metadata_helper');
+
 // Import route handlers
 const imagesRouter = require('./routes/images');
 const tagsRouter = require('./routes/tags');
@@ -91,15 +93,8 @@ app.get('/api/health', (req, res) => {
 // Get raw metadata endpoint
 app.get('/api/metadata', async (req, res) => {
   try {
-    const metadataPath = path.join(FRAME_ART_PATH, 'metadata.json');
-    const data = await fs.readFile(metadataPath, 'utf8');
-    const parsed = JSON.parse(data);
-    
-    // Deprecate 'tvs' array - remove it if present
-    if (parsed.tvs) {
-      delete parsed.tvs;
-    }
-    
+    const helper = new MetadataHelper(FRAME_ART_PATH);
+    const parsed = await helper.readMetadata();
     res.json(parsed);
   } catch (error) {
     console.error('Error reading metadata:', error);
@@ -118,7 +113,7 @@ async function initializeDirectories() {
     const libraryPath = path.join(FRAME_ART_PATH, 'library');
   const thumbsPath = path.join(FRAME_ART_PATH, 'thumbs');
   const originalsPath = path.join(FRAME_ART_PATH, 'originals');
-    const metadataPath = path.join(FRAME_ART_PATH, 'metadata.json');
+    const galleryPath = path.join(FRAME_ART_PATH, 'gallery.json');
 
     // Create directories if they don't exist
     await fs.mkdir(libraryPath, { recursive: true });
@@ -126,17 +121,17 @@ async function initializeDirectories() {
   await fs.mkdir(originalsPath, { recursive: true });
   await fs.mkdir(path.join(FRAME_ART_PATH, 'web_source_cache'), { recursive: true });
 
-    // Create metadata.json if it doesn't exist
+    // Create gallery.json if it doesn't exist (custom_metadata.json is seeded on first readMetadata)
     try {
-      await fs.access(metadataPath);
+      await fs.access(galleryPath);
     } catch {
-      const initialMetadata = {
+      const initialGallery = {
         version: "1.0",
         images: {},
         tags: []
       };
-      await fs.writeFile(metadataPath, JSON.stringify(initialMetadata, null, 2));
-      console.log('Created initial metadata.json');
+      await fs.writeFile(galleryPath, JSON.stringify(initialGallery, null, 2));
+      console.log('Created initial gallery.json');
     }
 
     console.log('Directories initialized successfully');

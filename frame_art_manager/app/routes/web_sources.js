@@ -158,6 +158,10 @@ function webSourcesConfigPath(frameArtPath) {
  * Called automatically on first read when web_sources.json does not exist.
  * The old global metadataMapping is dropped — per-source userMapping replaces it.
  * Returns the migrated config object, or null if nothing to migrate.
+ *
+ * Note: metadata.json itself is replaced by gallery.json + custom_metadata.json
+ * (see MetadataHelper._migrateFromLegacy). If that migration ran first, this
+ * function will find no metadata.json and return null gracefully.
  */
 async function migrateFromMetadata(frameArtPath) {
   const metadataPath = path.join(frameArtPath, 'metadata.json');
