@@ -9068,7 +9068,7 @@ function renderTvList(tvs) {
     const borderStyle = index === tvs.length - 1 ? '' : 'border-bottom: 1px solid #eee;';
     
     return `
-    <div class="tv-item" onclick="displayOnTv('${safeId}', '${idType}')" style="display: flex; align-items: center; padding: 15px; ${borderStyle} cursor: pointer; transition: background 0.2s;">
+    <div class="tv-item" onclick="selectOnTv('${safeId}', '${idType}')" style="display: flex; align-items: center; padding: 15px; ${borderStyle} cursor: pointer; transition: background 0.2s;">
       <div class="tv-info" style="flex: 1;">
         <div class="tv-name" style="font-weight: bold; font-size: 1.1em;">${tv.name}</div>
       </div>
@@ -9084,8 +9084,8 @@ function renderTvList(tvs) {
   });
 }
 
-// Make displayOnTv globally available since it's called from onclick
-window.displayOnTv = async function(id, type) {
+// Make selectOnTv globally available since it's called from onclick
+window.selectOnTv = async function(id, type) {
   if (!currentImage) return;
   
   const tvModal = document.getElementById('tv-select-modal');
@@ -9168,7 +9168,7 @@ window.displayOnTv = async function(id, type) {
       payload.entity_id = id;
     }
 
-    const response = await fetch(`${API_BASE}/ha/display`, {
+    const response = await fetch(`${API_BASE}/ha/select`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)

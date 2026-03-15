@@ -25,22 +25,24 @@ Public webpage at `/artwork/:tvId` showing the currently displayed artwork on a 
 frame-art-shuffler                          ha-frame-art-manager
 ─────────────────                           ────────────────────
 async_shuffle_tv
-  → _async_fetch_and_display_web_source
-      → POST /api/web-sources/fetch-and-display ──→ fetch-and-display handler
-                                                     ├─ Fetch image from source
-                                                     ├─ Process image (crop/trim)
-                                                     ├─ Write processed → _pending file
-                                                     ├─ displayImageOnTV ──→ POST /services/.../display_image
-  ← display_image service                   ←──────────────────────────────┘
+  → _async_web_source_send(select=True)
+      → POST /api/web-sources/fetch-and-send ──→ fetch-and-send handler
+                                                   ├─ fetchAndProcessWebSource
+                                                   │   ├─ Fetch image from source
+                                                   │   ├─ Process image (crop/trim)
+                                                   │   └─ Build metadata snapshots
+                                                   ├─ Write processed → _pending file
+                                                   ├─ sendImageToTV(select=true) ──→ POST /services/.../send_image
+  ← send_image service                    ←──────────────────────────────┘
       → set_art_on_tv_deleteothers (TV WebSocket)
       → Update artwork_info sensor
-      → Return success
-                                                     ├─ [display succeeded]
-                                                     ├─ clearCacheForDevice (old files)
-                                                     ├─ rename _pending → final
-                                                     ├─ Write _original file
-                                                     ├─ Update perTvCache
-                                                     └─ Return success JSON
+      → Return { content_id }
+                                                   ├─ [send succeeded]
+                                                   ├─ clearCacheForDevice (old files)
+                                                   ├─ rename _pending → final
+                                                   ├─ Write _original file
+                                                   ├─ Update perTvCache
+                                                   └─ Return success JSON
 ```
 
 ### Artwork Page Data Sources
@@ -51,20 +53,20 @@ async_shuffle_tv
 
 ## Cache Consistency (Pending-File Pattern)
 
-Image files and metadata are only committed to disk after the TV successfully displays the image. This prevents stale cache when a shuffle attempt fails (e.g., TV off during Shuffle Silently).
+Image files and metadata are only committed to disk after the TV successfully selects the image. This prevents stale cache when a shuffle attempt fails (e.g., TV off during Shuffle Silently).
 
 ### How it works
 
 1. Processed image is written to `{deviceId}_pending.{ext}` (old files untouched)
-2. `displayImageOnTV` is called with the pending file path
+2. `sendImageToTV` is called with the pending file path
 3. **On success**: old files cleared, pending renamed to final (`fs.rename` — atomic), original written, `perTvCache` updated
 4. **On failure**: pending file deleted, old cache stays intact
 
 ### Consistency guarantees
 
-- **Image files**: Only committed after `displayImageOnTV` returns success
+- **Image files**: Only committed after `sendImageToTV` returns success
 - **perTvCache**: Only updated after files are committed
-- **artwork_info sensor**: Updated inside HA's `display_image` service, after `set_art_on_tv_deleteothers` succeeds
+- **artwork_info sensor**: Updated inside HA's `send_image` service, after `set_art_on_tv_deleteothers` succeeds
 - **Artwork page**: Validates perTvCache against sensor (title match); falls back to reconstructing metadata from sensor attributes if stale
 
 ### Failure modes
@@ -72,13 +74,13 @@ Image files and metadata are only committed to disk after the TV successfully di
 | Step that fails | Image files | perTvCache | Sensor | Artwork page |
 |----------------|-------------|------------|--------|--------------|
 | Image fetch/processing | Unchanged | Unchanged | Unchanged | Correct |
-| `displayImageOnTV` (TV unreachable) | Pending cleaned up, old files intact | Unchanged | Unchanged | Correct |
-| Commit block (crash after display) | Old files cleared but new not committed | Unchanged | Updated | Metadata from sensor fallback; image may 404 |
+| `sendImageToTV` (TV unreachable) | Pending cleaned up, old files intact | Unchanged | Unchanged | Correct |
+| Commit block (crash after send) | Old files cleared but new not committed | Unchanged | Updated | Metadata from sensor fallback; image may 404 |
 | `writeWebSourcesConfig` (disk full) | New files committed | Unchanged | Updated | Metadata from sensor fallback; image correct |
 
 ### Remaining narrow window
 
-If the add-on crashes after `displayImageOnTV` returns but before the commit block completes (~5 fast local I/O operations, no network), the TV has new artwork but cache reflects old. This is unlikely and self-corrects on next successful shuffle. Possible future mitigation: write a pending-display marker before `displayImageOnTV`, reconcile on startup against the sensor state.
+If the add-on crashes after `sendImageToTV` returns but before the commit block completes (~5 fast local I/O operations, no network), the TV has new artwork but cache reflects old. This is unlikely and self-corrects on next successful shuffle. Possible future mitigation: write a pending-display marker before `sendImageToTV`, reconcile on startup against the sensor state.
 
 ## Display Roles
 
@@ -95,7 +97,7 @@ Roles are source-agnostic — work the same for flat attributes and entities. Fo
 | File | Role |
 |------|------|
 | `app/routes/artwork.js` | Page + image routes, metadata resolution, HTML rendering |
-| `app/routes/web_sources.js` | Pending-file pattern in fetch-and-display, `perTvCache`, `clearCacheForDevice` |
+| `app/routes/web_sources.js` | Pending-file pattern in fetch-and-send, `perTvCache`, `clearCacheForDevice` |
 | `app/metadata_helper.js` | `setDisplayRole()`, `getCustomDataOrder()` |
 | `app/routes/entities.js` | Display role API endpoint |
 | `app/public/js/app.js` | Display role UI in Custom Data tab |

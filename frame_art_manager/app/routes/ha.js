@@ -130,8 +130,8 @@ const haRequest = async (method, endpoint, data = null) => {
       };
     }
     
-    // Add delay for display_image to simulate upload time
-    if (endpoint.includes('display_image')) {
+    // Add delay for send_image to simulate upload time
+    if (endpoint.includes('send_image')) {
       await new Promise(resolve => setTimeout(resolve, 3000));
     }
     
@@ -284,8 +284,8 @@ router.get('/tvs', requireHA, async (req, res) => {
   }
 });
 
-// POST /api/ha/display - Display image on TV
-router.post('/display', requireHA, async (req, res) => {
+// POST /api/ha/select - Select image on TV (upload + select as current artwork)
+router.post('/select', requireHA, async (req, res) => {
   const { device_id, entity_id, filename, matte, filter } = req.body;
 
   if ((!device_id && !entity_id) || !filename) {
@@ -313,9 +313,9 @@ router.post('/display', requireHA, async (req, res) => {
       payload.entity_id = entity_id;
     }
 
-    await haRequest('POST', `/services/frame_art_shuffler/display_image`, payload);
+    await haRequest('POST', `/services/frame_art_shuffler/send_image`, payload);
 
-    // Clear any web source cache for this TV since a library image is now displayed
+    // Clear any web source cache for this TV since a library image is now selected
     const targetDeviceId = device_id || entity_id;
     if (targetDeviceId) {
       await clearCacheForDevice(req.frameArtPath, targetDeviceId).catch(() => {});
@@ -323,14 +323,13 @@ router.post('/display', requireHA, async (req, res) => {
 
     res.json({ success: true, message: 'Command sent to TV' });
   } catch (error) {
-    // Extract meaningful error message from HA response
     let errorMessage = 'Failed to send command to TV';
     if (error.response?.data?.message) {
       errorMessage = error.response.data.message;
     } else if (error.message) {
       errorMessage = error.message;
     }
-    console.error('Display error:', errorMessage);
+    console.error('Select error:', errorMessage);
     res.status(500).json({ error: errorMessage });
   }
 });

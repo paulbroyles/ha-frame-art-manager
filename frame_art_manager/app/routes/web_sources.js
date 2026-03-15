@@ -342,44 +342,27 @@ async function clearTestCacheFile(frameArtPath) {
 }
 
 /**
- * Call the HA display_image service to show an image on a TV.
+ * Call the HA send_image service to upload an image to a TV.
+ *
+ * When select=true (default): uploads and selects the image as current artwork.
+ * When select=false: uploads only (pre-upload pipeline).
+ *
+ * Always returns the content_id from the service response.
  */
-async function displayImageOnTV(imagePath, deviceId, { screenOn = true, artworkMetadata = null } = {}) {
+async function sendImageToTV(imagePath, deviceId, {
+  select = true,
+  screenOn = true,
+  matte = null,
+  artworkMetadata = null,
+} = {}) {
   if (!SUPERVISOR_TOKEN && process.env.NODE_ENV === 'development') {
-    console.log(`[DEV] Would display ${imagePath} on device ${deviceId} (screenOn=${screenOn})`);
-    return;
-  }
-
-  await axios({
-    method: 'POST',
-    url: `${HA_API_BASE}/services/frame_art_shuffler/display_image`,
-    headers: {
-      Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    data: {
-      device_id: deviceId,
-      image_path: imagePath,
-      screen_on: screenOn,
-      ...(artworkMetadata && { artwork_metadata: artworkMetadata }),
-    },
-    timeout: 60000,
-  });
-}
-
-/**
- * Call the HA upload_image service to upload an image to a TV without displaying it.
- * Returns the content_id from the service response.
- */
-async function uploadImageToTV(imagePath, deviceId, { matte = null } = {}) {
-  if (!SUPERVISOR_TOKEN && process.env.NODE_ENV === 'development') {
-    console.log(`[DEV] Would upload ${imagePath} to device ${deviceId}`);
+    console.log(`[DEV] Would send ${imagePath} to device ${deviceId} (select=${select}, screenOn=${screenOn})`);
     return 'DEV_CONTENT_ID';
   }
 
   const response = await axios({
     method: 'POST',
-    url: `${HA_API_BASE}/services/frame_art_shuffler/upload_image?return_response`,
+    url: `${HA_API_BASE}/services/frame_art_shuffler/send_image?return_response`,
     headers: {
       Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
       'Content-Type': 'application/json',
@@ -387,16 +370,18 @@ async function uploadImageToTV(imagePath, deviceId, { matte = null } = {}) {
     data: {
       device_id: deviceId,
       image_path: imagePath,
+      select,
+      ...(select && { screen_on: screenOn }),
       ...(matte && { matte }),
+      ...(artworkMetadata && { artwork_metadata: artworkMetadata }),
     },
-    timeout: 120000,
+    timeout: select ? 60000 : 120000,
   });
 
-  // HA Supervisor API returns: { changed_states: [], service_response: { content_id: "..." } }
   const serviceResponse = response.data?.service_response || response.data?.response || response.data;
   const contentId = serviceResponse?.content_id;
   if (!contentId) {
-    throw new Error(`upload_image service did not return a content_id. Response: ${JSON.stringify(response.data)}`);
+    throw new Error(`send_image service did not return a content_id. Response: ${JSON.stringify(response.data)}`);
   }
   return contentId;
 }
@@ -918,253 +903,149 @@ router.post('/sources/:sourceId/clear-cookies', async (req, res) => {
   }
 });
 
-// POST /api/web-sources/fetch-and-display
-// Body: { deviceId, sourceId?, virtualTagId?, screenOn?, tvOrientation? }
-// virtualTagId: if provided, uses the virtual tag's sourceId and merges its filters
-//   on top of the source-level filters. Takes precedence over sourceId.
-// tvOrientation ('landscape'|'portrait') is used when aspectRatioFilter is 'match_tv'.
-router.post('/fetch-and-display', async (req, res) => {
-  const { deviceId, sourceId, virtualTagId, screenOn = true, tvOrientation } = req.body;
+/**
+ * Shared setup for fetch-and-send: config read, virtual tag resolution, source
+ * validation, filter cascade, fetch with low-res retry, image processing,
+ * metadata mapping, and snapshot creation.
+ *
+ * Returns everything the endpoint needs to send to TV and commit cache.
+ */
+async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation }) {
+  const webSources = await readWebSourcesConfig(req.frameArtPath);
+  const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
+
+  // Resolve virtual tag → sourceId + extra filters
+  let virtualTag = null;
+  let chosenSourceId = sourceId;
+  if (virtualTagId) {
+    virtualTag = webSources.virtualTags[virtualTagId];
+    if (!virtualTag) {
+      const err = new Error(`Virtual tag "${virtualTagId}" not found`);
+      err.statusCode = 404;
+      throw err;
+    }
+    chosenSourceId = virtualTag.sourceId;
+  }
+
+  if (!chosenSourceId) {
+    const err = new Error('Either virtualTagId or sourceId is required.');
+    err.statusCode = 400;
+    throw err;
+  } else if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
+    const err = new Error(`Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!BUILTIN_SOURCES[chosenSourceId]) {
+    const err = new Error(`Unknown source: ${chosenSourceId}`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const fetcher = SOURCE_FETCHERS[chosenSourceId];
+  if (!fetcher) {
+    const err = new Error(`Source "${chosenSourceId}" is not yet implemented`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // Merge filters across cascade levels: global → source → virtual tag.
+  const globalFilters = webSources.globalFilters || [];
+  const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
+  const tagFilters = virtualTag?.filters || [];
+  const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
+  const extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
+
+  // Fetch, with optional retry when the image is below the minimum resolution threshold.
+  const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
+  const MAX_LOW_RES_ATTEMPTS = 3;
+  let fetchResult;
+  for (let attempt = 0; attempt < MAX_LOW_RES_ATTEMPTS; attempt++) {
+    fetchResult = await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
+    if (!skipLowRes) break;
+    const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
+    const shortSide = Math.min(width, height);
+    if (shortSide >= minResolution) break;
+    console.warn(`[web_sources] Skipping low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_LOW_RES_ATTEMPTS})`);
+    if (attempt === MAX_LOW_RES_ATTEMPTS - 1) {
+      console.warn(`[web_sources] All ${MAX_LOW_RES_ATTEMPTS} attempts returned low-res images; using last result`);
+    }
+  }
+  const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
+
+  const orientation = tvOrientation || 'landscape';
+  const { preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
+  const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
+    ? imageBuffer
+    : await processWebSourceImage(imageBuffer, orientation, {
+        preProcess: preProcessor !== 'none' ? preProcessor : null,
+        preProcessOptions: { label: artMetadata?.artworkUrl, ...preProcessorOptions },
+        cropEngine,
+        cropEngineOptions,
+      });
+
+  const ext = contentType.includes('png') ? 'png' : 'jpg';
+
+  const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
+  const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
+  const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
+
+  return {
+    processedBuffer, imageBuffer, ext, artMetadata,
+    attributeSnapshot, entitySnapshot, chosenSourceId,
+    virtualTagId, webSources,
+  };
+}
+
+// POST /api/web-sources/fetch-and-send
+// Body: { deviceId, select: true|false, screenOn?, matte?, virtualTagId?, sourceId?, tvOrientation? }
+//
+// select=true (default): fetch, process, upload+select on TV, commit cache.
+// select=false: fetch, process, upload only (pre-upload pipeline), commit cache.
+//
+// Always returns { success, contentId, sourceId, virtualTagId?, metadata,
+//   artworkMetadata, cacheFile }.
+router.post('/fetch-and-send', async (req, res) => {
+  const { deviceId, select = true, sourceId, virtualTagId, screenOn = true, matte, tvOrientation } = req.body;
 
   if (!deviceId) {
     return res.status(400).json({ error: 'deviceId is required' });
   }
 
   try {
-    const webSources = await readWebSourcesConfig(req.frameArtPath);
-    const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
+    const {
+      processedBuffer, imageBuffer, ext, artMetadata,
+      attributeSnapshot, entitySnapshot, chosenSourceId,
+      virtualTagId: resolvedVirtualTagId, webSources,
+    } = await fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation });
 
-    // Resolve virtual tag → sourceId + extra filters
-    let virtualTag = null;
-    let chosenSourceId = sourceId;
-    if (virtualTagId) {
-      virtualTag = webSources.virtualTags[virtualTagId];
-      if (!virtualTag) {
-        return res.status(404).json({ error: `Virtual tag "${virtualTagId}" not found` });
-      }
-      chosenSourceId = virtualTag.sourceId;
-    }
-
-    // Determine which source to use.
-    if (!chosenSourceId) {
-      return res.status(400).json({
-        error: 'Either virtualTagId or sourceId is required.',
-      });
-    } else if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
-      return res.status(400).json({
-        error: `Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`,
-      });
-    }
-
-    if (!BUILTIN_SOURCES[chosenSourceId]) {
-      return res.status(400).json({ error: `Unknown source: ${chosenSourceId}` });
-    }
-
-    const fetcher = SOURCE_FETCHERS[chosenSourceId];
-    if (!fetcher) {
-      return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
-    }
-
-    // Merge filters across cascade levels: global → source → virtual tag.
-    const globalFilters = webSources.globalFilters || [];
-    const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
-    const tagFilters = virtualTag?.filters || [];
-    const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
-    const extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
-
-    // Fetch, with optional retry when the image is below the minimum resolution threshold.
-    // skipLowRes is off by default; when on, images whose short side is < minResolution
-    // are discarded and the fetcher is called again (up to MAX_LOW_RES_ATTEMPTS times).
-    const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
-    const MAX_LOW_RES_ATTEMPTS = 3;
-    let fetchResult;
-    for (let attempt = 0; attempt < MAX_LOW_RES_ATTEMPTS; attempt++) {
-      fetchResult = await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
-      if (!skipLowRes) break;
-      const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
-      const shortSide = Math.min(width, height);
-      if (shortSide >= minResolution) break;
-      console.warn(`[web_sources] Skipping low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_LOW_RES_ATTEMPTS})`);
-      if (attempt === MAX_LOW_RES_ATTEMPTS - 1) {
-        console.warn(`[web_sources] All ${MAX_LOW_RES_ATTEMPTS} attempts returned low-res images; using last result`);
-      }
-    }
-    const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
-
-    const orientation = tvOrientation || 'landscape';
-    const { preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
-    const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
-      ? imageBuffer
-      : await processWebSourceImage(imageBuffer, orientation, {
-          preProcess: preProcessor !== 'none' ? preProcessor : null,
-          preProcessOptions: { label: artMetadata?.artworkUrl, ...preProcessorOptions },
-          cropEngine,
-          cropEngineOptions,
-        });
-
-    const ext = contentType.includes('png') ? 'png' : 'jpg';
     const cacheDir = cacheDirFor(req.frameArtPath);
     await fs.mkdir(cacheDir, { recursive: true });
 
-    // Write processed image to pending path — old cache files stay intact
-    // so the artwork page continues serving the previous (correct) image
-    // if display fails
-    const pendingFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_pending');
+    // Use different pending suffixes to avoid race conditions when
+    // pre-upload (select=false) and shuffle (select=true) run concurrently
+    const pendingSuffix = select ? '_pending' : '_staged_pending';
+    const pendingFile = cacheFileFor(req.frameArtPath, deviceId, ext, pendingSuffix);
     await fs.writeFile(pendingFile, processedBuffer);
 
-    const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
-    const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
-    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
+    const artworkMetadata = buildHaMetadata(attributeSnapshot, entitySnapshot);
 
-    // Display on TV using the pending file
-    try {
-      await displayImageOnTV(pendingFile, deviceId, {
-        screenOn,
-        artworkMetadata: buildHaMetadata(attributeSnapshot, entitySnapshot),
-      });
-    } catch (displayError) {
-      // Display failed — clean up pending file, leave old cache intact
-      await fs.unlink(pendingFile).catch(() => {});
-      throw displayError;
-    }
-
-    // Display succeeded — commit: clear old files, promote pending to final
-    await clearCacheForDevice(req.frameArtPath, deviceId);
-    const cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
-    await fs.rename(pendingFile, cacheFile);
-    await fs.writeFile(
-      cacheFileFor(req.frameArtPath, deviceId, ext, '_original'), imageBuffer
-    );
-
-    webSources.perTvCache[deviceId] = {
-      filename: path.basename(cacheFile),
-      originalFilename: `${deviceId}_original.${ext}`,
-      sourceId: chosenSourceId,
-      ...(virtualTagId && { virtualTagId }),
-      artworkUrl: artMetadata.artworkUrl,
-      metadata: artMetadata,
-      ...(Object.keys(attributeSnapshot).length > 0 && { attributeSnapshot }),
-      ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
-      fetchedAt: new Date().toISOString(),
-    };
-    await writeWebSourcesConfig(req.frameArtPath, webSources);
-
-    res.json({
-      success: true,
-      sourceId: chosenSourceId,
-      ...(virtualTagId && { virtualTagId }),
-      metadata: artMetadata,
-      cacheFile: path.basename(cacheFile),
-    });
-  } catch (error) {
-    console.error('Error in fetch-and-display:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch and display web source image' });
-  }
-});
-
-// POST /api/web-sources/fetch-and-upload
-// Like fetch-and-display but uploads without selecting/displaying.
-// Returns { success, contentId, sourceId, virtualTagId?, metadata, cacheFile }.
-// Used by the pre-upload pipeline: stage the next image in the background.
-router.post('/fetch-and-upload', async (req, res) => {
-  const { deviceId, sourceId, virtualTagId, matte, tvOrientation } = req.body;
-
-  if (!deviceId) {
-    return res.status(400).json({ error: 'deviceId is required' });
-  }
-
-  try {
-    const webSources = await readWebSourcesConfig(req.frameArtPath);
-    const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
-
-    // Resolve virtual tag → sourceId + extra filters
-    let virtualTag = null;
-    let chosenSourceId = sourceId;
-    if (virtualTagId) {
-      virtualTag = webSources.virtualTags[virtualTagId];
-      if (!virtualTag) {
-        return res.status(404).json({ error: `Virtual tag "${virtualTagId}" not found` });
-      }
-      chosenSourceId = virtualTag.sourceId;
-    }
-
-    if (!chosenSourceId) {
-      return res.status(400).json({
-        error: 'Either virtualTagId or sourceId is required.',
-      });
-    } else if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
-      return res.status(400).json({
-        error: `Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`,
-      });
-    }
-
-    if (!BUILTIN_SOURCES[chosenSourceId]) {
-      return res.status(400).json({ error: `Unknown source: ${chosenSourceId}` });
-    }
-
-    const fetcher = SOURCE_FETCHERS[chosenSourceId];
-    if (!fetcher) {
-      return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
-    }
-
-    // Merge filters across cascade levels: global → source → virtual tag.
-    const globalFilters = webSources.globalFilters || [];
-    const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
-    const tagFilters = virtualTag?.filters || [];
-    const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
-    const extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
-
-    // Fetch with optional low-res retry (same as fetch-and-display)
-    const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
-    const MAX_LOW_RES_ATTEMPTS = 3;
-    let fetchResult;
-    for (let attempt = 0; attempt < MAX_LOW_RES_ATTEMPTS; attempt++) {
-      fetchResult = await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
-      if (!skipLowRes) break;
-      const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
-      const shortSide = Math.min(width, height);
-      if (shortSide >= minResolution) break;
-      console.warn(`[web_sources] Skipping low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_LOW_RES_ATTEMPTS})`);
-      if (attempt === MAX_LOW_RES_ATTEMPTS - 1) {
-        console.warn(`[web_sources] All ${MAX_LOW_RES_ATTEMPTS} attempts returned low-res images; using last result`);
-      }
-    }
-    const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
-
-    const orientation = tvOrientation || 'landscape';
-    const { preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
-    const processedBuffer = SOURCE_MODULES[chosenSourceId]?.alreadyProcessed
-      ? imageBuffer
-      : await processWebSourceImage(imageBuffer, orientation, {
-          preProcess: preProcessor !== 'none' ? preProcessor : null,
-          preProcessOptions: { label: artMetadata?.artworkUrl, ...preProcessorOptions },
-          cropEngine,
-          cropEngineOptions,
-        });
-
-    const ext = contentType.includes('png') ? 'png' : 'jpg';
-    const cacheDir = cacheDirFor(req.frameArtPath);
-    await fs.mkdir(cacheDir, { recursive: true });
-
-    // Write to staged pending path (different from _pending used by fetch-and-display
-    // to avoid race conditions when pre-upload and shuffle run concurrently)
-    const pendingFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_staged_pending');
-    await fs.writeFile(pendingFile, processedBuffer);
-
-    const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
-    const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
-    const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping);
-
-    // Upload to TV without displaying
+    // Send to TV
     let contentId;
     try {
-      contentId = await uploadImageToTV(pendingFile, deviceId, { matte });
-    } catch (uploadError) {
+      contentId = await sendImageToTV(pendingFile, deviceId, {
+        select,
+        screenOn,
+        matte,
+        artworkMetadata,
+      });
+    } catch (sendError) {
       await fs.unlink(pendingFile).catch(() => {});
-      throw uploadError;
+      throw sendError;
     }
 
-    // Upload succeeded — commit cache
+    // Send succeeded — commit cache
     await clearCacheForDevice(req.frameArtPath, deviceId);
     const cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
     await fs.rename(pendingFile, cacheFile);
@@ -1176,7 +1057,7 @@ router.post('/fetch-and-upload', async (req, res) => {
       filename: path.basename(cacheFile),
       originalFilename: `${deviceId}_original.${ext}`,
       sourceId: chosenSourceId,
-      ...(virtualTagId && { virtualTagId }),
+      ...(resolvedVirtualTagId && { virtualTagId: resolvedVirtualTagId }),
       artworkUrl: artMetadata.artworkUrl,
       metadata: artMetadata,
       ...(Object.keys(attributeSnapshot).length > 0 && { attributeSnapshot }),
@@ -1189,14 +1070,15 @@ router.post('/fetch-and-upload', async (req, res) => {
       success: true,
       contentId,
       sourceId: chosenSourceId,
-      ...(virtualTagId && { virtualTagId }),
+      ...(resolvedVirtualTagId && { virtualTagId: resolvedVirtualTagId }),
       metadata: artMetadata,
-      artworkMetadata: buildHaMetadata(attributeSnapshot, entitySnapshot),
+      artworkMetadata,
       cacheFile: path.basename(cacheFile),
     });
   } catch (error) {
-    console.error('Error in fetch-and-upload:', error.message || error);
-    res.status(500).json({ error: error.message || 'Failed to fetch and upload web source image' });
+    const status = error.statusCode || 500;
+    console.error('Error in fetch-and-send:', error.message || error);
+    res.status(status).json({ error: error.message || 'Failed to fetch and send web source image' });
   }
 });
 
