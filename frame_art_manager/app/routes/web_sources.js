@@ -312,11 +312,26 @@ async function writeWebSourcesConfig(frameArtPath, config) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Delete any existing cache file(s) for a device.
+ * Delete any existing display cache file(s) for a device.
  */
 async function clearCacheForDevice(frameArtPath, deviceId) {
   for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
     for (const suffix of ['', '_original']) {
+      try {
+        await fs.unlink(cacheFileFor(frameArtPath, deviceId, ext, suffix));
+      } catch {
+        // File didn't exist – fine
+      }
+    }
+  }
+}
+
+/**
+ * Delete any existing staged cache file(s) for a device.
+ */
+async function clearStagedForDevice(frameArtPath, deviceId) {
+  for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
+    for (const suffix of ['_staged', '_staged_original']) {
       try {
         await fs.unlink(cacheFileFor(frameArtPath, deviceId, ext, suffix));
       } catch {
@@ -1045,16 +1060,13 @@ router.post('/fetch-and-send', async (req, res) => {
       throw sendError;
     }
 
-    // Send succeeded — commit cache
-    await clearCacheForDevice(req.frameArtPath, deviceId);
-    const cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
-    await fs.rename(pendingFile, cacheFile);
-    await fs.writeFile(
-      cacheFileFor(req.frameArtPath, deviceId, ext, '_original'), imageBuffer
-    );
-
-    webSources.perTvCache[deviceId] = {
-      filename: path.basename(cacheFile),
+    // Send succeeded — commit cache.
+    // select=true: commit to display cache (perTvCache + main files).
+    // select=false: commit to staging area (stagedCache + _staged files).
+    //   The staged cache is promoted to display cache when the fast-path
+    //   shuffle selects the image via POST /cache/:deviceId/promote.
+    const cacheEntry = {
+      filename: `${deviceId}.${ext}`,
       originalFilename: `${deviceId}_original.${ext}`,
       sourceId: chosenSourceId,
       ...(resolvedVirtualTagId && { virtualTagId: resolvedVirtualTagId }),
@@ -1064,6 +1076,28 @@ router.post('/fetch-and-send', async (req, res) => {
       ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
       fetchedAt: new Date().toISOString(),
     };
+
+    let cacheFile;
+    if (select) {
+      await clearCacheForDevice(req.frameArtPath, deviceId);
+      await clearStagedForDevice(req.frameArtPath, deviceId);
+      cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext);
+      await fs.rename(pendingFile, cacheFile);
+      await fs.writeFile(
+        cacheFileFor(req.frameArtPath, deviceId, ext, '_original'), imageBuffer
+      );
+      webSources.perTvCache[deviceId] = cacheEntry;
+      delete webSources.stagedCache?.[deviceId];
+    } else {
+      await clearStagedForDevice(req.frameArtPath, deviceId);
+      cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_staged');
+      await fs.rename(pendingFile, cacheFile);
+      await fs.writeFile(
+        cacheFileFor(req.frameArtPath, deviceId, ext, '_staged_original'), imageBuffer
+      );
+      if (!webSources.stagedCache) webSources.stagedCache = {};
+      webSources.stagedCache[deviceId] = cacheEntry;
+    }
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 
     res.json({
@@ -1090,16 +1124,66 @@ router.delete('/cache/:deviceId', async (req, res) => {
     const webSources = await readWebSourcesConfig(req.frameArtPath);
 
     await clearCacheForDevice(req.frameArtPath, deviceId);
+    await clearStagedForDevice(req.frameArtPath, deviceId);
 
+    let dirty = false;
     if (webSources.perTvCache?.[deviceId]) {
       delete webSources.perTvCache[deviceId];
-      await writeWebSourcesConfig(req.frameArtPath, webSources);
+      dirty = true;
     }
+    if (webSources.stagedCache?.[deviceId]) {
+      delete webSources.stagedCache[deviceId];
+      dirty = true;
+    }
+    if (dirty) await writeWebSourcesConfig(req.frameArtPath, webSources);
 
     res.json({ success: true });
   } catch (error) {
     console.error('Error clearing web source cache:', error);
     res.status(500).json({ error: 'Failed to clear cache' });
+  }
+});
+
+// POST /api/web-sources/cache/:deviceId/promote
+// Promotes a staged pre-upload cache entry to the display cache.
+// Called by the fast-path shuffle after select_and_cleanup succeeds.
+router.post('/cache/:deviceId/promote', async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+
+    const staged = webSources.stagedCache?.[deviceId];
+    if (!staged) {
+      return res.status(404).json({ error: 'No staged cache for this device' });
+    }
+
+    // Determine extension from staged filename
+    const ext = path.extname(staged.filename).slice(1) || 'jpg';
+    const stagedFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_staged');
+    const stagedOriginal = cacheFileFor(req.frameArtPath, deviceId, ext, '_staged_original');
+
+    // Move staged files to display cache
+    await clearCacheForDevice(req.frameArtPath, deviceId);
+    try {
+      await fs.rename(stagedFile, cacheFileFor(req.frameArtPath, deviceId, ext));
+    } catch {
+      // Staged file missing — metadata-only promote is still useful
+    }
+    try {
+      await fs.rename(stagedOriginal, cacheFileFor(req.frameArtPath, deviceId, ext, '_original'));
+    } catch {
+      // Original file missing — not fatal
+    }
+
+    // Promote metadata
+    webSources.perTvCache[deviceId] = staged;
+    delete webSources.stagedCache[deviceId];
+    await writeWebSourcesConfig(req.frameArtPath, webSources);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error promoting staged cache:', error);
+    res.status(500).json({ error: 'Failed to promote staged cache' });
   }
 });
 
