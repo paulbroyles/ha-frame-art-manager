@@ -11501,6 +11501,29 @@ async function loadCustomDataTab() {
   renderCustomDataList();
   initNewAttributeButton();
   initNewEntityButton();
+  document.getElementById('restore-custom-metadata-defaults-btn')
+    ?.addEventListener('click', restoreCustomMetadataDefaults);
+}
+
+async function restoreCustomMetadataDefaults() {
+  if (!confirm('Restore default Custom Metadata fields (title, artist, year, museum, medium) and reset all web source metadata mappings to defaults? Any custom attributes and mapping overrides will be replaced.')) return;
+
+  try {
+    const response = await fetch(`${API_BASE}/entities/restore-defaults`, { method: 'POST' });
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'Failed to restore defaults');
+
+    // Reload custom data and web sources config
+    await loadCustomDataTab();
+    if (webSourcesConfig) {
+      const cfg = await fetch(`${API_BASE}/web-sources/config`).then(r => r.json());
+      webSourcesConfig = cfg;
+    }
+    showToast('Custom Metadata fields and web source mappings restored to defaults');
+  } catch (error) {
+    console.error('Error restoring custom metadata defaults:', error);
+    showToast(`Error: ${error.message}`, 'error');
+  }
 }
 
 function renderAttributesTable() {

@@ -361,11 +361,11 @@
         <!-- Sub-tabs for Advanced section -->
         <div class="advanced-tabs">
           <button class="advanced-tab-btn active" data-tab="tags">Tags</button>
-          <button class="advanced-tab-btn" data-tab="custom-data">Custom Data</button>
+          <button class="advanced-tab-btn" data-tab="custom-data">Custom Metadata</button>
           <button class="advanced-tab-btn" data-tab="web-sources">Web Sources</button>
           <button class="advanced-tab-btn" data-tab="recency">Recency</button>
           <button class="advanced-tab-btn" data-tab="settings">Settings</button>
-          <button class="advanced-tab-btn" data-tab="metadata">Metadata</button>
+          <button class="advanced-tab-btn" data-tab="metadata">Raw Data</button>
           <button class="advanced-tab-btn" data-tab="sync">Sync Detail</button>
         </div>
 
@@ -406,10 +406,11 @@
         <div id="advanced-custom-data-content" class="advanced-tab-content">
           <div class="subsection subsection-no-card">
             <div class="tagsets-header">
-              <h3>Custom Data</h3>
+              <h3>Custom Metadata</h3>
               <div class="custom-data-actions">
                 <button type="button" id="new-attribute-btn" class="btn-primary btn-small">+ New Attribute</button>
                 <button type="button" id="new-entity-btn" class="btn-primary btn-small">+ New Entity</button>
+                <button type="button" id="restore-custom-metadata-defaults-btn" class="btn-secondary btn-small">Restore Defaults</button>
               </div>
             </div>
             <p class="pool-health-description">Attributes store text metadata on each image. Entities group attributes under a shared key — link multiple images to the same entity instance.</p>
@@ -521,9 +522,9 @@
         <!-- Metadata Sub-tab -->
         <div id="advanced-metadata-content" class="advanced-tab-content">
           <div class="subsection">
-            <h3>Metadata Backend</h3>
+            <h3>Raw Data</h3>
             <p>View the raw metadata.json file for debugging</p>
-            <button id="refresh-metadata-btn" class="btn-primary">Refresh Metadata</button>
+            <button id="refresh-metadata-btn" class="btn-primary">Refresh</button>
             
             <div class="metadata-viewer">
               <pre id="metadata-content" class="code-block">Loading metadata...</pre>
