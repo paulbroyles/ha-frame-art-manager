@@ -103,7 +103,7 @@
       "oel_type": "qrcode",
       "zone": "anchor",
       "anchor": "bottom-right",
-      "sizePercent": 0.225,
+      "sizePercent": 0.26,
       "margin": 15,
       "border": 1,
       "color": "black",

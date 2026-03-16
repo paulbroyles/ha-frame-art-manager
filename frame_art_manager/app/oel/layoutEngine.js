@@ -149,7 +149,7 @@ async function layoutPlacard(template, metadata, display, refreshType) {
         x_end:   x + actualSize + borderGap,
         y_end:   y + actualSize + borderGap,
         outline: resolveColor(slot.color, refreshType),
-        fill:    slot.bgcolor || 'white',
+        fill:    null,
         width:   1,
       });
       payload.push({
