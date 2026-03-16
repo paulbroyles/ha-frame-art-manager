@@ -3,6 +3,7 @@
   "name": "Museum Placard",
   "description": "Classic museum-style placard: artist, nationality, lifespan, title, date, medium, dimensions, museum, description, QR code.",
   "margin": 10,
+  "displayBorder": true,
   "fonts": {
     "heading": { "file": "PlayfairDisplay-Bold.ttf", "fallback": "Poppins-Bold.ttf" },
     "body":    { "file": "Roboto-Medium.ttf",         "fallback": "Roboto-Medium.ttf" },
@@ -15,7 +16,7 @@
       "transform": "upper",
       "type": "text",
       "font": "heading",
-      "fontSize": 26,
+      "fontSize": 30,
       "color": "black",
       "marginTop": 10,
       "zone": "top"
@@ -48,8 +49,8 @@
       "field": "title",
       "type": "text",
       "font": "heading",
-      "fontSize": 22,
-      "lineHeight": 26,
+      "fontSize": 26,
+      "lineHeight": 30,
       "color": { "Full": "red", "default": "black" },
       "marginTop": 10,
       "zone": "top"

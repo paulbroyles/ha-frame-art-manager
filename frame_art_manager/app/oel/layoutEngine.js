@@ -97,6 +97,19 @@ async function layoutPlacard(template, metadata, display, refreshType) {
     overflow: false,
   };
 
+  // ── 0. Optional display border (thin outline around entire display) ──────
+  if (template.displayBorder) {
+    payload.push({
+      type: 'rectangle',
+      x_start: 0,
+      y_start: 0,
+      x_end:   display.width  - 1,
+      y_end:   display.height - 1,
+      outline: 'black',
+      width:   1,
+    });
+  }
+
   // ── 1. Separate slots by zone ────────────────────────────────────────────
   const topSlots    = template.slots.filter(s => (s.zone || 'top') === 'top');
   const anchorSlots = template.slots.filter(s => s.zone === 'anchor');
@@ -127,6 +140,18 @@ async function layoutPlacard(template, metadata, display, refreshType) {
       const y = display.height - actualSize - qrMargin;
 
       anchors.push({ slot, x, y, width: actualSize, height: actualSize });
+      // Draw a thin border outline around the QR code.
+      const borderGap = 2;
+      payload.push({
+        type: 'rectangle',
+        x_start: x - borderGap,
+        y_start: y - borderGap,
+        x_end:   x + actualSize + borderGap,
+        y_end:   y + actualSize + borderGap,
+        outline: resolveColor(slot.color, refreshType),
+        fill:    slot.bgcolor || 'white',
+        width:   1,
+      });
       payload.push({
         type: 'qrcode',
         data: value,
