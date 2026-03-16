@@ -1,0 +1,123 @@
+{
+  "id": "museum_placard",
+  "name": "Museum Placard",
+  "description": "Classic museum-style placard: artist, nationality, lifespan, title, date, medium, dimensions, museum, description, QR code.",
+  "margin": 10,
+  "fonts": {
+    "heading": { "file": "PlayfairDisplay-Bold.ttf", "fallback": "Poppins-Bold.ttf" },
+    "body":    { "file": "Roboto-Medium.ttf",         "fallback": "Roboto-Medium.ttf" },
+    "small":   { "file": "Roboto-Regular.ttf",        "fallback": "Roboto-Regular.ttf" }
+  },
+  "slots": [
+    {
+      "id": "artist_name",
+      "field": "creator_name",
+      "transform": "upper",
+      "type": "text",
+      "font": "heading",
+      "fontSize": 26,
+      "color": "black",
+      "marginTop": 10,
+      "zone": "top"
+    },
+    {
+      "id": "nationality",
+      "field": "creator_nationality",
+      "type": "text",
+      "font": "body",
+      "fontSize": 16,
+      "color": "black",
+      "marginTop": 6,
+      "zone": "top"
+    },
+    {
+      "id": "lifespan",
+      "field": "creator_lifespan",
+      "prepend": "(",
+      "append": ")",
+      "type": "text",
+      "font": "small",
+      "fontSize": 14,
+      "color": "black",
+      "marginTop": 2,
+      "zone": "top",
+      "requires": "creator_nationality"
+    },
+    {
+      "id": "title",
+      "field": "title",
+      "type": "text",
+      "font": "heading",
+      "fontSize": 22,
+      "lineHeight": 26,
+      "color": { "Full": "red", "default": "black" },
+      "marginTop": 10,
+      "zone": "top"
+    },
+    {
+      "id": "date",
+      "field": "date",
+      "wrap": "({value})",
+      "type": "text",
+      "font": "small",
+      "fontSize": 15,
+      "color": "black",
+      "marginTop": 4,
+      "zone": "top"
+    },
+    {
+      "id": "medium",
+      "field": "medium",
+      "type": "text",
+      "font": "body",
+      "fontSize": 15,
+      "color": "black",
+      "marginTop": 10,
+      "zone": "top"
+    },
+    {
+      "id": "dimensions",
+      "field": "dimensions",
+      "type": "text",
+      "font": "small",
+      "fontSize": 13,
+      "color": "black",
+      "marginTop": 2,
+      "zone": "top"
+    },
+    {
+      "id": "museum",
+      "field": "museum",
+      "type": "text",
+      "font": "body",
+      "fontSize": 15,
+      "color": "black",
+      "marginTop": 4,
+      "zone": "top"
+    },
+    {
+      "id": "qr_code",
+      "field": "artwork_url",
+      "type": "qrcode",
+      "oel_type": "qrcode",
+      "zone": "anchor",
+      "anchor": "bottom-right",
+      "sizePercent": 0.225,
+      "margin": 15,
+      "border": 1,
+      "color": "black",
+      "bgcolor": "white"
+    },
+    {
+      "id": "description",
+      "field": "description",
+      "type": "text",
+      "font": "small",
+      "fontSize": 13,
+      "lineHeight": 15,
+      "color": "black",
+      "zone": "fill",
+      "beside": "qr_code"
+    }
+  ]
+}

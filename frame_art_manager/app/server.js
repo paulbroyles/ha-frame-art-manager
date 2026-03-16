@@ -21,6 +21,7 @@ const webSourcesRouter = require('./routes/web_sources');
 const artworkRouter = require('./routes/artwork');
 const shuffleRouter = require('./routes/shuffle');
 const tagsetsRouter = require('./routes/tagsets');
+const oelRouter     = require('./routes/oel');
 
 const app = express();
 const PORT = process.env.PORT || 8099;
@@ -83,6 +84,7 @@ app.use('/api/entities', entitiesRouter);
 app.use('/api/web-sources', webSourcesRouter);
 app.use('/api/shuffle', shuffleRouter);
 app.use('/api/tagsets', tagsetsRouter);
+app.use('/api/oel',     oelRouter);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
