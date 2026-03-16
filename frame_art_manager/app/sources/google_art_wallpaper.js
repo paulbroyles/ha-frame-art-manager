@@ -86,6 +86,9 @@ async function fetchRandomArtwork(_filters = [], options = {}) {
       attribution: entry.attribution || null,
       artworkUrl,
       source: 'Google Art Wallpaper',
+      // Bare CDN URL without size/crop suffix — lets the web view request
+      // an uncropped version at a suitable width instead of the TV crop.
+      imageBaseUrl: entry.image,
       ...richMetadata,
     },
   };
@@ -306,6 +309,7 @@ async function fetchByIdentifier(identifier, { settings } = {}) {
       attribution: entry.attribution || null,
       artworkUrl,
       source: 'Google Art Wallpaper',
+      imageBaseUrl: entry.image,
       ...richMetadata,
     },
   };

@@ -1124,6 +1124,9 @@ router.post('/fetch-and-send', async (req, res) => {
       sourceId: chosenSourceId,
       ...(resolvedVirtualTagId && { virtualTagId: resolvedVirtualTagId }),
       artworkUrl: artMetadata.artworkUrl,
+      // imageBaseUrl: bare CDN URL (before size/crop suffix), if the source provides one.
+      // Used by the artwork web view to serve an uncropped version of the image.
+      ...(artMetadata.imageBaseUrl && { imageBaseUrl: artMetadata.imageBaseUrl }),
       metadata: artMetadata,
       ...(Object.keys(attributeSnapshot).length > 0 && { attributeSnapshot }),
       ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),

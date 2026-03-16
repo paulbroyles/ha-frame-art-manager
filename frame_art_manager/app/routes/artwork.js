@@ -560,6 +560,14 @@ router.get('/:tvId/image', async (req, res) => {
       // Serve original uncropped image from web_source_cache
       const webConfig = await readWebSourcesConfig(req.frameArtPath);
       const tvCache = webConfig?.perTvCache?.[deviceId];
+
+      // If the source stored a bare CDN URL (e.g. Google Art Wallpaper), redirect to
+      // an uncropped version at 2560px wide — much better for the web view than the
+      // TV-optimised center-crop.
+      if (tvCache?.imageBaseUrl) {
+        return res.redirect(302, `${tvCache.imageBaseUrl}=w2560`);
+      }
+
       const originalFilename = tvCache?.originalFilename;
       if (!originalFilename) return res.status(404).json({ error: 'No cached image' });
 
