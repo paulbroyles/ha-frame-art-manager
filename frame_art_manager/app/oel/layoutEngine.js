@@ -132,12 +132,14 @@ async function layoutPlacard(template, metadata, display, refreshType) {
       // Calculate boxsize using exact module count for this URL.
       // Total pixels = (modules + 2*border) * boxsize
       const border  = slot.border != null ? slot.border : 1;
-      let modules = 33; // fallback estimate
+      let modules = 53; // fallback estimate (H correction, ~80-char URL)
       try {
-        const qrObj = QRCode.create(value, { errorCorrectionLevel: 'M' });
+        // Use ERROR_CORRECT_H to match OEL's qrcode rendering level.
+        const qrObj = QRCode.create(value, { errorCorrectionLevel: 'H' });
         modules = qrObj.modules.size;
       } catch (_) { /* use fallback */ }
-      const boxsize = Math.max(1, Math.floor(targetSize / (modules + 2 * border)));
+      // Round (not floor) so we don't undercount by one boxsize step.
+      const boxsize = Math.max(1, Math.round(targetSize / (modules + 2 * border)));
       const actualSize = (modules + 2 * border) * boxsize;
 
       const x = display.width  - actualSize - qrMargin;
@@ -242,7 +244,8 @@ async function layoutPlacard(template, metadata, display, refreshType) {
 
     // Determine area beside the QR code (or full width if no anchors).
     const qrAnchor = anchors.find(a => a.slot.beside ? a.slot.id === slot.beside : true);
-    const fillY  = qrAnchor ? qrAnchor.y : (display.height - 60);
+    const descGap = slot.marginTop || 6;   // small top gap before description
+    const fillY  = qrAnchor ? qrAnchor.y + descGap : (display.height - 60);
     const fillX  = margin;
     const fillW  = qrAnchor ? qrAnchor.x - margin * 2 : contentWidth;
     const fillH  = display.height - fillY;
