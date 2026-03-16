@@ -7,8 +7,14 @@ Public webpage at `/artwork/:tvId` showing the currently displayed artwork on a 
 - Per-TV URL using HA device_id or slugified TV name
 - No HA login required — public on local network
 - Server-rendered HTML with inline CSS (fully self-contained)
-- Dark gallery aesthetic, mobile-first
-- Full uncropped image with zoomable fullscreen overlay (CSS-only, pinch-to-zoom)
+- Museum-style dark aesthetic (Georgia serif body, uppercase artist heading, italic title)
+- Artwork image at top, zoomable fullscreen overlay (pinch-to-zoom; ESC to close)
+- **Uncropped image** served when source provides `imageBaseUrl` (e.g. Google Art Wallpaper — see below)
+- Artist biography line (nationality, lifespan) extracted from entity extra attributes
+- Title and date get dedicated display section, not buried in detail rows
+- Description shown from raw metadata even if not in Custom Data Order
+- "View on [Source Name] →" link with human-readable site name
+- TV name in near-invisible footer only
 - Metadata rendered via Custom Data system (display roles: primary/secondary/detail)
 - Works for both web source and local library images
 
@@ -86,11 +92,38 @@ If the add-on crashes after `sendImageToTV` returns but before the commit block 
 
 Custom Data entries can have a `displayRole` controlling how they render on the artwork page:
 
-- **`primary`**: Large heading (e.g., title)
-- **`secondary`**: Secondary line with optional extra entity attributes (e.g., artist name + dates)
-- **`detail`** (default): Labeled rows in a details section
+- **`primary`**: Large uppercase heading (artist name)
+- **`secondary`**: Secondary/byline line; extra entity attributes (e.g., nationality · lifespan) join inline
+- **`detail`** (default): Labeled rows in a details table
 
-Roles are source-agnostic — work the same for flat attributes and entities. For entities, the first attribute is the display value; additional attributes render inline (secondary) or as comma-separated values (detail).
+Roles are source-agnostic — work the same for flat attributes and entities. For entities, the first attribute is the display value; additional attributes are extracted as the artist byline (for primary fields) or rendered inline/comma-separated (for secondary/detail fields).
+
+**Special cases:**
+- `title` and `date` — always extracted from `rawAttributes` into a dedicated typography block, excluded from detail rows, regardless of their Custom Data role
+- `description` — shown as a full paragraph from `rawAttributes` regardless of Custom Data role; excluded from detail rows
+
+## Uncropped Images
+
+The `/artwork/:tvId/image` endpoint serves the best available image:
+
+1. **If `perTvCache.imageBaseUrl` exists** (set by sources that know their base CDN URL): redirects to `{imageBaseUrl}=w2560` — natural aspect ratio, uncropped, up to 2560px wide
+2. **Otherwise**: serves `originalFilename` from `web_source_cache/`
+
+Currently only Google Art Wallpaper sets `imageBaseUrl` (in `fetchRandomArtwork` and `fetchByIdentifier`). This gives the web view the natural painting aspect ratio instead of the TV-optimised 16:9 center crop.
+
+## Source Link
+
+The "View on [source] →" button uses a hardcoded lookup in `artwork.js`:
+
+```javascript
+const SOURCE_DISPLAY_NAMES = {
+  google_arts:         'Google Arts & Culture',
+  google_art_wallpaper:'Google Arts & Culture',   // same site, different sub-collection
+  met_museum:          'Metropolitan Museum of Art',
+};
+```
+
+Falls back to `'source'` if the ID is not in the map.
 
 ## Key Files
 

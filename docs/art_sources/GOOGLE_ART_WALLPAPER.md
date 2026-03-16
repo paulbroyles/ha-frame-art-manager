@@ -71,3 +71,38 @@ always available.
 - **Filtering**: None — no media type or category filtering is supported or needed given the
   small, curated pool
 - **No API key, no rate limit, no authentication**
+
+---
+
+## Native Image Resolution
+
+**These images are frequently below 4K native resolution.** When downloaded at `=w3840-h2160-c`,
+the CDN upscales the image to fill the requested dimensions. Testing 8 entries (2026-03):
+
+| Artwork | Native size |
+|---------|------------|
+| Poppies | 2871×2081 |
+| Landscape with Rocks | 2373×1769 |
+| Burragorang Valley near Picton | 2500×1466 |
+| Stonehenge - Twilight | 2918×1986 |
+| Abstract painting | 2500×1824 |
+| Fort Gaines, Sanding, Massachusetts | 2611×1839 |
+| In the Greenhouse | 3587×2712 |
+| Boston Harbor | 3219×1908 |
+
+7 of 8 are below 3840×2160 at native resolution. The upscaling is unavoidable — this is what Google provides.
+
+**Dezoomify does not apply here.** These artworks have pages on `artsandculture.google.com` but
+lack the high-resolution tiled viewer that dezoomify requires. Tested: no zoom/tile indicators were
+found in the page source for sampled entries. The CDN image at `=s0` (no size cap) is the maximum
+available resolution.
+
+### Web view vs. TV display
+
+- **TV display**: `=w3840-h2160-c` (center-cropped to landscape). Unavoidable for a landscape panel.
+- **Web view** (`/artwork/:tvId/image`): Redirects to `{imageBaseUrl}=w2560` — natural aspect ratio,
+  uncropped, at the native resolution (no upscaling). `imageBaseUrl` is stored in `perTvCache` on
+  each fetch.
+
+The `imageBaseUrl` field (the bare CDN URL before any size/crop suffix) is stored in `perTvCache`
+so the web view can construct an appropriate URL without re-fetching.
