@@ -170,7 +170,7 @@ function resolveEntityRefs(entityRefs, entityInstances) {
 // Human-readable names for built-in source IDs.
 const SOURCE_DISPLAY_NAMES = {
   google_arts:         'Google Arts & Culture',
-  google_art_wallpaper:'Google Art Wallpaper',
+  google_art_wallpaper:'Google Arts & Culture',
   met_museum:          'Metropolitan Museum of Art',
 };
 
