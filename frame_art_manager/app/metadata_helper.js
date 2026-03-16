@@ -134,7 +134,7 @@ class MetadataHelper {
       // Covers fresh installs and configs created before attributes existed.
       // Only runs when 'attributes' is absent (user has never touched Custom Metadata).
       if (!parsed.attributes) {
-        parsed.attributes = ['title', 'date', 'museum', 'medium', 'description'];
+        parsed.attributes = ['title', 'date', 'museum', 'medium', 'dimensions', 'description'];
         if (!parsed.entityTypes) parsed.entityTypes = [];
         if (!parsed.entityTypes.some(e => e.id === 'creator')) {
           parsed.entityTypes.push({ id: 'creator', name: 'Creator', attributes: ['name', 'lifespan', 'nationality'] });
@@ -146,6 +146,7 @@ class MetadataHelper {
           { type: 'attribute', name: 'date' },
           { type: 'attribute', name: 'museum' },
           { type: 'attribute', name: 'medium' },
+          { type: 'attribute', name: 'dimensions' },
           { type: 'entity', id: 'creator' },
           { type: 'attribute', name: 'description' },
         ];

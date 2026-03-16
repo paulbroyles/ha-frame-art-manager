@@ -236,7 +236,7 @@ const defaultMapping = {
   creator:     { entity: 'creator', attribute: 'name' },
   medium:      'medium',
   dateCreated: 'date',
-  source:      null,
+  source:      'museum',
 };
 
 /**

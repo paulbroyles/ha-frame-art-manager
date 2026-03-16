@@ -99,13 +99,36 @@ const metadataFields = [
   { key: 'source',      label: 'Source',      description: 'Source collection name (always "Google Art Wallpaper")' },
 ];
 
-// Default mapping hints: source field key → suggested HA attribute name.
+// Default mapping hints for the base fields this source always provides.
 const defaultMapping = {
   title:       'title',
-  creator:     'artist',
+  creator:     { entity: 'creator', attribute: 'name' },
   attribution: null,
   source:      null,
 };
+
+/**
+ * Returns the effective default mapping for this source given its stored settings.
+ * When fetchRichMetadata is enabled, merges in google_arts' defaultMapping so that
+ * rich fields (medium, date, museum, dimensions, description, etc.) get proper hints.
+ *
+ * @param {object} settings - Stored source settings
+ * @returns {object} Merged default mapping
+ */
+function getDefaultMapping(settings) {
+  if (!settings?.fetchRichMetadata) return defaultMapping;
+
+  let googleArts;
+  try {
+    googleArts = require('./google_arts');
+  } catch (_) {
+    return defaultMapping;
+  }
+
+  // Rich fields from google_arts override/extend the base mapping.
+  // Base fields (title, creator, attribution, source) keep their wallpaper-specific values.
+  return { ...(googleArts.defaultMapping || {}), ...defaultMapping };
+}
 
 /**
  * Returns the effective metadata fields for this source given its stored settings.
@@ -136,7 +159,7 @@ const settingsSchema = {
     {
       key:            'fetchRichMetadata',
       type:           'boolean',
-      default:        false,
+      default:        true,
       requiresSource: 'google_arts',
       label:          'Fetch rich metadata from Google Arts & Culture',
       description:    'Queries the Google Arts & Culture API for extended artwork details (type, medium, date, nationality, dimensions, description). Requires Google Arts & Culture to be enabled as a web source.',
@@ -302,4 +325,4 @@ function canHandleIdentifier(identifier) {
 // All entries are center-cropped to 3840×2160 — landscape only.
 const aspectRatioConstraint = 'landscape';
 
-module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, selectMode, getMetadataFields, getFilterTypes, getExtraOptions, metadataFields, defaultMapping, settingsSchema, alreadyProcessed, aspectRatioConstraint };
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, selectMode, getMetadataFields, getDefaultMapping, getFilterTypes, getExtraOptions, metadataFields, defaultMapping, settingsSchema, alreadyProcessed, aspectRatioConstraint };

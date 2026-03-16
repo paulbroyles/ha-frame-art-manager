@@ -46,7 +46,10 @@ function buildSourceMetadata(webSources) {
       const fields = mod.getMetadataFields
         ? mod.getMetadataFields(settings)
         : (mod.metadataFields || []);
-      return [id, { fields, defaultMapping: mod.defaultMapping || {} }];
+      const dm = mod.getDefaultMapping
+        ? mod.getDefaultMapping(settings)
+        : (mod.defaultMapping || {});
+      return [id, { fields, defaultMapping: dm }];
     })
   );
 }
@@ -282,7 +285,11 @@ async function readWebSourcesConfig(frameArtPath) {
   // Sources without a defaultMapping are left as-is.
   for (const [id, sourceConfig] of Object.entries(config.sources)) {
     if (!Object.prototype.hasOwnProperty.call(sourceConfig, 'userMapping')) {
-      const defaultMapping = SOURCE_MODULES[id]?.defaultMapping;
+      const mod = SOURCE_MODULES[id];
+      const settings = sourceConfig.settings;
+      const defaultMapping = mod?.getDefaultMapping
+        ? mod.getDefaultMapping(settings)
+        : mod?.defaultMapping;
       if (defaultMapping) {
         sourceConfig.userMapping = { ...defaultMapping };
       }
