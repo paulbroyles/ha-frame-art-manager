@@ -1,5 +1,39 @@
 ## Future Investigations
 
+### Server-side OEL placard rendering (frame-art-manager endpoint)
+
+**Idea**: Instead of constructing the OEL `drawcustom` payload in a Jinja2 blueprint template with hardcoded pixel positions, expose a `/api/oel-placard` endpoint in frame-art-manager that accepts artwork metadata and returns a fully-positioned OEL JSON payload.
+
+**Motivation**: Jinja2 templates can't measure actual font metrics, so multi-line title wrapping is estimated via a chars-per-pixel heuristic. The heuristic is fundamentally limited: titles that visually fit in one line are being wrapped because OEL's bitmap font has wider characters than the estimate, and there is no way to know the exact per-character widths without actually measuring. Even with tuning, the estimate will be wrong for different title lengths and character mixes. A server-side renderer is the only clean solution.
+
+**How it would work**:
+- Blueprint (or automation) POSTs artwork metadata (title, artist, date, medium, dimensions, museum, description, creator fields) + display dimensions + refresh_type to the endpoint, via the manager's Ingress proxy URL
+- Endpoint runs a real layout pass:
+  1. Measure each text field using actual font metrics (`canvas.measureText` or a glyph-width lookup table for OEL's built-in font)
+  2. Determine how many lines each multiline field will occupy
+  3. Pack fields top-to-bottom with fixed spacing, skipping absent fields
+  4. Place QR code bottom-right with a guaranteed margin
+  5. Fit description in remaining space bottom-left beside QR, as many lines as fit
+- Endpoint returns the complete `payload` array (OEL JSON) ready to pass to `open_epaper_link.drawcustom`
+- Blueprint uses a `rest_command` (or inline `rest` action) to POST to the endpoint, then passes the response body directly as `payload`
+
+**Font metrics options** (pick one):
+- `canvas` npm package: full `measureText()` support, native binary, similar Alpine/glibc compat concerns as onnxruntime — would need `gcompat`. Most accurate.
+- OEL glyph-width lookup table: measure OEL's built-in font once (render known strings, read pixel widths), store as a JSON table keyed by `{char, size}`. No extra dependency, slightly less accurate for unusual characters. Likely good enough.
+- `opentype.js` / `fontkit`: parse the actual font file OEL uses (if it's accessible/documented). Pure JS, no native dep.
+
+**Blueprint changes needed**:
+- Add `manager_url` input (the manager's Ingress base URL, e.g. `http://homeassistant.local:8123/api/hassio_ingress/<token>`)
+- Replace the entire `payload: >` Jinja2 block with a `rest_command` call + pass response as payload
+- Graceful fallback: if the endpoint is unreachable, fall back to the current static layout
+
+**Considerations**:
+- The Ingress token in the URL changes if the add-on is reinstalled — may need a sensor that exposes the stable URL, or the user configures it once as a blueprint input
+- The endpoint should accept a `?dry_run=true` param for testing without sending to OEL
+- Response should include a `debug_svg` field (optional) for visualizing the layout during development
+
+
+
 ### Spatial block coherence for contamination detection (mean_profile pre-processor)
 
 **Problem**: The current `hotFrac` contamination check in `incrementalScan` counts the fraction
