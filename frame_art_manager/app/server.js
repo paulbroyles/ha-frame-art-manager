@@ -57,9 +57,10 @@ app.locals.addonHome = FRAME_ART_HOME;
 // Serve static files from public directory
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Serve image library and thumbnails
+// Serve image library, thumbnails, and web source cache
 app.use('/library', express.static(path.join(FRAME_ART_PATH, 'library')));
 app.use('/thumbs', express.static(path.join(FRAME_ART_PATH, 'thumbs')));
+app.use('/cache', express.static(path.join(FRAME_ART_PATH, 'web_source_cache')));
 
 // Make FRAME_ART_PATH available to all routes
 app.use((req, res, next) => {
