@@ -13,6 +13,7 @@
  */
 
 const { measureText, wrapText, getLineHeight } = require('./fontManager');
+const QRCode = require('qrcode');
 
 /**
  * Resolve a font reference (template key → actual filename).
@@ -128,11 +129,14 @@ async function layoutPlacard(template, metadata, display, refreshType) {
       const sizePerc  = slot.sizePercent || 0.225;
       const targetSize = Math.floor(display.width * sizePerc);
 
-      // Calculate boxsize to approximate targetSize.
-      // A typical URL encodes to ~29-33 modules; use 33 as conservative estimate.
+      // Calculate boxsize using exact module count for this URL.
       // Total pixels = (modules + 2*border) * boxsize
       const border  = slot.border != null ? slot.border : 1;
-      const modules = 33; // conservative estimate
+      let modules = 33; // fallback estimate
+      try {
+        const qrObj = QRCode.create(value, { errorCorrectionLevel: 'M' });
+        modules = qrObj.modules.size;
+      } catch (_) { /* use fallback */ }
       const boxsize = Math.max(1, Math.floor(targetSize / (modules + 2 * border)));
       const actualSize = (modules + 2 * border) * boxsize;
 
