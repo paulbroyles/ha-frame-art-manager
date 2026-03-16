@@ -167,6 +167,47 @@ portrait-mounted hardware.
 See the `POST /api/web-sources/test-fetch` route in `routes/web_sources.js` and
 the `tvOrientation` parameter.
 
+### Web source recency: cross-TV and local recency migration
+
+**Current state**: `webSourceRecency[deviceId]` in `web_sources.json` tracks the last 30 displayed
+web source artworks per TV. This is per-TV only — no cross-TV dimension.
+
+**Parity gap vs. local recency**: Local recency builds two sets — `same_tv_recent` (images on this TV,
+last 120h) and `cross_tv_recent` (images on *any* TV, last 72h) — then unions them before filtering.
+Web source recency only does the same-TV half. Adding cross-TV is straightforward: union all entries
+in `webSourceRecency` when building the exclusion set in `fetchAndProcessWebSource`. Deferred until
+multiple web-source TVs are in use.
+
+**Cross-source gap**: If two virtual tags in the same tagset point to different sources (e.g. Google
+Art Wallpaper + a Google Arts filter), the same underlying painting could appear from both. The
+recency check compares `artworkUrl` strings, which differ between sources even for the same artwork.
+No fix planned — the overlap is rare and the consequence is just an occasional near-repeat.
+
+**Local recency migration**: The display log and recency window logic currently lives in the HA
+integration (Python), which reads `events.json`, builds a `recentImages` set, and passes it to the
+add-on's `/api/shuffle/select` as a parameter on every call. The goal is for the integration's only
+job to be "trigger a shuffle" — all library selection logic should live in the add-on.
+
+Migration would require the add-on to persist recency itself. The blocker: `/api/shuffle/select`
+only picks a candidate; the actual TV send happens in the integration and can fail. The add-on
+needs a `POST /api/shuffle/confirm` (or equivalent) that the integration calls after a successful
+send, so the add-on can record what was actually displayed. Once that exists, the integration can
+stop passing `recentImages` and the display log query can move to the add-on side.
+
+### Consolidate SOURCE_DISPLAY_NAMES with BUILTIN_SOURCES
+
+`artwork.js` has a hardcoded 3-entry `SOURCE_DISPLAY_NAMES` map for the "View on →" link. This
+duplicates display names already present as `name` in `BUILTIN_SOURCES` in `web_sources.js`.
+
+**Why it's not a pure consolidation**: `google_art_wallpaper` needs to map to `'Google Arts & Culture'`
+(the site the user lands on), but its `BUILTIN_SOURCES.name` is `'Google Art Wallpaper'`. So the
+route handler would need to either: (a) add a separate `siteName` field to `BUILTIN_SOURCES`, or
+(b) keep the override in `artwork.js`. Low priority — 3 entries, rare additions, soft failure mode
+(falls back to `'source'`).
+
+**If a new source is added**: Update `SOURCE_DISPLAY_NAMES` in `artwork.js` at the same time as
+`BUILTIN_SOURCES` in `web_sources.js`.
+
 ### Dual-mode filters (include + exclude on the same type at one level)
 
 Some filter types could benefit from allowing both an include and an exclude filter

@@ -971,7 +971,9 @@ router.post('/sources/:sourceId/clear-cookies', async (req, res) => {
  *
  * Returns everything the endpoint needs to send to TV and commit cache.
  */
-async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation }) {
+const MAX_RECENT_WEB_ARTWORKS = 30; // ring-buffer size for per-TV web source recency tracking
+
+async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId }) {
   const webSources = await readWebSourcesConfig(req.frameArtPath);
   const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
 
@@ -1018,20 +1020,40 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
   const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
   const extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
 
-  // Fetch, with optional retry when the image is below the minimum resolution threshold.
+  // Fetch, with optional retry when the image is below the minimum resolution threshold
+  // or has been recently shown on this TV (recency deduplication).
   const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
-  const MAX_LOW_RES_ATTEMPTS = 3;
+  const recentArtworkIds = new Set(webSources.webSourceRecency?.[deviceId] || []);
+  const MAX_FETCH_ATTEMPTS = 5;
   let fetchResult;
-  for (let attempt = 0; attempt < MAX_LOW_RES_ATTEMPTS; attempt++) {
+  for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt++) {
     fetchResult = await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
-    if (!skipLowRes) break;
-    const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
-    const shortSide = Math.min(width, height);
-    if (shortSide >= minResolution) break;
-    console.warn(`[web_sources] Skipping low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_LOW_RES_ATTEMPTS})`);
-    if (attempt === MAX_LOW_RES_ATTEMPTS - 1) {
-      console.warn(`[web_sources] All ${MAX_LOW_RES_ATTEMPTS} attempts returned low-res images; using last result`);
+    const isLast = attempt === MAX_FETCH_ATTEMPTS - 1;
+
+    if (skipLowRes) {
+      const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
+      const shortSide = Math.min(width, height);
+      if (shortSide < minResolution) {
+        if (!isLast) {
+          console.warn(`[web_sources] Low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS})`);
+          continue;
+        }
+        console.warn(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts returned low-res images; using last result`);
+      }
     }
+
+    if (recentArtworkIds.size > 0) {
+      const artworkId = fetchResult.metadata?.artworkUrl;
+      if (artworkId && recentArtworkIds.has(artworkId)) {
+        if (!isLast) {
+          console.log(`[web_sources] Recently shown artwork; retrying (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS})`);
+          continue;
+        }
+        console.log(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts returned recently shown artwork; using last result`);
+      }
+    }
+
+    break;
   }
   const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
@@ -1086,7 +1108,7 @@ router.post('/fetch-and-send', async (req, res) => {
       processedBuffer, imageBuffer, ext, artMetadata,
       attributeSnapshot, entitySnapshot, chosenSourceId,
       virtualTagId: resolvedVirtualTagId, webSources,
-    } = await fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation });
+    } = await fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId });
 
     const cacheDir = cacheDirFor(req.frameArtPath);
     await fs.mkdir(cacheDir, { recursive: true });
@@ -1144,6 +1166,15 @@ router.post('/fetch-and-send', async (req, res) => {
       );
       webSources.perTvCache[deviceId] = cacheEntry;
       delete webSources.stagedCache?.[deviceId];
+      // Update recency ring buffer (tracks what has actually been displayed)
+      const artworkId = artMetadata.artworkUrl;
+      if (artworkId) {
+        if (!webSources.webSourceRecency) webSources.webSourceRecency = {};
+        const prev = webSources.webSourceRecency[deviceId] || [];
+        webSources.webSourceRecency[deviceId] = [
+          ...prev.filter(id => id !== artworkId), artworkId,
+        ].slice(-MAX_RECENT_WEB_ARTWORKS);
+      }
     } else {
       await clearStagedForDevice(req.frameArtPath, deviceId);
       cacheFile = cacheFileFor(req.frameArtPath, deviceId, ext, '_staged');
@@ -1231,9 +1262,17 @@ router.post('/cache/:deviceId/promote', async (req, res) => {
       // Original file missing — not fatal
     }
 
-    // Promote metadata
+    // Promote metadata and update recency ring buffer
     webSources.perTvCache[deviceId] = staged;
     delete webSources.stagedCache[deviceId];
+    const artworkId = staged.artworkUrl;
+    if (artworkId) {
+      if (!webSources.webSourceRecency) webSources.webSourceRecency = {};
+      const prev = webSources.webSourceRecency[deviceId] || [];
+      webSources.webSourceRecency[deviceId] = [
+        ...prev.filter(id => id !== artworkId), artworkId,
+      ].slice(-MAX_RECENT_WEB_ARTWORKS);
+    }
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 
     res.json({ success: true });
