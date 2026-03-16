@@ -4,6 +4,7 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const { clearCacheForDevice } = require('./web_sources');
+const { readTagsets } = require('./tagsets');
 
 /**
  * Parse JSONL (one JSON object per line) into an array.
@@ -170,10 +171,12 @@ router.get('/tvs', requireHA, async (req, res) => {
   try {
     // Template to find devices belonging to the integration
     // Global tagsets are exposed as full definitions in sensor attributes
+    // Tagset definitions are now owned by the manager (tagsets.json).
+    // The template only needs per-TV assignment state from HA.
     const template = `
-      {% set ns = namespace(tvs=[], global_tagsets={}) %}
+      {% set ns = namespace(tvs=[]) %}
       {% set devices = integration_entities('frame_art_shuffler') | map('device_id') | unique | list %}
-      
+
       {% for device_id in devices %}
         {% if device_id and device_id != 'None' %}
           {% set device_name = device_attr(device_id, 'name') %}
@@ -186,17 +189,15 @@ router.get('/tvs', requireHA, async (req, res) => {
           {% set ns.active_tagset = none %}
           {% set ns.screen_on = none %}
           {% set ns.next_shuffle_time = none %}
-          
+
           {% for entity in entities %}
             {% if entity.endswith('_auto_shuffle_next') %}
-              {# Get next auto-shuffle time from sensor #}
               {% set next_shuffle = states(entity) %}
               {% if next_shuffle and next_shuffle not in ['unknown', 'unavailable', 'None'] %}
                 {% set ns.next_shuffle_time = next_shuffle %}
               {% endif %}
             {% endif %}
             {% if entity.endswith('_screen_on') %}
-              {# Get screen power state from binary_sensor #}
               {% set screen_state = states(entity) %}
               {% if screen_state == 'on' %}
                 {% set ns.screen_on = true %}
@@ -205,11 +206,6 @@ router.get('/tvs', requireHA, async (req, res) => {
               {% endif %}
             {% endif %}
             {% if entity.endswith('_current_artwork') %}
-              {# Get global tagsets (full definitions - same on all TVs) #}
-              {% set tagsets_attr = state_attr(entity, 'tagsets') %}
-              {% if tagsets_attr and tagsets_attr is mapping and not ns.global_tagsets %}
-                {% set ns.global_tagsets = tagsets_attr %}
-              {% endif %}
               {% set selected = state_attr(entity, 'selected_tagset') %}
               {% if selected %}{% set ns.selected_tagset = selected %}{% endif %}
               {% set override = state_attr(entity, 'override_tagset') %}
@@ -218,7 +214,6 @@ router.get('/tvs', requireHA, async (req, res) => {
               {% if expiry %}{% set ns.override_expiry_time = expiry %}{% endif %}
               {% set active = state_attr(entity, 'active_tagset') %}
               {% if active %}{% set ns.active_tagset = active %}{% endif %}
-              {# Get effective tags for this TV #}
               {% set tags_attr = state_attr(entity, 'tags') %}
               {% if tags_attr and tags_attr is iterable and tags_attr is not string %}
                 {% set ns.tags = tags_attr %}
@@ -229,7 +224,7 @@ router.get('/tvs', requireHA, async (req, res) => {
               {% endif %}
             {% endif %}
           {% endfor %}
-          
+
           {% set ns.tvs = ns.tvs + [{
             'device_id': device_id,
             'name': device_name,
@@ -244,27 +239,25 @@ router.get('/tvs', requireHA, async (req, res) => {
           }] %}
         {% endif %}
       {% endfor %}
-      {{ {'tagsets': ns.global_tagsets, 'tvs': ns.tvs} | to_json }}
+      {{ ns.tvs | to_json }}
     `;
 
     const result = await haRequest('POST', '/template', { template });
-    
-    // The template API returns the rendered string, we need to parse it
-    let data = { tagsets: {}, tvs: [] };
+
+    let tvs = [];
     if (typeof result === 'string') {
       try {
-        data = JSON.parse(result);
+        tvs = JSON.parse(result);
       } catch (e) {
         console.error('Failed to parse TV list template result:', result);
       }
-    } else if (result && typeof result === 'object') {
-      // Mock or direct object return
-      data = result;
+    } else if (Array.isArray(result)) {
+      tvs = result;
     }
 
-    // Global tagsets as object: { name: { tags, exclude_tags }, ... }
-    const tagsets = data.tagsets || {};
-    const tvs = data.tvs || [];
+    // Tagset definitions come from local storage, not HA
+    const tagsetsConfig = await readTagsets(req.frameArtPath);
+    const tagsets = tagsetsConfig.tagsets || {};
 
     res.json({ success: true, tagsets, tvs });
   } catch (error) {
@@ -517,117 +510,9 @@ router.get('/recently-displayed', requireHA, async (req, res) => {
 
 // ============================================================================
 // TAGSET ENDPOINTS
-// Tagsets are GLOBAL (not per-TV). upsert and delete don't need device_id.
-// select, override, and clear-override still need device_id (per-TV assignment).
-// ============================================================================
-
-// POST /api/ha/tagsets/upsert - Create or update a GLOBAL tagset
-router.post('/tagsets/upsert', requireHA, async (req, res) => {
-  const { name, original_name, tags, exclude_tags, tag_weights, weighting_type } = req.body;
-
-  if (!name || typeof name !== 'string' || !name.trim()) {
-    return res.status(400).json({ error: 'Tagset name is required' });
-  }
-  if (!tags || !Array.isArray(tags) || tags.length === 0) {
-    return res.status(400).json({ error: 'At least one tag is required' });
-  }
-
-  try {
-    const payload = {
-      name: name.trim(),
-      tags,
-      exclude_tags: exclude_tags || [],
-      weighting_type: weighting_type || 'image'
-    };
-    
-    // Include original_name for rename support
-    if (original_name && original_name.trim() && original_name.trim() !== name.trim()) {
-      payload.original_name = original_name.trim();
-    }
-    
-    // Include tag_weights if provided (only relevant for tag-weighted mode)
-    if (tag_weights && typeof tag_weights === 'object') {
-      // Validate and filter weights
-      const validatedWeights = {};
-      for (const [tag, weight] of Object.entries(tag_weights)) {
-        const w = parseFloat(weight);
-        if (!isNaN(w) && w >= 0.1 && w <= 10) {
-          validatedWeights[tag] = w;
-        }
-      }
-      if (Object.keys(validatedWeights).length > 0) {
-        payload.tag_weights = validatedWeights;
-      }
-    }
-
-    await haRequest('POST', '/services/frame_art_shuffler/upsert_tagset', payload);
-    res.json({ success: true, message: `Tagset '${name}' saved` });
-  } catch (error) {
-    console.error('Error upserting tagset:', error.message);
-    res.status(500).json({ 
-      error: 'Failed to save tagset', 
-      details: error.response?.data?.message || error.message 
-    });
-  }
-});
-
-// POST /api/ha/tagsets/delete - Delete a GLOBAL tagset
-// Pre-validates in add-on since HA Supervisor API strips error messages
-router.post('/tagsets/delete', requireHA, async (req, res) => {
-  const { name, tagsets, tvs } = req.body;
-
-  if (!name || typeof name !== 'string' || !name.trim()) {
-    return res.status(400).json({ error: 'Tagset name is required' });
-  }
-
-  const tagsetName = name.trim();
-
-  // Pre-validation using client-provided data (since HA strips error messages)
-  if (tagsets && tvs) {
-    // Check if tagset exists
-    if (!tagsets[tagsetName]) {
-      return res.status(400).json({ 
-        error: 'Failed to delete tagset',
-        details: `Tagset '${tagsetName}' not found`
-      });
-    }
-
-    // Check if it's the only tagset
-    if (Object.keys(tagsets).length <= 1) {
-      return res.status(400).json({ 
-        error: 'Failed to delete tagset',
-        details: 'Cannot delete the only tagset'
-      });
-    }
-
-    // Check if any TV is using this tagset
-    for (const tv of tvs) {
-      if (tv.selected_tagset === tagsetName) {
-        return res.status(400).json({ 
-          error: 'Failed to delete tagset',
-          details: `Cannot delete tagset '${tagsetName}': selected by ${tv.name}. Select a different tagset for that TV first.`
-        });
-      }
-      if (tv.override_tagset === tagsetName) {
-        return res.status(400).json({ 
-          error: 'Failed to delete tagset',
-          details: `Cannot delete tagset '${tagsetName}': active override on ${tv.name}. Clear the override first.`
-        });
-      }
-    }
-  }
-
-  try {
-    await haRequest('POST', '/services/frame_art_shuffler/delete_tagset', { name: tagsetName });
-    res.json({ success: true, message: `Tagset '${tagsetName}' deleted` });
-  } catch (error) {
-    console.error('Error deleting tagset:', error.message);
-    res.status(500).json({ 
-      error: 'Failed to delete tagset', 
-      details: error.message || 'Unknown error'
-    });
-  }
-});
+// Tagset CRUD (create/update/delete) is now handled by /api/tagsets.
+// The ha routes below handle per-TV assignment operations only,
+// which still need to call HA services.
 
 // POST /api/ha/tagsets/select - Select a tagset for a specific TV
 router.post('/tagsets/select', requireHA, async (req, res) => {

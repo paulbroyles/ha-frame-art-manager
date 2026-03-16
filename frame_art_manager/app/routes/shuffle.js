@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const MetadataHelper = require('../metadata_helper');
+const { readTagsets } = require('./tagsets');
 
 // Virtual tag constants (mirrored from frame-art-shuffler)
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
@@ -110,7 +111,8 @@ function selectRandom(arr) {
  */
 router.post('/select', async (req, res) => {
   try {
-    const {
+    let {
+      tagsetName = null,
       includeTags = [],
       excludeTags = [],
       tagWeights = {},
@@ -118,6 +120,20 @@ router.post('/select', async (req, res) => {
       currentImage = null,
       recentImages = [],
     } = req.body;
+
+    // If tagsetName is provided, resolve the tagset definition locally.
+    // Falls back to raw includeTags/excludeTags/tagWeights/weightingType if
+    // tagsetName is absent (backward compat) or tagset not found.
+    if (tagsetName) {
+      const tagsetsConfig = await readTagsets(req.frameArtPath);
+      const tagset = tagsetsConfig.tagsets[tagsetName];
+      if (tagset) {
+        includeTags = tagset.tags || [];
+        excludeTags = tagset.exclude_tags || [];
+        tagWeights = tagset.tag_weights || {};
+        weightingType = tagset.weighting_type || 'image';
+      }
+    }
 
     const helper = new MetadataHelper(req.frameArtPath);
     const metadata = await helper.readMetadata();

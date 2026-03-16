@@ -5112,16 +5112,20 @@ function uploadSingleFileWithProgress(file, onProgress, timeoutMs = 120000) {
 // Tag Management
 async function loadTVs() {
   try {
-    const response = await fetch(`${API_BASE}/ha/tvs`);
-    const data = await response.json();
+    const [tvsResponse, tagsetsResponse] = await Promise.all([
+      fetch(`${API_BASE}/ha/tvs`),
+      fetch(`${API_BASE}/tagsets`),
+    ]);
+    const data = await tvsResponse.json();
     if (data.success) {
       // Store TVs array
       if (Array.isArray(data.tvs)) {
         allTVs = data.tvs;
       }
-      // Store global tagsets (name -> definition)
-      if (data.tagsets && typeof data.tagsets === 'object') {
-        allGlobalTagsets = data.tagsets;
+      // Store global tagsets (name -> definition) from dedicated endpoint
+      const tagsetsData = await tagsetsResponse.json();
+      if (tagsetsData.tagsets && typeof tagsetsData.tagsets === 'object') {
+        allGlobalTagsets = tagsetsData.tagsets;
       }
       // Refresh filter dropdown if it's already rendered (to update counts)
       // Pass skipRender: true to prevent gallery re-render during periodic updates
@@ -14354,21 +14358,30 @@ async function saveTagset(e) {
       weighting_type: tagsetModalWeightingType
     };
     
-    // Include original_name for rename support
-    if (originalName && originalName !== name) {
-      payload.original_name = originalName;
-    }
-    
     // Include tag_weights if any non-default weights exist (only relevant for tag-weighted mode)
     if (Object.keys(tagsetModalTagWeights).length > 0) {
       payload.tag_weights = tagsetModalTagWeights;
     }
-    
-    const response = await fetch(`${API_BASE}/ha/tagsets/upsert`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+
+    let response;
+    if (originalName) {
+      // Update (rename supported via newName)
+      if (originalName !== name) {
+        payload.newName = name;
+      }
+      delete payload.name;
+      response = await fetch(`${API_BASE}/tagsets/${encodeURIComponent(originalName)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    } else {
+      response = await fetch(`${API_BASE}/tagsets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    }
     
     const result = await response.json();
     
@@ -14390,14 +14403,8 @@ async function saveTagset(e) {
 // Passes tagsets and tvs for pre-validation (HA Supervisor strips error messages)
 async function deleteTagset(tagsetName) {
   try {
-    const response = await fetch(`${API_BASE}/ha/tagsets/delete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: tagsetName,
-        tagsets: allGlobalTagsets,
-        tvs: allTVs
-      })
+    const response = await fetch(`${API_BASE}/tagsets/${encodeURIComponent(tagsetName)}`, {
+      method: 'DELETE',
     });
     
     const result = await response.json();
@@ -14425,13 +14432,10 @@ async function deleteTagset(tagsetName) {
 // Select a tagset for a TV
 async function selectTagset(deviceId, tagsetName, skipRender = false) {
   try {
-    const response = await fetch(`${API_BASE}/ha/tagsets/select`, {
+    const response = await fetch(`${API_BASE}/tagsets/${encodeURIComponent(tagsetName)}/select`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        device_id: deviceId,
-        name: tagsetName
-      })
+      body: JSON.stringify({ device_id: deviceId })
     });
     
     const result = await response.json();
@@ -14559,14 +14563,10 @@ async function applyOverride(e) {
   }
   
   try {
-    const response = await fetch(`${API_BASE}/ha/tagsets/override`, {
+    const response = await fetch(`${API_BASE}/tagsets/${encodeURIComponent(tagsetName)}/override`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        device_id: deviceId,
-        name: tagsetName,
-        duration_minutes: durationMinutes
-      })
+      body: JSON.stringify({ device_id: deviceId, duration_minutes: durationMinutes })
     });
     
     const result = await response.json();
@@ -14588,12 +14588,10 @@ async function applyOverride(e) {
 // Clear override
 async function clearOverride(deviceId) {
   try {
-    const response = await fetch(`${API_BASE}/ha/tagsets/clear-override`, {
+    const response = await fetch(`${API_BASE}/tagsets/clear-override`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        device_id: deviceId
-      })
+      body: JSON.stringify({ device_id: deviceId })
     });
     
     const result = await response.json();
