@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
+const QRCode = require('qrcode');
 const router = express.Router();
 
 const { haRequest } = require('./ha');
@@ -405,6 +406,36 @@ router.get('/:tvId', async (req, res) => {
   } catch (error) {
     console.error('[artwork] Error rendering artwork page:', error);
     res.status(500).send(renderErrorPage('Error', 'An unexpected error occurred.'));
+  }
+});
+
+/**
+ * GET /:tvId/qr — QR code PNG for the TV's artwork page URL
+ *
+ * ?url= — absolute URL to encode; if omitted, best-effort from request headers.
+ */
+router.get('/:tvId/qr', async (req, res) => {
+  try {
+    let url = req.query.url;
+    if (!url) {
+      const proto = req.headers['x-forwarded-proto'] || req.protocol;
+      const host = req.headers['x-forwarded-host'] || req.get('host') || 'homeassistant.local:8123';
+      url = `${proto}://${host}/artwork/${req.params.tvId}`;
+    }
+
+    const qrBuffer = await QRCode.toBuffer(url, {
+      type: 'png',
+      errorCorrectionLevel: 'M',
+      width: 256,
+      margin: 2,
+    });
+
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(qrBuffer);
+  } catch (error) {
+    console.error('[artwork] Error generating QR code:', error);
+    res.status(500).json({ error: 'Failed to generate QR code' });
   }
 });
 
