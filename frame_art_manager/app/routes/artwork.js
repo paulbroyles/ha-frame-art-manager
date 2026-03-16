@@ -167,126 +167,215 @@ function resolveEntityRefs(entityRefs, entityInstances) {
 
 // ── Page Rendering ────────────────────────────────────────────────────────────
 
-function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId) {
-  const primaryFields = fields.filter(f => f.role === 'primary');
+// Human-readable names for built-in source IDs.
+const SOURCE_DISPLAY_NAMES = {
+  google_arts:         'Google Arts & Culture',
+  google_art_wallpaper:'Google Art Wallpaper',
+  met_museum:          'Metropolitan Museum of Art',
+};
+
+function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAttributes) {
+  const primaryFields  = fields.filter(f => f.role === 'primary');
   const secondaryFields = fields.filter(f => f.role === 'secondary');
-  const detailFields = fields.filter(f => f.role === 'detail');
+  const detailFields   = fields.filter(f => f.role === 'detail');
 
-  const primaryHtml = primaryFields.map(f =>
-    `<h1 class="primary-field">${escapeHtml(f.value)}</h1>`
-  ).join('');
+  // Artist / primary heading
+  const artistHtml = primaryFields.length
+    ? primaryFields.map(f => `<h1 class="artist-name">${escapeHtml(f.value)}</h1>`).join('')
+    : '';
 
+  // Secondary lines (nationality, lifespan, etc.) — join onto one line when
+  // they share the "bio" feel, otherwise stack.
   const secondaryHtml = secondaryFields.map(f => {
     if (f.entityAttrs && f.entityAttrs.length > 1) {
       const extra = f.entityAttrs.slice(1).map(a => escapeHtml(a.value)).join(', ');
-      return `<p class="secondary-field">${escapeHtml(f.value)} <span class="secondary-extra">${extra}</span></p>`;
+      return `<span class="artist-bio">${escapeHtml(f.value)}<span class="bio-extra">, ${extra}</span></span>`;
     }
-    return `<p class="secondary-field">${escapeHtml(f.value)}</p>`;
+    return `<span class="artist-bio">${escapeHtml(f.value)}</span>`;
+  }).join('<span class="bio-sep"> · </span>');
+
+  // Detail rows — skip fields that have dedicated display areas
+  const titleValue = rawAttributes?.title ? String(rawAttributes.title) : null;
+  const dateValue  = rawAttributes?.date  ? String(rawAttributes.date)  : null;
+  const skipLabels = new Set(['description']);
+  if (titleValue) skipLabels.add('title');
+  if (dateValue)  skipLabels.add('date');
+  const filteredDetailFields = detailFields.filter(
+    f => !skipLabels.has(f.label?.toLowerCase())
+  );
+  const detailHtml = filteredDetailFields.map(f => {
+    const val = f.entityAttrs && f.entityAttrs.length > 1
+      ? f.entityAttrs.map(a => escapeHtml(a.value)).join(', ')
+      : escapeHtml(f.value);
+    return `<div class="detail-row">
+      <dt class="detail-label">${escapeHtml(f.label)}</dt>
+      <dd class="detail-value">${val}</dd>
+    </div>`;
   }).join('');
 
-  const detailHtml = detailFields.map(f => {
-    if (f.entityAttrs && f.entityAttrs.length > 1) {
-      const allValues = f.entityAttrs.map(a => escapeHtml(a.value)).join(', ');
-      return `<div class="detail-row"><span class="detail-label">${escapeHtml(f.label)}</span><span class="detail-value">${allValues}</span></div>`;
-    }
-    return `<div class="detail-row"><span class="detail-label">${escapeHtml(f.label)}</span><span class="detail-value">${escapeHtml(f.value)}</span></div>`;
-  }).join('');
-
-  const sourceLinkHtml = artworkUrl
-    ? `<a href="${escapeHtml(artworkUrl)}" target="_blank" rel="noopener" class="source-link">View on source &rarr;</a>`
+  // Description — from fields or raw attributes
+  const descFromFields = detailFields.find(f => f.label?.toLowerCase() === 'description')?.value;
+  const description = descFromFields
+    || (rawAttributes?.description ? String(rawAttributes.description) : '');
+  const descriptionHtml = description
+    ? `<p class="description">${escapeHtml(description)}</p>`
     : '';
 
-  const heading = primaryHtml || `<h1 class="primary-field">${escapeHtml(tvName)}</h1>`;
+  const sourceName  = (sourceId && SOURCE_DISPLAY_NAMES[sourceId]) || null;
+  const sourceLinkHtml = artworkUrl
+    ? `<a href="${escapeHtml(artworkUrl)}" target="_blank" rel="noopener" class="ext-link">
+        View on ${escapeHtml(sourceName || 'source')} &rarr;
+       </a>`
+    : '';
+
+  const pageTitle = titleValue || primaryFields[0]?.value || tvName;
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>${escapeHtml(primaryFields[0]?.value || tvName)} — Artwork Info</title>
+  <title>${escapeHtml(pageTitle)} — Artwork</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      background: #1a1a1a;
-      color: #e8e8e8;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #141414;
+      color: #e0e0e0;
+      font-family: Georgia, 'Times New Roman', serif;
       min-height: 100dvh;
       -webkit-font-smoothing: antialiased;
     }
-    .artwork-page { max-width: 600px; margin: 0 auto; padding-bottom: env(safe-area-inset-bottom, 20px); }
 
-    /* Image */
-    .image-container { position: relative; width: 100%; background: #111; }
-    .image-container img {
-      display: block; width: 100%; height: auto; cursor: zoom-in;
+    .page { max-width: 640px; margin: 0 auto; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 40px); }
+
+    /* ── Image ── */
+    .image-wrap {
+      position: relative; width: 100%; background: #0a0a0a;
+      border-bottom: 1px solid #222;
     }
+    .image-wrap img {
+      display: block; width: 100%; height: auto;
+      cursor: zoom-in; transition: opacity 0.2s;
+    }
+    .image-wrap img:hover { opacity: 0.92; }
 
-    /* Fullscreen overlay */
+    /* ── Fullscreen overlay ── */
     .overlay {
       display: none; position: fixed; inset: 0; z-index: 100;
-      background: rgba(0,0,0,0.95);
-      overflow: auto;
+      background: rgba(0,0,0,0.96); overflow: auto;
       -webkit-overflow-scrolling: touch;
     }
     .overlay.active { display: flex; align-items: center; justify-content: center; }
     .overlay img {
-      max-width: none; max-height: none;
-      width: auto; height: auto;
-      min-width: 100vw; min-height: 100vh;
-      object-fit: contain;
+      max-width: none; max-height: none; width: auto; height: auto;
+      min-width: 100vw; min-height: 100vh; object-fit: contain;
       touch-action: pinch-zoom;
     }
-    .overlay .close-btn {
-      position: fixed; top: 12px; right: 12px; z-index: 101;
-      background: rgba(0,0,0,0.6); color: #fff; border: none;
-      width: 36px; height: 36px; border-radius: 50%;
-      font-size: 20px; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
+    .close-btn {
+      position: fixed; top: 14px; right: 14px; z-index: 101;
+      background: rgba(0,0,0,0.65); color: #fff; border: 1px solid rgba(255,255,255,0.2);
+      width: 36px; height: 36px; border-radius: 50%; font-size: 18px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
     }
 
-    /* Metadata */
-    .metadata { padding: 20px 16px; }
-    .primary-field {
-      font-size: 24px; font-weight: 600; line-height: 1.2;
-      margin-bottom: 4px; color: #fff;
+    /* ── Content ── */
+    .content { padding: 28px 20px 0; }
+
+    /* Artist block */
+    .artist-name {
+      font-size: 22px; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase; color: #fff; line-height: 1.2;
     }
-    .secondary-field {
-      font-size: 17px; color: #b0b0b0; margin-bottom: 12px;
+    .artist-byline {
+      margin-top: 5px; font-size: 14px; color: #888;
+      font-style: italic; letter-spacing: 0.02em;
     }
-    .secondary-extra { color: #888; }
-    .details { margin-top: 16px; }
+    .bio-extra { color: #666; }
+    .bio-sep   { color: #555; margin: 0 2px; }
+
+    /* Title block */
+    .title-block { margin-top: 20px; padding-top: 20px; border-top: 1px solid #262626; }
+    .artwork-title {
+      font-size: 26px; font-weight: 400; font-style: italic;
+      color: #fff; line-height: 1.25;
+    }
+    .artwork-date {
+      display: inline-block; margin-top: 6px;
+      font-size: 14px; color: #666; font-style: normal; letter-spacing: 0.03em;
+    }
+
+    /* Details table */
+    .details { margin-top: 24px; }
     .detail-row {
       display: flex; justify-content: space-between; align-items: baseline;
-      padding: 8px 0; border-bottom: 1px solid #2a2a2a;
+      gap: 16px; padding: 9px 0; border-bottom: 1px solid #1f1f1f;
     }
-    .detail-label { color: #888; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; margin-right: 16px; }
-    .detail-value { color: #d0d0d0; font-size: 15px; text-align: right; }
-
-    .source-link {
-      display: inline-block; margin-top: 20px; padding: 10px 20px;
-      background: #2a2a2a; color: #8ab4f8; border-radius: 8px;
-      text-decoration: none; font-size: 14px; transition: background 0.15s;
+    .detail-label {
+      flex-shrink: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: #555;
     }
-    .source-link:hover { background: #333; }
+    .detail-value {
+      font-size: 15px; color: #c8c8c8; text-align: right; font-family: Georgia, serif;
+    }
 
+    /* Description */
+    .description {
+      margin-top: 28px; padding-top: 24px; border-top: 1px solid #262626;
+      font-size: 15px; line-height: 1.75; color: #a0a0a0;
+    }
+
+    /* Links */
+    .links { margin-top: 32px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .ext-link {
+      display: inline-flex; align-items: center;
+      padding: 9px 18px; border: 1px solid #333;
+      color: #9ab8e8; border-radius: 6px;
+      text-decoration: none; font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 13px; transition: border-color 0.15s, color 0.15s;
+    }
+    .ext-link:hover { border-color: #555; color: #bcd0f0; }
+
+    /* Footer */
     .footer {
-      margin-top: 32px; padding: 16px 0; border-top: 1px solid #2a2a2a;
-      color: #555; font-size: 12px; text-align: center;
+      margin-top: 48px; padding: 14px 20px;
+      border-top: 1px solid #1c1c1c;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 11px; color: #3a3a3a; text-align: center; letter-spacing: 0.05em;
     }
   </style>
 </head>
 <body>
-  <div class="artwork-page">
-    <div class="image-container">
-      <img src="${escapeHtml(imageUrl)}" alt="Artwork" loading="eager" id="artwork-img">
+  <div class="page">
+
+    <div class="image-wrap">
+      <img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(pageTitle)}" loading="eager" id="artwork-img">
     </div>
-    <div class="metadata">
-      ${heading}
-      ${secondaryHtml}
-      ${detailHtml ? `<div class="details">${detailHtml}</div>` : ''}
-      ${sourceLinkHtml}
-      <div class="footer">${escapeHtml(tvName)}</div>
+
+    <div class="content">
+
+      ${artistHtml ? `
+      <div class="artist-block">
+        ${artistHtml}
+        ${secondaryHtml ? `<p class="artist-byline">${secondaryHtml}</p>` : ''}
+      </div>` : ''}
+
+      ${titleValue ? `
+      <div class="title-block">
+        <h2 class="artwork-title">${escapeHtml(titleValue)}</h2>
+        ${dateValue ? `<span class="artwork-date">${escapeHtml(dateValue)}</span>` : ''}
+      </div>` : !artistHtml ? `<div class="title-block"><h2 class="artwork-title">${escapeHtml(pageTitle)}</h2></div>` : ''}
+
+      ${detailHtml ? `<dl class="details">${detailHtml}</dl>` : ''}
+
+      ${descriptionHtml}
+
+      ${sourceLinkHtml ? `<div class="links">${sourceLinkHtml}</div>` : ''}
+
     </div>
+
+    <div class="footer">Currently on ${escapeHtml(tvName)}</div>
+
   </div>
 
   <div class="overlay" id="overlay">
@@ -302,6 +391,9 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId) {
     closeBtn.addEventListener('click', () => overlay.classList.remove('active'));
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) overlay.classList.remove('active');
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') overlay.classList.remove('active');
     });
   </script>
 </body>
@@ -401,7 +493,7 @@ router.get('/:tvId', async (req, res) => {
     const fields = buildDisplayFields(customDataOrder, attributeValues, entitySnapshot, entityTypes, entityInstances);
     const imageUrl = `/${req.params.tvId}/image`;
 
-    const html = renderArtworkPage(tvName, fields, `/artwork${imageUrl}`, artworkUrl, sourceId);
+    const html = renderArtworkPage(tvName, fields, `/artwork${imageUrl}`, artworkUrl, sourceId, attributeValues);
     res.send(html);
   } catch (error) {
     console.error('[artwork] Error rendering artwork page:', error);
