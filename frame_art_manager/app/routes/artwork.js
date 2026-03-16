@@ -180,19 +180,25 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
   const detailFields   = fields.filter(f => f.role === 'detail');
 
   // Artist / primary heading
-  const artistHtml = primaryFields.length
-    ? primaryFields.map(f => `<h1 class="artist-name">${escapeHtml(f.value)}</h1>`).join('')
+  const artistField = primaryFields[0];
+  const artistHtml = artistField
+    ? `<h1 class="artist-name">${escapeHtml(artistField.value)}</h1>`
     : '';
 
-  // Secondary lines (nationality, lifespan, etc.) — join onto one line when
-  // they share the "bio" feel, otherwise stack.
-  const secondaryHtml = secondaryFields.map(f => {
-    if (f.entityAttrs && f.entityAttrs.length > 1) {
-      const extra = f.entityAttrs.slice(1).map(a => escapeHtml(a.value)).join(', ');
-      return `<span class="artist-bio">${escapeHtml(f.value)}<span class="bio-extra">, ${extra}</span></span>`;
-    }
-    return `<span class="artist-bio">${escapeHtml(f.value)}</span>`;
-  }).join('<span class="bio-sep"> · </span>');
+  // Byline: extra attrs on the primary entity (lifespan, nationality) + any secondary fields.
+  // The creator entity stores [name, lifespan, nationality] — slice(1) gives the bio part.
+  const primaryExtraAttrs = (artistField?.entityAttrs || []).slice(1).filter(a => a.value);
+  const bylineParts = [
+    ...primaryExtraAttrs.map(a => escapeHtml(a.value)),
+    ...secondaryFields.map(f => {
+      if (f.entityAttrs && f.entityAttrs.length > 1) {
+        const extra = f.entityAttrs.slice(1).filter(a => a.value).map(a => escapeHtml(a.value)).join(', ');
+        return `${escapeHtml(f.value)}, ${extra}`;
+      }
+      return escapeHtml(f.value);
+    }),
+  ];
+  const secondaryHtml = bylineParts.join('<span class="bio-sep"> · </span>');
 
   // Detail rows — skip fields that have dedicated display areas
   const titleValue = rawAttributes?.title ? String(rawAttributes.title) : null;
