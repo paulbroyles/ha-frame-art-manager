@@ -3,6 +3,21 @@ const sharp = require('sharp');
 const { CookieJar } = require('tough-cookie');
 const { dezoomify } = require('../utils/dezoomify');
 
+/**
+ * Merge metadata from multiple sources, preferring non-null values left-to-right.
+ * The first source is authoritative; later sources fill in any fields left null.
+ * Non-content never replaces content.
+ */
+function mergePreferContent(...sources) {
+  const result = {};
+  for (const source of sources) {
+    for (const [k, v] of Object.entries(source || {})) {
+      if (result[k] == null && v != null) result[k] = v;
+    }
+  }
+  return result;
+}
+
 // Object types to exclude by default during random selection.
 // Matched case-insensitively against the 'Type' structured field from /api/asset.
 // Add values here (or via the UI) as new unwanted types are encountered.
@@ -965,15 +980,11 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       imageBuffer,
       contentType,
       metadata: {
-        // Spread all fields from fetchAssetDetails (which uses parseAvBlock) so new
-        // fields flow through automatically without updating this return site.
-        ...details,
-        // cobject (artwork) is the authoritative source for title/creator/repository/color
-        // when available — it comes from the entity listing that identified this artwork.
-        title:      artwork.title || details.title || null,
-        creator:    artwork.creator || details.creator || null,
-        repository: artwork.repository || details.repository || null,
-        color:      artwork.color || null,
+        // cobject (entity listing) is authoritative; parseAvBlock fills empty fields.
+        ...mergePreferContent(
+          { title: artwork.title, creator: artwork.creator, repository: artwork.repository, color: artwork.color },
+          details,
+        ),
         artworkUrl,
         source: 'Google Arts & Culture',
       },
@@ -1183,17 +1194,11 @@ async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
     imageBuffer,
     contentType,
     metadata: {
-      // Spread all fields from parseAvBlock (extendedDetails) so new fields added
-      // there flow through automatically without updating this return site.
-      ...extendedDetails,
-      // cobject (from the entity listing) is the more authoritative source for
-      // title/creator/repository when available, since it's the canonical listing
-      // record for the asset. extendedDetails values are fallbacks only.
-      title:      cobject?.title || extendedDetails.title || null,
-      creator:    cobject?.creator || extendedDetails.creator || null,
-      repository: cobject?.repository || extendedDetails.repository || null,
-      // color and artworkUrl come exclusively from sources outside parseAvBlock.
-      color:      cobject?.color || null,
+      // cobject (entity listing) is authoritative; parseAvBlock fills empty fields.
+      ...mergePreferContent(
+        { title: cobject?.title, creator: cobject?.creator, repository: cobject?.repository, color: cobject?.color },
+        extendedDetails,
+      ),
       artworkUrl,
       source: 'Google Arts & Culture',
     },

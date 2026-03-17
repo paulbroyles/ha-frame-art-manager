@@ -1,6 +1,21 @@
 const axios = require('axios');
 
 const WALLPAPER_LIST_URL = 'https://www.gstatic.com/culturalinstitute/tabext/imax_2_2.json';
+
+/**
+ * Merge metadata from multiple sources, preferring non-null values left-to-right.
+ * The first source is the base/authoritative source; later sources fill in any
+ * fields that the earlier sources leave null. Non-content never replaces content.
+ */
+function mergePreferContent(...sources) {
+  const result = {};
+  for (const source of sources) {
+    for (const [k, v] of Object.entries(source || {})) {
+      if (result[k] == null && v != null) result[k] = v;
+    }
+  }
+  return result;
+}
 const BASE_URL = 'https://artsandculture.google.com';
 
 const HTTP_HEADERS = {
@@ -84,12 +99,11 @@ async function fetchRandomArtwork(_filters = [], options = {}) {
     imageBuffer,
     contentType,
     metadata: {
-      // Enrichment provides the base; JSON fields win when non-null (JSON is authoritative).
-      // When JSON is missing a field, the enriched value fills the gap.
-      ...richMetadata,
-      title:       entry.title       || richMetadata.title       || null,
-      creator:     entry.creator     || richMetadata.creator     || null,
-      attribution: entry.attribution || richMetadata.attribution || null,
+      // Base source (imax JSON) is authoritative; enrichment fills only empty fields.
+      ...mergePreferContent(
+        { title: entry.title, creator: entry.creator, attribution: entry.attribution },
+        richMetadata,
+      ),
       artworkUrl,
       source: 'Google Art Wallpaper',
       // Bare CDN URL without size/crop suffix — lets the web view request
@@ -310,10 +324,11 @@ async function fetchByIdentifier(identifier, { settings } = {}) {
     imageBuffer,
     contentType,
     metadata: {
-      ...richMetadata,
-      title:       entry.title       || richMetadata.title       || null,
-      creator:     entry.creator     || richMetadata.creator     || null,
-      attribution: entry.attribution || richMetadata.attribution || null,
+      // Base source (imax JSON) is authoritative; enrichment fills only empty fields.
+      ...mergePreferContent(
+        { title: entry.title, creator: entry.creator, attribution: entry.attribution },
+        richMetadata,
+      ),
       artworkUrl,
       source: 'Google Art Wallpaper',
       imageBaseUrl: entry.image,
