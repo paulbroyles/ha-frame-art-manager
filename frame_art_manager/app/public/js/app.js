@@ -17187,7 +17187,13 @@ function readTestAdHocFiltersFromUI() {
         filters.push({ type: filterType, mode: 'exclude', values: checkedValues });
       }
     } else {
-      if (checkedValues.length < allValues.length) {
+      if (allValues.length === 1) {
+        // Single-value require filter (e.g. curated, on_view): checked = active restriction.
+        if (checkedValues.length === 1) {
+          filters.push({ type: filterType, mode: 'require', values: checkedValues });
+        }
+      } else if (checkedValues.length < allValues.length) {
+        // Multi-value require filter: all-checked = no restriction; push when some are deselected.
         filters.push({ type: filterType, mode: 'require', values: checkedValues });
       }
     }

@@ -254,35 +254,35 @@ function buildMetadata(rec) {
  * @param {Array<{type, mode, values}>} [filters=[]] - Supported filter types:
  *   'classification' — require/exclude by Classification field (e.g. 'Painting')
  *   'department'     — require/exclude by Department field (e.g. 'Photography')
+ *   'curated'        — require with values: ['curated'] to restrict to ~8,600 Sanity CMS works
+ *   'on_view'        — require with values: ['on_view'] to restrict to currently on-display works
  * @param {object} [options]
  * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all']
  *   Pre-download filter using Width (cm) / Height (cm) from GitHub dataset.
  *   Records without dimension data are excluded when aspectRatio is not 'all'.
- * @param {boolean} [options.curatedOnly=false]
- *   Restrict to artworks in MoMA's Sanity CMS editorial collection (~8,600 works).
- * @param {boolean} [options.onViewOnly=false]
- *   Restrict to artworks currently on view in the museum.
  *
  * @returns {{ imageBuffer, contentType, metadata }}
  */
 async function fetchRandomArtwork(filters = [], options = {}) {
-  const { aspectRatio = 'all', curatedOnly = false, onViewOnly = false } = options;
+  const { aspectRatio = 'all' } = options;
 
   await ensureCache();
 
   let pool = artworkIndex;
 
   // Curated filter (Sanity tmsId set)
-  if (curatedOnly) {
+  const requireCurated = filters.some(f => f.type === 'curated' && f.mode === 'require' && f.values.includes('curated'));
+  if (requireCurated) {
     if (curatedSet.size === 0) {
-      console.warn('[moma] curatedOnly requested but Sanity curated set is empty; ignoring');
+      console.warn('[moma] curated filter requested but Sanity curated set is empty; ignoring');
     } else {
       pool = pool.filter(a => curatedSet.has(a.id));
     }
   }
 
   // On-view filter
-  if (onViewOnly) {
+  const requireOnView = filters.some(f => f.type === 'on_view' && f.mode === 'require' && f.values.includes('on_view'));
+  if (requireOnView) {
     pool = pool.filter(a => a.ov);
   }
 
@@ -417,7 +417,10 @@ async function fetchByIdentifier(identifier) {
  * MoMA always uses the local index; no API call is needed for selection.
  */
 function selectMode(filters = []) {
-  const postFilters = filters.filter(f => f.type === 'classification' || f.type === 'department');
+  const postFilters = filters.filter(f =>
+    f.type === 'classification' || f.type === 'department' ||
+    f.type === 'curated' || f.type === 'on_view'
+  );
   return { mode: 'index', apiFilters: [], postFilters };
 }
 
@@ -439,34 +442,26 @@ function getFilterTypes() {
       multiValue: true,
       values: DEPARTMENTS.map(d => ({ value: d, label: d })),
     },
+    {
+      type: 'curated',
+      label: 'Curated Works',
+      description: 'Restrict to ~8,600 works highlighted on moma.org/collection with editorial text. When inactive, the full ~93,000-work dataset is used.',
+      modes: ['require'],
+      multiValue: false,
+      values: [{ value: 'curated', label: 'Curated works only' }],
+    },
+    {
+      type: 'on_view',
+      label: 'On View',
+      description: 'Restrict to artworks currently on display in the museum.',
+      modes: ['require'],
+      multiValue: false,
+      values: [{ value: 'on_view', label: 'On view only' }],
+    },
   ];
 }
 
-const settingsSchema = {
-  fields: [
-    {
-      key: 'curatedOnly',
-      type: 'boolean',
-      default: false,
-      label: 'Curated Works Only',
-      description: 'Limit to ~8,600 artworks highlighted in MoMA\'s editorial collection (moma.org/collection). When disabled, the full dataset of ~93,000 works with images is used.',
-    },
-    {
-      key: 'onViewOnly',
-      type: 'boolean',
-      default: false,
-      label: 'On View Only',
-      description: 'Limit to artworks currently on view in the museum.',
-    },
-  ],
-};
-
-function getExtraOptions(settings) {
-  return {
-    curatedOnly: !!settings?.curatedOnly,
-    onViewOnly:  !!settings?.onViewOnly,
-  };
-}
+const settingsSchema = { fields: [] };
 
 const metadataFields = [
   { key: 'title',              label: 'Title',          description: 'Artwork title' },
@@ -501,7 +496,6 @@ module.exports = {
   selectMode,
   getFilterTypes,
   settingsSchema,
-  getExtraOptions,
   metadataFields,
   defaultMapping,
 };
