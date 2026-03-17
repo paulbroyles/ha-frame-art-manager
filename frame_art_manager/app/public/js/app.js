@@ -17176,19 +17176,17 @@ function readTestAdHocFiltersFromUI() {
     const section = entry.querySelector(`.ws-filter-section[data-filter-type="${filterType}"]`);
     const modeRadio = section?.querySelector('.ws-filter-mode-radio:checked');
     const mode = entryMode || modeRadio?.value || 'require';
+    const allValues = [];
     const checkedValues = [];
-    entry.querySelectorAll(`.ws-filter-checkbox[data-source-id="${sourceId}"][data-filter-type="${filterType}"]:checked:not(:disabled)`).forEach(cb => {
-      checkedValues.push(cb.value);
+    section?.querySelectorAll('.ws-filter-value-checkbox:not(:disabled)').forEach(cb => {
+      allValues.push(cb.dataset.value);
+      if (cb.checked) checkedValues.push(cb.dataset.value);
     });
     if (mode === 'exclude') {
       if (checkedValues.length > 0) {
         filters.push({ type: filterType, mode: 'exclude', values: checkedValues });
       }
     } else {
-      const allValues = [];
-      entry.querySelectorAll(`.ws-filter-checkbox[data-source-id="${sourceId}"][data-filter-type="${filterType}"]:not(:disabled)`).forEach(cb => {
-        allValues.push(cb.value);
-      });
       if (checkedValues.length < allValues.length) {
         filters.push({ type: filterType, mode: 'require', values: checkedValues });
       }
