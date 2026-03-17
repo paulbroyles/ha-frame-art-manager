@@ -125,6 +125,12 @@ async function buildCache() {
     throw new Error(`[moma] Failed to download GitHub dataset: ${err.message}`);
   }
 
+  if (!Array.isArray(artworks)) {
+    // Guard against Git LFS pointer responses (plain text) or unexpected API responses.
+    const preview = String(artworks).slice(0, 120);
+    throw new Error(`[moma] GitHub dataset response is not a JSON array (got: ${preview})`);
+  }
+
   const trimmed = [];
   for (const rec of artworks) {
     if (!rec.ImageURL) continue;
@@ -173,6 +179,10 @@ async function buildCache() {
     artworks: trimmed,
   };
 
+  if (trimmed.length === 0) {
+    throw new Error('[moma] GitHub dataset parsed but contained no records with images — refusing to cache empty result');
+  }
+
   await fs.mkdir('/data', { recursive: true });
   await fs.writeFile(CACHE_PATH, JSON.stringify(cacheData));
   console.log(`[moma] Cache built: ${trimmed.length} artworks with images, ${curatedIds.length} curated`);
@@ -197,7 +207,7 @@ async function ensureCache() {
     try {
       const raw = await fs.readFile(CACHE_PATH, 'utf8');
       const parsed = JSON.parse(raw);
-      if (parsed.v === CACHE_VERSION && (now - parsed.ts) < CACHE_TTL_MS) {
+      if (parsed.v === CACHE_VERSION && (now - parsed.ts) < CACHE_TTL_MS && parsed.artworks?.length > 0) {
         data = parsed;
       }
     } catch {
