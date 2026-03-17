@@ -15494,8 +15494,11 @@ function renderCheckboxFilterSection(sourceId, filterType, currentFilter, parent
 
   // Checked state depends on mode, but only for available values.
   // Locked values: always unchecked.
-  // Default for NEW filters (empty values): include = all checked, exclude = none checked.
-  const hasExplicitValues = currentFilter?.values?.length > 0;
+  // Default for NEW multi-value filters (empty values): include = all checked, exclude = none checked.
+  // Single-value toggle filters (filterType.values.length === 1) always use explicit values,
+  // so values:[] = unchecked (inactive) rather than defaulting to checked.
+  const isSingleValueToggle = (filterType.values?.length === 1);
+  const hasExplicitValues = isSingleValueToggle || (currentFilter?.values?.length > 0);
   const isChecked = (value) => {
     if (isLocked(value)) return false;
     if (!hasExplicitValues) {
@@ -15730,7 +15733,10 @@ function readFiltersFromUI(sourceId) {
           filters.push({ type: filterType, mode: 'exclude', values: checkedValues });
         }
       } else {
-        if (checkedValues.length > 0 && checkedValues.length < allValues.length) {
+        if (allValues.length === 1) {
+          // Single-value toggle filter: always preserve entry; checked = active, unchecked = inactive.
+          filters.push({ type: filterType, mode: 'require', values: checkedValues });
+        } else if (checkedValues.length > 0 && checkedValues.length < allValues.length) {
           filters.push({ type: filterType, mode: 'require', values: checkedValues });
         }
       }
@@ -17188,10 +17194,9 @@ function readTestAdHocFiltersFromUI() {
       }
     } else {
       if (allValues.length === 1) {
-        // Single-value require filter (e.g. curated, on_view): checked = active restriction.
-        if (checkedValues.length === 1) {
-          filters.push({ type: filterType, mode: 'require', values: checkedValues });
-        }
+        // Single-value toggle filter (e.g. curated, on_view): always preserve entry in state.
+        // checked = active (values: ['curated']), unchecked = inactive (values: []).
+        filters.push({ type: filterType, mode: 'require', values: checkedValues });
       } else if (checkedValues.length < allValues.length) {
         // Multi-value require filter: all-checked = no restriction; push when some are deselected.
         filters.push({ type: filterType, mode: 'require', values: checkedValues });
