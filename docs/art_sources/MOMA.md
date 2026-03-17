@@ -12,7 +12,9 @@ for the optional "curated works only" filter.
 
 **Repository**: `https://github.com/MuseumofModernArt/collection`
 **File**: `Artworks.json`
-**Raw URL**: `https://raw.githubusercontent.com/MuseumofModernArt/collection/master/Artworks.json`
+**Raw URL**: `https://media.githubusercontent.com/media/MuseumofModernArt/collection/master/Artworks.json`
+(Note: the file is stored in Git LFS. `raw.githubusercontent.com` returns only the LFS pointer;
+`media.githubusercontent.com` serves the actual file content.)
 
 MoMA publishes a regularly-updated snapshot of their full collection as a GitHub repository.
 `Artworks.json` is a JSON array of ~160,000 objects. Each object with an `ImageURL` field has a

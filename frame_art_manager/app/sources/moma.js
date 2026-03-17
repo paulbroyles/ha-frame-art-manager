@@ -4,7 +4,9 @@ const fs = require('fs').promises;
 
 // GitHub dataset: MuseumofModernArt/collection — snapshot of the full MoMA collection.
 // 160,269 total records; ~93,188 have an ImageURL. Updated by MoMA periodically.
-const GITHUB_URL = 'https://raw.githubusercontent.com/MuseumofModernArt/collection/master/Artworks.json';
+// NOTE: Artworks.json is stored in Git LFS. The raw.githubusercontent.com URL returns only the
+// LFS pointer (83 bytes). media.githubusercontent.com serves the actual LFS object content.
+const GITHUB_URL = 'https://media.githubusercontent.com/media/MuseumofModernArt/collection/master/Artworks.json';
 
 // Sanity CMS: MoMA's editorial "curated" collection — the works that appear on
 // moma.org/collection with rich gallery label text. ~8,665 records with tmsId.
