@@ -136,6 +136,71 @@ for local color estimates. The fill itself needs a visited-pixel bitset and a BF
 **Integration**: Add as `flood_fill` in `PRE_PROCESSORS`. Start with a fixed tolerance of
 ~20–30 RGB units and the 50%-area guard. Build on top of the existing downsample+raw pattern.
 
+### Unified frame removal + crop (replacing separate Phase 2 / Phase 3)
+
+The current pipeline treats frame removal (Phase 2) and aspect-ratio cropping (Phase 3) as
+independent operations. Phase 2 doesn't know the target aspect ratio, so it can't make
+informed tradeoffs (e.g., "the aspect ratio crop will remove the left/right edges anyway, so
+frame detection on those edges barely matters"). Phase 3 doesn't know where the frame is, so
+it can accidentally keep frame slivers or crop away painting content that Phase 2 preserved.
+
+Three candidate approaches for unifying them:
+
+#### Approach 1 — Frame-Aware Constrained Crop
+
+Detect frame boundaries per-edge (reuse mean_profile-style transition detection), define the
+"painting rectangle" inside the frame, then find the largest rectangle of the target aspect
+ratio that fits entirely within the painting rectangle. Position using Sharp's attention/saliency
+within the available freedom. Single extract + resize, no intermediate encode/decode.
+
+Key advantage: the algorithm knows the target aspect ratio upfront and can make informed
+tradeoffs — if a 16:9 crop will remove 200px off each side anyway, frame detection on the
+sides barely matters; focus confidence on top/bottom instead.
+
+**Status: planned for implementation first.** See plan file for details.
+
+#### Approach 2 — Per-Row/Per-Column Safe Zone (irregular frames)
+
+Instead of a single rectangular painting boundary, build a per-row safe zone: for each row,
+scan inward from left and right to find painting pixels; for each column, scan inward from
+top and bottom. This yields an irregular painting boundary that handles arched tops, ornate
+corners, and non-rectangular frames. Find the maximum inscribed rectangle of the target
+aspect ratio within this boundary, positioned by saliency.
+
+More robust for ornate frames but significantly more complex (maximum inscribed rectangle in
+an irregular polygon is a non-trivial optimization problem).
+
+#### Approach 3 — Edge Confidence Weighting
+
+A hybrid that adds confidence awareness: run frame detection outputting a confidence score
+per edge (how sure are we this is frame?). For high-confidence edges, crop to inside the
+frame. For low-confidence edges, add a small safety margin inward but don't aggressively
+crop. Apply the aspect ratio crop constrained so no pixel outside the safe boundary is
+included. This avoids false-positive overcropping on paintings with frame-like edges while
+still removing obvious frames.
+
+### Modular pipeline architecture (imageProcessor refactor)
+
+The current `processWebSourceImage` hard-codes a 3-phase pipeline: (1) solidBorderStrip,
+(2) single user-selected pre-processor, (3) single crop engine. The TODO in the code
+mentions allowing an array of pre-processors, but the real goal is a general-purpose
+pipeline where multiple processors — labeled with type/function — can be added and chained
+ad hoc.
+
+Design goals:
+- Each processor has a declared type (e.g., `background_strip`, `frame_detect`,
+  `aspect_crop`, `unified_frame_crop`) and a human-readable label
+- The pipeline is an ordered list of processor entries, each with a key + options
+- The UI exposes the pipeline as an ordered list that users can add to, remove from,
+  and reorder
+- Processors can declare incompatibilities (e.g., `unified_frame_crop` replaces both
+  `frame_detect` and `aspect_crop`)
+- Raw pixel buffer passing between processors (eliminating encode/decode overhead)
+
+This refactor is a prerequisite for cleanly integrating Approach 1 (unified frame+crop)
+as a single pipeline step rather than shoehorning it into the current Phase 2 or Phase 3
+slot.
+
 ### ML-based frame segmentation (pre-processor Option 3)
 The current frame detection pre-processors (`variance_scan` and `trim`) handle solid
 and lightly-textured borders well, but struggle with ornate or highly irregular decorative
