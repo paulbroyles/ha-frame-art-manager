@@ -1093,9 +1093,9 @@ async function clearCookies() {
 async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
   await seedCookies();
 
-  // Parse asset ID from /asset/<slug>/<id> path, or accept a bare ID directly.
+  // Parse asset ID from /asset/<slug>/<id> or /asset/<id> path, or accept a bare ID directly.
   let assetId;
-  const assetPathMatch = identifier.match(/\/asset\/[^/?#]+\/([^/?#]+)/i);
+  const assetPathMatch = identifier.match(/\/asset\/(?:[^/?#]+\/)?([^/?#]+)/i);
   if (assetPathMatch) {
     assetId = assetPathMatch[1];
   } else if (/^[A-Za-z0-9_-]{6,}$/.test(identifier.trim())) {
