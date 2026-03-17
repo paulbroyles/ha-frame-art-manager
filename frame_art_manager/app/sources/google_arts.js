@@ -559,22 +559,25 @@ function parseStructuredFields(av12) {
  * @returns {{ mediumEntities: string[], artMovements: string[] }}
  */
 function parseEntityAssociations(av21) {
+  const artists = [];
   const mediumEntities = [];
   const artMovements = [];
-  if (!Array.isArray(av21)) return { mediumEntities, artMovements };
+  if (!Array.isArray(av21)) return { artists, mediumEntities, artMovements };
   for (const co of av21) {
     if (!Array.isArray(co) || co[0] !== 'stella.common.cobject') continue;
     const name = co[1];
     // Category is embedded in the trailing metadata tuple
     const chipsMeta = Array.isArray(co[22]) ? co[22] : null;
-    const category = chipsMeta?.[1]?.[1]; // e.g. "entity/ART_MEDIUM", "entity/ART_MOVEMENT"
-    if (category === 'entity/ART_MEDIUM') {
+    const category = chipsMeta?.[1]?.[1]; // e.g. "entity/ARTIST", "entity/ART_MEDIUM", "entity/ART_MOVEMENT"
+    if (category === 'entity/ARTIST') {
+      artists.push(name);
+    } else if (category === 'entity/ART_MEDIUM') {
       mediumEntities.push(name);
     } else if (category === 'entity/ART_MOVEMENT') {
       artMovements.push(name);
     }
   }
-  return { mediumEntities, artMovements };
+  return { artists, mediumEntities, artMovements };
 }
 
 function parseAvBlock(av) {
@@ -583,10 +586,11 @@ function parseAvBlock(av) {
   const description = typeof rawDesc === 'string'
     ? rawDesc.replace(/<[^>]+>/g, '').trim() || null
     : null;
-  const { mediumEntities, artMovements } = parseEntityAssociations(av[21]);
+  const { artists, mediumEntities, artMovements } = parseEntityAssociations(av[21]);
   return {
     title:              structured['Title'] || null,
-    creator:            structured['Creator'] || null,
+    // Some artworks omit "Creator" from structured fields but have an ARTIST entity in av[21].
+    creator:            structured['Creator'] || (artists.length > 0 ? artists[0] : null),
     dateCreated:        av[3] || structured['Date Created'] || null,
     type:               structured['Type'] || null,
     medium:             structured['Medium'] || null,

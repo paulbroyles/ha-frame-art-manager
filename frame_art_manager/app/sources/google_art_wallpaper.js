@@ -73,7 +73,10 @@ async function fetchRandomArtwork(_filters = [], options = {}) {
     throw new Error(`Failed to download wallpaper image: ${err.message}`);
   }
 
-  const richMetadata = options.fetchRichMetadata && artworkUrl
+  // Enrich when: (a) user enabled fetchRichMetadata, or (b) the entry is missing creator.
+  // Some imax_2_2.json entries omit creator; the Google Arts API always has it.
+  const needsEnrich = options.fetchRichMetadata || !entry.creator;
+  const richMetadata = needsEnrich && artworkUrl
     ? await enrichWithGoogleArts(artworkUrl)
     : {};
 
@@ -81,15 +84,17 @@ async function fetchRandomArtwork(_filters = [], options = {}) {
     imageBuffer,
     contentType,
     metadata: {
-      title: entry.title || null,
-      creator: entry.creator || null,
-      attribution: entry.attribution || null,
+      // Enrichment provides the base; JSON fields win when non-null (JSON is authoritative).
+      // When JSON is missing a field, the enriched value fills the gap.
+      ...richMetadata,
+      title:       entry.title       || richMetadata.title       || null,
+      creator:     entry.creator     || richMetadata.creator     || null,
+      attribution: entry.attribution || richMetadata.attribution || null,
       artworkUrl,
       source: 'Google Art Wallpaper',
       // Bare CDN URL without size/crop suffix — lets the web view request
       // an uncropped version at a suitable width instead of the TV crop.
       imageBaseUrl: entry.image,
-      ...richMetadata,
     },
   };
 }
@@ -298,19 +303,20 @@ async function fetchByIdentifier(identifier, { settings } = {}) {
     throw new Error(`Failed to download wallpaper image: ${err.message}`);
   }
 
-  const richMetadata = settings?.fetchRichMetadata && artworkUrl ? await enrichWithGoogleArts(artworkUrl) : {};
+  const needsEnrich = settings?.fetchRichMetadata || !entry.creator;
+  const richMetadata = needsEnrich && artworkUrl ? await enrichWithGoogleArts(artworkUrl) : {};
 
   return {
     imageBuffer,
     contentType,
     metadata: {
-      title: entry.title || null,
-      creator: entry.creator || null,
-      attribution: entry.attribution || null,
+      ...richMetadata,
+      title:       entry.title       || richMetadata.title       || null,
+      creator:     entry.creator     || richMetadata.creator     || null,
+      attribution: entry.attribution || richMetadata.attribution || null,
       artworkUrl,
       source: 'Google Art Wallpaper',
       imageBaseUrl: entry.image,
-      ...richMetadata,
     },
   };
 }
