@@ -172,6 +172,7 @@ const SOURCE_DISPLAY_NAMES = {
   google_arts:         'Google Arts & Culture',
   google_art_wallpaper:'Google Arts & Culture',
   met_museum:          'Metropolitan Museum of Art',
+  moma:                'MoMA',
 };
 
 function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAttributes) {

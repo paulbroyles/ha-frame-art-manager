@@ -14,6 +14,7 @@ const SOURCE_MODULES = {
   google_arts: require('../sources/google_arts'),
   google_art_wallpaper: require('../sources/google_art_wallpaper'),
   met_museum: require('../sources/met_museum'),
+  moma: require('../sources/moma'),
 };
 
 const SOURCE_FETCHERS = Object.fromEntries(
@@ -139,6 +140,12 @@ const BUILTIN_SOURCES = {
     name: 'The Metropolitan Museum of Art',
     description: 'Public-domain artworks from the Met\'s Open Access collection of 500,000+ objects',
     type: 'met_museum',
+  },
+  moma: {
+    id: 'moma',
+    name: 'The Museum of Modern Art (MoMA)',
+    description: 'Artworks from MoMA\'s collection dataset (~93,000 works with images), including paintings, photography, design, film, and more',
+    type: 'moma',
   },
 };
 
