@@ -88,16 +88,14 @@ function parseMaxPages(html) {
  * Returns { arkIds, html }.
  */
 async function fetchSearchPage(page, collectionCodes) {
-  // axios serializes array params as `collection[0]=...&collection[1]=...` by default.
-  // The Louvre expects `collection[]=...&collection[]=...`. Use a URLSearchParams string.
-  let url = `${BASE_URL}/en/recherche`;
-  const qs = new URLSearchParams();
-  qs.set('q', '');
-  qs.set('page', String(page));
+  // Build the query string manually to keep literal brackets in `collection[]`.
+  // URLSearchParams would percent-encode them as `collection%5B%5D`, which the
+  // Louvre server doesn't recognise as the department filter parameter.
+  let qs = `q=&page=${encodeURIComponent(page)}`;
   if (collectionCodes && collectionCodes.length > 0) {
-    for (const code of collectionCodes) qs.append('collection[]', code);
+    for (const code of collectionCodes) qs += `&collection[]=${encodeURIComponent(code)}`;
   }
-  const response = await axios.get(`${url}?${qs.toString()}`, {
+  const response = await axios.get(`${BASE_URL}/en/recherche?${qs}`, {
     timeout: 15000,
     headers: HEADERS,
   });
