@@ -15,6 +15,7 @@ const SOURCE_MODULES = {
   google_art_wallpaper: require('../sources/google_art_wallpaper'),
   met_museum: require('../sources/met_museum'),
   moma: require('../sources/moma'),
+  louvre: require('../sources/louvre'),
 };
 
 const SOURCE_FETCHERS = Object.fromEntries(
@@ -146,6 +147,12 @@ const BUILTIN_SOURCES = {
     name: 'The Museum of Modern Art (MoMA)',
     description: 'Artworks from MoMA\'s collection dataset (~93,000 works with images), including paintings, photography, design, film, and more',
     type: 'moma',
+  },
+  louvre: {
+    id: 'louvre',
+    name: 'Musée du Louvre',
+    description: 'Artworks from the Louvre\'s collection of ~478,000 objects, spanning paintings, sculptures, antiquities, decorative arts, and more. Note: images are low resolution (~1500px) for a 4K display.',
+    type: 'louvre',
   },
 };
 
