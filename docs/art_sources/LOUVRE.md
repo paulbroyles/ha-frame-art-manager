@@ -17,27 +17,27 @@ There is no JSON search/batch API; selection uses the HTML search results pages.
 
 ## Selection Strategy
 
-1. Determine the effective department list from any `require`/`exclude` filters.
-2. If departments are constrained, build `collection[]=<code>` URL parameters for the
-   eligible departments (one per department). Get the page count for this filtered search
-   by probing page 1 (cached in-memory for 24h; falls back to stale value on network failure).
+1. Determine the effective category list from any `require`/`exclude` filters.
+2. If categories are constrained, build `typology[N]=<id>` URL parameters for the
+   eligible categories (one per category, zero-indexed). Get the page count for this
+   filtered search by probing page 1 (cached in-memory for 7 days; falls back to stale
+   value on network failure).
 3. Pick a random page from 1 to the (filtered) page count.
-4. Fetch `https://collections.louvre.fr/en/recherche?q=&collection[]=...&page={N}` (HTML).
-5. Extract ARK IDs matching `/ark:/53355/(cl\d{9})/` from the HTML.
+4. Fetch `https://collections.louvre.fr/en/recherche?q=&typology[0]=22&...&page={N}` (HTML).
+5. Extract ARK IDs matching `/\/ark:\/53355\/(cl\d{9})/g` from the HTML.
 6. Retry loop (up to 20 attempts total):
    - Pick a random ARK from the current page batch.
    - Fetch `https://collections.louvre.fr/ark:/53355/{arkId}.json`.
    - Skip records with no `image` entries.
-   - If pre-filtered, validate `collection` field against expected substrings.
    - Download `image[].urlImage`.
    - Check aspect ratio via sharp if filtering is active.
    - On batch exhausted, fetch a new random page.
 
-**Why pre-filter via URL**: Without department pre-filtering, random pages from the full
-25,078-page collection would hit any of 9 departments. For Paintings (536 pages out of 25,078),
-~98% of random page fetches would need to be discarded — making the retry loop much less
-efficient. Pre-filtering at URL level gives the correct page count for the selected departments
-and ensures every fetched page actually contains matching items.
+**Why pre-filter via URL**: Without category pre-filtering, random pages from the full
+25,078-page collection would hit any object type indiscriminately. For Paintings (549 pages
+out of 25,078), ~98% of random page fetches would need to be discarded — making the retry
+loop much less efficient. Pre-filtering at URL level gives the correct page count for the
+selected categories and ensures every fetched page actually contains matching items.
 
 ---
 
@@ -65,31 +65,34 @@ Example: `https://collections.louvre.fr/media/cache/large/0000000021/0000001001/
 
 ---
 
-## Department Filtering
+## Category Filtering
 
-Each department maps to a `collection[]` URL parameter code (for pre-filtering the search) and
-validation substrings (matched against the JSON record's `collection` field as a guard):
+Filtering is done via the `typology[N]=<id>` query parameter. Each numeric ID maps to an
+object type (cross-cutting across departments). Multiple IDs are passed as
+`typology[0]=22&typology[1]=13` etc.; the server returns items matching any of the IDs.
 
-| UI Label | URL code | Validation substrings |
-|----------|----------|-----------------------|
-| Paintings | `peintures` | `peintures` |
-| Drawings & Prints | `arts-graphiques` | `arts graphiques` |
-| Sculptures | `sculptures` | `sculptures` |
-| Decorative Arts | `objets-art` | `objets d'art` |
-| Egyptian Antiquities | `antiquites-egyptiennes` | `antiquités égyptiennes` |
-| Greek & Roman Antiquities | `antiquites-grecques-etrusques-et-romaines` | `antiquités grecques`, `antiquités romaines`, `antiquités étrusques` |
-| Near Eastern Antiquities | `antiquites-orientales` | `antiquités orientales` |
-| Islamic Art | `arts-de-l-islam` | `arts de l'islam` |
-| Byzantine Art | `arts-de-byzance` | `byzance` |
+Query strings must be built manually with literal brackets — URLSearchParams encodes `[` as
+`%5B` which the Louvre server does not recognise.
 
-**require filters** → included departments are passed as `collection[]` URL params (pre-filtered
-at search time; correct page count cached for 24h).
+| UI Label | typology ID | Approx. pages | Approx. items |
+|----------|-------------|---------------|---------------|
+| Paintings | 22 | 549 | 10,972 |
+| Drawings & Prints | 13 | 310 | 6,200 |
+| Sculptures | 24 | 1,927 | 38,537 |
+| Jewelry | 12 | 1,142 | 22,835 |
+| Furniture | 15 | 179 | 3,571 |
+| Textiles | 26 | 401 | 8,015 |
+| Vases | 27 | 3,205 | 64,000+ |
+| Coins & Medals | 16 | 299 | 5,972 |
 
-**exclude filters** → all non-excluded departments are passed as `collection[]` URL params
-(same pre-filter approach; excluded departments simply aren't included in the URL params).
+**Note**: `typology` is an object-type classification (e.g. Paintings, Sculptures) that is
+orthogonal to `collection` (department, e.g. "Département des Peintures"). A Sculpture may
+belong to any department — Egyptian Antiquities, Greek & Roman Antiquities, etc.
 
-The JSON `collection` field is validated against expected substrings after fetching the record,
-as a guard against stale HTML or Louvre site changes returning unexpected items.
+**require filters** → only the selected category IDs are passed as `typology[N]` URL params.
+**exclude filters** → all non-excluded category IDs are passed as `typology[N]` URL params.
+
+The page count for a given category combination is cached for 7 days.
 
 ---
 
@@ -136,9 +139,12 @@ Accepts:
 - **No JSON search API**: Random selection requires fetching and parsing HTML search pages,
   which adds latency (~1 page fetch + 1 JSON fetch + 1 image download per artwork).
 - **Many items without images**: Archaeological and archival items frequently have no `image`
-  entries; the retry loop may need several attempts, especially with department filters.
+  entries; the retry loop may need several attempts, especially with category filters.
 - **French text**: Titles, media descriptions, and department names are in French.
 - **Copyright**: Images are © Musée du Louvre, not public domain (unlike Met or Google Arts).
   Suitable for personal display use.
-- **Page count cache**: The filtered page count is cached for 24h per department combination.
+- **Page count cache**: The filtered page count is cached for 7 days per category combination.
   On process restart (deploy/HA restart) the cache is cleared and re-probed on first use.
+- **Typology vs. department**: The `typology` filter selects by object type, not Louvre
+  department. "Sculptures" includes sculptures from all departments (Antiquities, etc.),
+  not just the Sculptures department.

@@ -11,45 +11,41 @@ const sharp = require('sharp');
 // Selection strategy: pick a random page from the search results HTML (1–maxPages), extract
 // ARK IDs from the markup, then fetch the JSON record for one of those ARKs.
 //
-// When department filters are active, the search URL includes collection[] query parameters
-// that pre-filter results server-side. The page count for a filtered search is probed once
-// (from page 1) and cached in-memory for the process lifetime. This avoids the ~2% hit rate
-// that would result from picking random pages out of 25,078 when only ~536 match Paintings.
+// Category filtering uses the `typology[N]=<id>` query parameter, which pre-filters results
+// server-side by object type (e.g. typology[0]=22 for Paintings). Multiple categories are
+// passed as typology[0]=22&typology[1]=24 etc. (the server returns items matching any).
+// The page count for a filtered search is probed once and cached for 7 days.
 //
 // Total unfiltered collection: ~478,000 objects across 25,078 pages of 20 results each.
 
-const BASE_URL   = 'https://collections.louvre.fr';
-const MAX_PAGES  = 25078; // Observed maximum page (unfiltered)
+const BASE_URL  = 'https://collections.louvre.fr';
+const MAX_PAGES = 25078; // Observed maximum page (unfiltered)
 
 const HEADERS = { 'User-Agent': 'frame-art-manager/1.0 (home automation art display)' };
 
-// Departments: user-visible label → { code: URL collection[] value, substrings: [...] }
-// `code` is used for pre-filtering via the search URL.
-// `substrings` are fallback substrings in the `collection` field for post-JSON-fetch validation
-// (guards against the URL filter returning unexpected items due to Louvre site changes).
-const DEPARTMENTS = {
-  Paintings:                   { code: 'peintures',                                 substrings: ['peintures'] },
-  'Drawings & Prints':         { code: 'arts-graphiques',                           substrings: ['arts graphiques'] },
-  Sculptures:                  { code: 'sculptures',                                substrings: ['sculptures'] },
-  'Decorative Arts':           { code: 'objets-art',                                substrings: ["objets d'art"] },
-  'Egyptian Antiquities':      { code: 'antiquites-egyptiennes',                    substrings: ['antiquités égyptiennes'] },
-  'Greek & Roman Antiquities': { code: 'antiquites-grecques-etrusques-et-romaines', substrings: ['antiquités grecques', 'antiquités romaines', 'antiquités étrusques'] },
-  'Near Eastern Antiquities':  { code: 'antiquites-orientales',                     substrings: ['antiquités orientales'] },
-  'Islamic Art':               { code: 'arts-de-l-islam',                           substrings: ["arts de l'islam"] },
-  'Byzantine Art':             { code: 'arts-de-byzance',                           substrings: ['byzance'] },
+// Object categories available for filtering via typology[N]=<id>.
+// IDs were verified by probing https://collections.louvre.fr/en/recherche?typology[0]=N.
+const CATEGORIES = {
+  'Paintings':         { id: 22 },  // ~549 pages (~10,972 items)
+  'Drawings & Prints': { id: 13 },  // ~310 pages (~6,200 items)
+  'Sculptures':        { id: 24 },  // ~1,927 pages (~38,537 items)
+  'Jewelry':           { id: 12 },  // ~1,142 pages (~22,835 items)
+  'Furniture':         { id: 15 },  // ~179 pages (~3,571 items)
+  'Textiles':          { id: 26 },  // ~401 pages (~8,015 items)
+  'Vases':             { id: 27 },  // ~3,205 pages (~64K items)
+  'Coins & Medals':    { id: 16 },  // ~299 pages (~5,972 items)
 };
 
-const DEPARTMENT_TYPES = Object.keys(DEPARTMENTS);
+const CATEGORY_TYPES = Object.keys(CATEGORIES);
 
-// User-visible department groups for the UI filter builder.
-const DEPARTMENT_CATEGORIES = [
-  { name: 'Fine Art',    media: ['Paintings', 'Drawings & Prints', 'Sculptures', 'Decorative Arts'] },
-  { name: 'Antiquities', media: ['Egyptian Antiquities', 'Greek & Roman Antiquities', 'Near Eastern Antiquities', 'Islamic Art', 'Byzantine Art'] },
+// User-visible category groups for the UI filter builder.
+const CATEGORY_GROUPS = [
+  { name: 'Fine Art',        media: ['Paintings', 'Drawings & Prints', 'Sculptures'] },
+  { name: 'Decorative Arts', media: ['Jewelry', 'Furniture', 'Textiles', 'Vases', 'Coins & Medals'] },
 ];
 
-// In-memory cache: sorted collection-code key → { maxPages, fetchedAt }.
-// TTL of 24h so the count refreshes daily as the Louvre adds new items,
-// without needing a probe fetch on every shuffle.
+// In-memory cache: sorted typology-ID key → { maxPages, fetchedAt }.
+// 7-day TTL so the count refreshes weekly as the Louvre adds new items.
 const _pageCountCache = new Map();
 const PAGE_COUNT_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -83,17 +79,17 @@ function parseMaxPages(html) {
 
 /**
  * Fetch a Louvre search results page.
- * collectionCodes: array of collection[] values (e.g. ['peintures']) for pre-filtering,
- *   or null/[] for no department filter.
+ * typologyIds: array of numeric typology IDs for pre-filtering (e.g. [22] for Paintings,
+ *   [22, 24] for Paintings + Sculptures), or null/[] for no category filter.
  * Returns { arkIds, html }.
  */
-async function fetchSearchPage(page, collectionCodes) {
-  // Build the query string manually to keep literal brackets in `collection[]`.
-  // URLSearchParams would percent-encode them as `collection%5B%5D`, which the
-  // Louvre server doesn't recognise as the department filter parameter.
+async function fetchSearchPage(page, typologyIds) {
+  // Build the query string manually to preserve literal brackets in typology[N] parameter
+  // names. URLSearchParams would percent-encode them as typology%5BN%5D, which the
+  // Louvre server does not recognise.
   let qs = `q=&page=${encodeURIComponent(page)}`;
-  if (collectionCodes && collectionCodes.length > 0) {
-    for (const code of collectionCodes) qs += `&collection[]=${encodeURIComponent(code)}`;
+  if (typologyIds && typologyIds.length > 0) {
+    typologyIds.forEach((id, i) => { qs += `&typology[${i}]=${id}`; });
   }
   const response = await axios.get(`${BASE_URL}/en/recherche?${qs}`, {
     timeout: 15000,
@@ -103,17 +99,17 @@ async function fetchSearchPage(page, collectionCodes) {
 }
 
 /**
- * Get (and cache) the max page count for a given set of collection codes.
+ * Get (and cache) the max page count for a given set of typology IDs.
  * Probes page 1 to read the pagination total; falls back to MAX_PAGES on parse failure.
  */
-async function getMaxPages(collectionCodes) {
-  const key = (collectionCodes || []).slice().sort().join(',');
+async function getMaxPages(typologyIds) {
+  const key = (typologyIds || []).slice().sort().join(',');
   const cached = _pageCountCache.get(key);
   if (cached && (Date.now() - cached.fetchedAt) < PAGE_COUNT_TTL_MS) return cached.maxPages;
 
   let maxPages = cached?.maxPages || MAX_PAGES; // keep stale value on failure
   try {
-    const { html } = await fetchSearchPage(1, collectionCodes);
+    const { html } = await fetchSearchPage(1, typologyIds);
     maxPages = parseMaxPages(html) || maxPages;
   } catch (err) {
     console.warn(`[louvre] Could not probe page count for [${key || 'all'}]: ${err.message} — using ${maxPages}`);
@@ -175,27 +171,19 @@ function buildDateString(record) {
   return null;
 }
 
-/**
- * Returns true if a record's collection field matches any of the given substring sets.
- */
-function collectionMatchesFilter(collection, substringSets) {
-  if (!collection) return false;
-  const lower = collection.toLowerCase();
-  return substringSets.some(substrings => substrings.some(s => lower.includes(s)));
-}
-
 // ── fetchRandomArtwork ────────────────────────────────────────────────────────
 
 /**
  * Fetch a random artwork from the Louvre collections.
  *
- * Department filtering is applied pre-fetch via the search URL's collection[] parameter.
- * require filters determine which departments are searched; exclude filters are then applied
- * as a secondary post-JSON-fetch check. The page count for a given department combination
- * is probed from page 1 once and cached for the process lifetime.
+ * Category filtering is applied pre-fetch via `typology[N]=<id>` URL parameters.
+ * require filters restrict to the selected categories; exclude filters remove them.
+ * The resulting typology IDs are passed to the search URL so every page fetch
+ * already matches the filter. The page count for a given category combination
+ * is probed from page 1 once and cached for 7 days.
  *
  * @param {Array<{type: string, mode: 'require'|'exclude', values: string[]}>} [filters=[]]
- *   Supported type: 'department' — values are user-visible names from DEPARTMENT_TYPES.
+ *   Supported type: 'category' — values are user-visible names from CATEGORY_TYPES.
  * @param {object} [options]
  * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all']
  * @returns {{ imageBuffer, contentType, metadata }}
@@ -203,42 +191,36 @@ function collectionMatchesFilter(collection, substringSets) {
 async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
 
-  // Compute eligible departments (require intersection, then exclude union).
+  // Compute eligible categories (require intersection, then exclude union).
   const requireSets = filters
-    .filter(f => f.type === 'department' && f.mode === 'require')
+    .filter(f => f.type === 'category' && f.mode === 'require')
     .map(f => new Set((f.values || []).map(v => v.toLowerCase())));
   const excludeValues = new Set(
     filters
-      .filter(f => f.type === 'department' && f.mode === 'exclude')
+      .filter(f => f.type === 'category' && f.mode === 'exclude')
       .flatMap(f => f.values || [])
       .map(v => v.toLowerCase())
   );
 
-  let eligibleDepartments = DEPARTMENT_TYPES;
+  let eligibleCategories = CATEGORY_TYPES;
   if (requireSets.length > 0) {
-    eligibleDepartments = eligibleDepartments.filter(d => requireSets.every(s => s.has(d.toLowerCase())));
+    eligibleCategories = eligibleCategories.filter(c => requireSets.every(s => s.has(c.toLowerCase())));
   }
   if (excludeValues.size > 0) {
-    eligibleDepartments = eligibleDepartments.filter(d => !excludeValues.has(d.toLowerCase()));
+    eligibleCategories = eligibleCategories.filter(c => !excludeValues.has(c.toLowerCase()));
   }
-  if (eligibleDepartments.length === 0) {
-    throw new Error('No departments eligible after applying filters');
+  if (eligibleCategories.length === 0) {
+    throw new Error('No categories eligible after applying filters');
   }
 
-  // Pre-filter via URL when departments are constrained.
-  const filterActive = eligibleDepartments.length < DEPARTMENT_TYPES.length;
-  const collectionCodes = filterActive
-    ? eligibleDepartments.map(d => DEPARTMENTS[d].code)
+  // Pass typology IDs to the search URL when categories are constrained.
+  const filterActive = eligibleCategories.length < CATEGORY_TYPES.length;
+  const typologyIds = filterActive
+    ? eligibleCategories.map(c => CATEGORIES[c].id)
     : null;
 
-  // Validation substrings: if we pre-filtered, verify the JSON record's collection field
-  // matches one of the expected departments (guards against stale search HTML or site changes).
-  const allowedSubstringSets = filterActive
-    ? eligibleDepartments.map(d => DEPARTMENTS[d].substrings)
-    : null;
-
-  // Get (possibly cached) page count for this department combination.
-  const maxPages = await getMaxPages(collectionCodes);
+  // Get (possibly cached) page count for this category combination.
+  const maxPages = await getMaxPages(typologyIds);
 
   const MAX_ATTEMPTS = 20;
   let arkIds = [];
@@ -248,7 +230,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     if (arkIds.length === 0) {
       const page = Math.floor(Math.random() * maxPages) + 1;
       try {
-        ({ arkIds } = await fetchSearchPage(page, collectionCodes));
+        ({ arkIds } = await fetchSearchPage(page, typologyIds));
       } catch (err) {
         console.warn(`[louvre] Failed to fetch search page ${page}: ${err.message}`);
         continue;
@@ -283,12 +265,6 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     const imageEntry = record.image.find(img => img.urlImage) || null;
     if (!imageEntry) {
       console.warn(`[louvre] ARK ${arkId} images have no urlImage`);
-      continue;
-    }
-
-    // Validate department against expected substrings (only when pre-filtering was active).
-    if (allowedSubstringSets && !collectionMatchesFilter(record.collection, allowedSubstringSets)) {
-      console.warn(`[louvre] ARK ${arkId} collection "${record.collection}" unexpected for filter — skipping`);
       continue;
     }
 
@@ -348,11 +324,11 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 // ── selectMode ────────────────────────────────────────────────────────────────
 
 function selectMode(filters = []) {
-  const deptFilters = filters.filter(f => f.type === 'department');
-  const hasRequire  = deptFilters.some(f => f.mode === 'require');
-  const hasExclude  = deptFilters.some(f => f.mode === 'exclude');
+  const catFilters = filters.filter(f => f.type === 'category');
+  const hasRequire = catFilters.some(f => f.mode === 'require');
+  const hasExclude = catFilters.some(f => f.mode === 'exclude');
   const mode = hasRequire ? 'filtered_page' : hasExclude ? 'excluded_page' : 'random_page';
-  return { mode, apiFilters: deptFilters, postFilters: [] };
+  return { mode, apiFilters: catFilters, postFilters: [] };
 }
 
 // ── Metadata schema ───────────────────────────────────────────────────────────
@@ -382,13 +358,13 @@ const defaultMapping = {
 function getFilterTypes() {
   return [
     {
-      type:        'department',
-      label:       'Department',
-      description: 'Restrict or exclude artworks by Louvre department. require filters pre-filter the search results at URL level; exclude filters are applied after fetching the JSON record.',
+      type:        'category',
+      label:       'Object Category',
+      description: 'Restrict or exclude artworks by object type. Filtering is applied server-side via the Louvre search API, so only matching categories are fetched.',
       modes:       ['require', 'exclude'],
       multiValue:  true,
-      groups:      DEPARTMENT_CATEGORIES.map(cat => ({ name: cat.name, values: cat.media })),
-      values:      DEPARTMENT_TYPES.map(name => ({ value: name, label: name })),
+      groups:      CATEGORY_GROUPS.map(g => ({ name: g.name, values: g.media })),
+      values:      CATEGORY_TYPES.map(name => ({ value: name, label: name })),
     },
   ];
 }
@@ -459,6 +435,6 @@ module.exports = {
   getFilterTypes,
   metadataFields,
   defaultMapping,
-  DEPARTMENT_TYPES,
-  DEPARTMENT_CATEGORIES,
+  CATEGORY_TYPES,
+  CATEGORY_GROUPS,
 };
