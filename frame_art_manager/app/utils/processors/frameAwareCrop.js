@@ -50,7 +50,7 @@ const { ensureRaw }               = require('./contextUtils');
  *     — passed directly to detectFrameBoundaries (same defaults as mean_profile).
  */
 async function frameAwareCropProcessor(context, {
-  strategy             = 'attention',
+  strategy             = 'centre',
   safetyMargin         = 0.01,
   consistencyThreshold = 35,
   contrastThreshold    = 20,

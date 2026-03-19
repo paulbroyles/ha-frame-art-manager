@@ -44,6 +44,11 @@ const sharp = require('sharp');
  *   interiorVarTarget 800    Local variance level that counts as fully complex content.
  *   edgeWeight        0.4    Weight of edge penalty in the combined score.
  *   interiorWeight    0.6    Weight of interior reward in the combined score.
+ *   centeringWeight   0.15   Weight of centering preference. Penalizes candidates
+ *                            whose center is far from the image center (normalized
+ *                            distance 0–1). Prevents the scorer from drifting off
+ *                            to one side when both sides have similar frame material.
+ *                            Set to 0 to disable.
  *   minScoreThreshold -0.1   Fall back to centered crop if no candidate beats this.
  *   strategy          'attention'  Sharp resize position: attention | entropy | centre.
  */
@@ -53,10 +58,11 @@ async function scoredCropProcessor(context, {
   tileStride        = 8,
   edgeVarThreshold  = 200,
   interiorVarTarget = 800,
-  edgeWeight        = 0.4,
+  edgeWeight        = 0.6,
   interiorWeight    = 0.6,
+  centeringWeight   = 0.15,
   minScoreThreshold = -0.1,
-  strategy          = 'attention',
+  strategy          = 'centre',
 } = {}) {
   const t0 = Date.now();
 
@@ -164,13 +170,29 @@ async function scoredCropProcessor(context, {
         // Mean local variance in the interior (inset by BORDER on all sides).
         const interiorMeanVar = rectMean(left+BORDER, top+BORDER, cW-2*BORDER, cH-2*BORDER);
 
-        const edgePenalty    = Math.max(0, 1 - meanEdgeVar    / edgeVarThreshold);
+        // Linear frame-likeness fraction (0 = complex, 1 = pure frame material).
+        const edgeFrac       = Math.max(0, 1 - meanEdgeVar / edgeVarThreshold);
+        // Squared penalty: makes very uniform (frame-like) edges far more costly
+        // than moderately-low-variance edges. Ornate frames with some variation
+        // are penalized less; true uniform wood/gilding is penalized heavily.
+        const edgePenalty    = edgeFrac * edgeFrac;
         const interiorReward = Math.min(1, interiorMeanVar / interiorVarTarget);
-        const score = interiorWeight * interiorReward - edgeWeight * edgePenalty;
+
+        // Centering preference: penalize candidates whose center is far from the
+        // image center. Normalized distance 0 (perfectly centered) → 1 (maximally
+        // off-center). Prevents the scorer from drifting to one side when both
+        // sides have similar frame material.
+        const centerDx = (left + cW / 2 - workW / 2) / workW;
+        const centerDy = (top  + cH / 2 - workH / 2) / workH;
+        const centerPenalty = Math.sqrt(centerDx * centerDx + centerDy * centerDy);
+
+        const score = interiorWeight * interiorReward
+                    - edgeWeight     * edgePenalty
+                    - centeringWeight * centerPenalty;
 
         if (score > bestScore) {
           bestScore = score;
-          bestCandidate = { left, top, w: cW, h: cH, score, edgePenalty, interiorReward };
+          bestCandidate = { left, top, w: cW, h: cH, score, edgePenalty, interiorReward, centerPenalty };
         }
       }
     }
