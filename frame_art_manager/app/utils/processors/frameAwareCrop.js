@@ -1,8 +1,8 @@
 'use strict';
 
 const sharp = require('sharp');
-const { detectFrameBoundaries } = require('./frameDetect');
-const { ensureRaw }             = require('../pipeline');
+const { detectFrameBoundaries }   = require('./frameDetect');
+const { ensureRaw }               = require('./contextUtils');
 
 /**
  * Frame-Aware Constrained Crop processor.
