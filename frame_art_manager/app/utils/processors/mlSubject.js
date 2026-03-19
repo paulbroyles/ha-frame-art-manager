@@ -160,19 +160,36 @@ async function mlSubjectProcessor(context, {
 
   const tInfer = Date.now();
 
-  // The background-removal pipeline returns [{score, label, mask}] where mask
-  // is a RawImage (grayscale, values 0–255). Extract the first result's mask.
+  // The background-removal pipeline may return two formats:
+  //   (a) [{label, score, mask: RawImage}]  — ImageSegmentation format
+  //   (b) [RawImage]                         — RGBA image (alpha = foreground mask)
+  // Handle both: prefer .mask (grayscale 0-255); fall back to alpha channel.
   const result = Array.isArray(results) ? results[0] : results;
-  if (!result || !result.mask) {
-    console.warn('[ml_subject] no mask in pipeline result — skipping');
-    context.debug.ml_subject = { error: 'no mask in result', result: JSON.stringify(result), timing: { total: Date.now() - t0 } };
+  let maskData, maskW, maskH;
+  if (result && result.mask && result.mask.data) {
+    // Format (a): grayscale mask RawImage
+    maskData = result.mask.data;
+    maskW    = result.mask.width;
+    maskH    = result.mask.height;
+  } else if (result && result.data && result.width && result.height) {
+    // Format (b): RGBA RawImage — extract alpha channel as mask
+    maskW = result.width;
+    maskH = result.height;
+    const ch = result.channels || Math.round(result.data.length / (maskW * maskH));
+    if (ch === 4) {
+      maskData = new Uint8Array(maskW * maskH);
+      for (let i = 0; i < maskW * maskH; i++) maskData[i] = result.data[i * 4 + 3];
+    } else if (ch === 1) {
+      maskData = result.data;
+    }
+  }
+  if (!maskData) {
+    const keys = result ? Object.keys(result).join(',') : 'null';
+    console.warn(`[ml_subject] no mask in pipeline result (keys: ${keys}) — skipping`);
+    context.debug.ml_subject = { error: 'no mask in result', resultKeys: keys, timing: { total: Date.now() - t0 } };
     return context;
   }
 
-  const maskImg  = result.mask;
-  const maskData = maskImg.data;   // Uint8ClampedArray or similar, grayscale 0–255
-  const maskW    = maskImg.width;
-  const maskH    = maskImg.height;
   const maskThresh = Math.round(threshold * 255);
 
   // Find bounding box of foreground pixels (mask value >= threshold).
