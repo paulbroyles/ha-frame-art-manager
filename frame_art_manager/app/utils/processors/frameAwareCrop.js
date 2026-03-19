@@ -150,9 +150,19 @@ async function frameAwareCropProcessor(context, {
   const safeExtW = Math.min(extractWidth,  width  - extractLeft);
   const safeExtH = Math.min(extractHeight, height - extractTop);
 
+  // Focus window override: when an upstream processor set a focus window, use
+  // Sharp's attention strategy within the painting region so faces/subjects are
+  // preferred for the cover-fit crop. The frame has already been extracted, so
+  // attention operates on painting content only (no frame material to drift toward).
+  let effectiveStrategy = strategy;
+  if (context.focusWindow && strategy !== 'attention') {
+    effectiveStrategy = 'attention';
+    console.log(`[frame_aware_crop] focus window from '${context.focusWindow.source}' → overriding strategy to 'attention'`);
+  }
+
   console.log(
     `[frame_aware_crop] extract left=${extractLeft} top=${extractTop} ${safeExtW}×${safeExtH}` +
-    ` → resize ${targetW}×${targetH} strategy=${strategy}`
+    ` → resize ${targetW}×${targetH} strategy=${effectiveStrategy}`
   );
 
   // Step 5: single extract + resize.
@@ -163,12 +173,12 @@ async function frameAwareCropProcessor(context, {
   } else if (extractLeft === 0 && extractTop === 0 && safeExtW === width && safeExtH === height) {
     // No frame found — just resize to target.
     result = await sharp(context.buffer)
-      .resize(targetW, targetH, { fit: 'cover', position: strategy })
+      .resize(targetW, targetH, { fit: 'cover', position: effectiveStrategy })
       .toBuffer();
   } else {
     result = await sharp(context.buffer)
       .extract({ left: extractLeft, top: extractTop, width: safeExtW, height: safeExtH })
-      .resize(targetW, targetH, { fit: 'cover', position: strategy })
+      .resize(targetW, targetH, { fit: 'cover', position: effectiveStrategy })
       .toBuffer();
   }
   const tEnd = Date.now();
@@ -184,8 +194,10 @@ async function frameAwareCropProcessor(context, {
     confidence: { ...confidence },
     applied:    { top: cropTop, bottom: cropBottom, left: cropLeft, right: cropRight },
     covered:    { top: topCovered, bottom: bottomCovered, left: leftCovered, right: rightCovered },
-    extract:    { left: extractLeft, top: extractTop, width: safeExtW, height: safeExtH },
-    strategy,
+    extract:          { left: extractLeft, top: extractTop, width: safeExtW, height: safeExtH },
+    strategy:         effectiveStrategy,
+    strategyOverride: effectiveStrategy !== strategy ? strategy : null,
+    focusSource:      context.focusWindow ? context.focusWindow.source : null,
   };
 
   console.log(`[frame_aware_crop timing] decode=${tDecode-t0}ms detect=${tDetect-tDecode}ms encode=${tEnd-tDetect}ms total=${tEnd-t0}ms`);

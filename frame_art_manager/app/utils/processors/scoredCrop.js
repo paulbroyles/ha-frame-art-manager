@@ -132,6 +132,21 @@ async function scoredCropProcessor(context, {
 
   const tSAT = Date.now();
 
+  // Focus window: project to working-resolution coordinates for use in scoring.
+  // When set, candidates are biased toward the focus point using both X and Y
+  // centering terms (instead of the image center), ensuring faces/subjects are
+  // preferentially included over the geometric center.
+  let focusWorkCx = workW / 2;
+  let focusWorkCy = workH / 2;
+  let focusActive = false;
+  if (context.focusWindow) {
+    const fw = context.focusWindow;
+    focusWorkCx = (fw.x + fw.w / 2) / scaleX;
+    focusWorkCy = (fw.y + fw.h / 2) / scaleY;
+    focusActive = true;
+    console.log(`[scored_crop] focus window from '${fw.source}' → work center (${focusWorkCx.toFixed(1)},${focusWorkCy.toFixed(1)})`);
+  }
+
   // Step 4: generate candidates and score them.
   // Compute max-fitting rectangle in working resolution at target AR.
   let baseW, baseH;
@@ -182,16 +197,23 @@ async function scoredCropProcessor(context, {
         const interiorReward = Math.min(1, interiorMeanVar / interiorVarTarget);
 
         // Centering preference: penalize candidates whose center is far from the
-        // image center. Normalized distance 0 (perfectly centered) → 1 (maximally
-        // off-center). Prevents the scorer from drifting to one side when both
-        // sides have similar frame material.
-        const centerDx = (left + cW / 2 - workW / 2) / workW;
-        const centerDy = (top  + cH / 2 - workH / 2) / workH;
+        // reference point. When a focus window is active the reference is the
+        // focus center (face, etc.) so both X and Y prefer the focus; otherwise
+        // the reference is the image center (prevents frame drift).
+        const refCx = focusActive ? focusWorkCx : workW / 2;
+        const refCy = focusActive ? focusWorkCy : workH / 2;
+        const centerDx = (left + cW / 2 - refCx) / workW;
+        const centerDy = (top  + cH / 2 - refCy) / workH;
+
+        // When focus is active use the same weight for both axes so the
+        // crop is pulled toward the face regardless of orientation.
+        const wX = focusActive ? Math.max(centeringWeightX, centeringWeightY, 0.3) : centeringWeightX;
+        const wY = focusActive ? Math.max(centeringWeightX, centeringWeightY, 0.3) : centeringWeightY;
 
         const score = interiorWeight * interiorReward
                     - edgeWeight       * edgePenalty
-                    - centeringWeightX * Math.abs(centerDx)
-                    - centeringWeightY * Math.abs(centerDy);
+                    - wX               * Math.abs(centerDx)
+                    - wY               * Math.abs(centerDy);
 
         if (score > bestScore) {
           bestScore = score;
@@ -249,11 +271,12 @@ async function scoredCropProcessor(context, {
   context.height = targetH;
 
   context.debug.scored_crop = {
-    timing:     { total: tEnd - t0, downsample: tDecode - t0, buildSAT: tSAT - tDecode, score: tScore - tSAT, encode: tEnd - tScore },
-    candidates: { total: candidateCount },
-    winner:     { ...winner },
+    timing:      { total: tEnd - t0, downsample: tDecode - t0, buildSAT: tSAT - tDecode, score: tScore - tSAT, encode: tEnd - tScore },
+    candidates:  { total: candidateCount },
+    winner:      { ...winner },
     fallback,
-    extract:    { left: origLeft, top: origTop, width: extractW, height: extractH },
+    focusSource: focusActive ? context.focusWindow.source : null,
+    extract:     { left: origLeft, top: origTop, width: extractW, height: extractH },
     strategy,
   };
 

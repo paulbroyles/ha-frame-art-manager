@@ -37,7 +37,8 @@
     "sharp": "^0.34.4",
     "simple-git": "^3.28.0",
     "tough-cookie": "^4.1.4",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "@techstark/opencv-js": "^4.10.0-dev.4"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

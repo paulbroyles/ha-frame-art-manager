@@ -92,6 +92,20 @@ const IMAGE_PROCESSING_SCHEMA = {
     { value: 'trim',             label: 'Sharp Trim — background strip only (same as None; redundant with automatic Stage 1)' },
     // TODO (Option 3): ML Segmentation — handles irregular/ornate frames; see docs/ROADMAP.md
   ],
+  windowSetters: [
+    { value: 'face_cascade', label: 'Face Cascade — detect faces and set focus window for downstream crop processors',
+      options: [
+        { key: 'scaleFactor', label: 'Scale Factor', type: 'number', default: 1.1,
+          description: 'Scale step between detection passes (1.05–1.5). Lower = more thorough but slower; 1.1 is standard.' },
+        { key: 'minNeighbors', label: 'Min Confirmations', type: 'number', default: 2,
+          description: 'How many neighboring detections required to accept a face (1–6). Lower catches more stylized/painted faces; higher reduces false positives.' },
+        { key: 'padFraction', label: 'Padding Fraction', type: 'number', default: 0.35,
+          description: 'Padding added around the face bounding box as a fraction of face size. Increase for more context around the face.' },
+      ] },
+  ],
+  windowModifiers: [
+    { value: 'window_clear', label: 'Clear Focus Window — reset any focus window set by upstream processors' },
+  ],
   unifiedProcessors: [
     { value: 'scored_crop', label: 'Scored Crop — score candidate crop rectangles for edge uniformity and interior complexity; finds painting without explicit frame detection',
       replaces: ['frame_detect', 'aspect_crop'],

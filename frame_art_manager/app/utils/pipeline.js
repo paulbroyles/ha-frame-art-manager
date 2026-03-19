@@ -18,8 +18,17 @@
  *   orientation: 'landscape'|'portrait',
  *   targetW:     number,              // TV target width (computed from input dimensions)
  *   targetH:     number,              // TV target height
+ *   focusWindow: { x, y, w, h, confidence, source }|null,  // set by window-setter processors
  *   debug:       {},                  // timing and diagnostic info per processor
  * }
+ *
+ * Focus window protocol:
+ *   - Window-setter processors (type: 'window_set') write context.focusWindow
+ *   - Window-consumer processors read context.focusWindow and use it if non-null,
+ *     otherwise fall back to their default behaviour
+ *   - window_clear explicitly sets context.focusWindow = null; it is the only
+ *     way to cancel a previously set window mid-pipeline
+ *   - Multiple setters: the last setter before a consumer wins (natural pipeline state)
  *
  * Processor interface:
  *   async (context, options) → context
@@ -34,6 +43,8 @@ const { sharpCropProcessor }        = require('./processors/sharpCrop');
 const { frameAwareCropProcessor }   = require('./processors/frameAwareCrop');
 const { scoredCropProcessor }       = require('./processors/scoredCrop');
 const { coherenceCropProcessor }    = require('./processors/coherenceCrop');
+const { faceCascadeProcessor }      = require('./processors/faceCascade');
+const { windowClearProcessor }      = require('./processors/windowClear');
 const { PRE_PROCESSOR_WRAPPERS }    = require('./processors/preprocessorWrappers');
 const { ensureRaw, invalidateRaw }  = require('./processors/contextUtils');
 
@@ -86,10 +97,13 @@ function computeTargetDimensions(inputW, inputH, orientation) {
  * PROCESSORS maps step keys to processor descriptors.
  *
  * Each descriptor has:
- *   fn:    async (context, options) → context
- *   type:  category string ('background_strip' | 'frame_detect' | 'aspect_crop' | 'unified_frame_crop')
- *   label: human-readable description
- *   auto:  true if this processor runs automatically (not user-selectable)
+ *   fn:              async (context, options) → context
+ *   type:            category string:
+ *                      'background_strip' | 'frame_detect' | 'aspect_crop' |
+ *                      'unified_frame_crop' | 'window_set' | 'window_clear'
+ *   label:           human-readable description
+ *   auto:            true if this processor runs automatically (not user-selectable)
+ *   consumesWindow:  true if this processor uses context.focusWindow when set
  */
 const PROCESSORS = {
   background_strip: {
@@ -97,6 +111,16 @@ const PROCESSORS = {
     type: 'background_strip',
     label: 'Background Strip — remove solid-color borders',
     auto: true,
+  },
+  face_cascade: {
+    fn: faceCascadeProcessor,
+    type: 'window_set',
+    label: 'Face Cascade — detect faces and set focus window for downstream crop processors',
+  },
+  window_clear: {
+    fn: windowClearProcessor,
+    type: 'window_clear',
+    label: 'Clear Focus Window — reset any focus window set by upstream processors',
   },
   sharp_crop: {
     fn: sharpCropProcessor,
@@ -108,18 +132,21 @@ const PROCESSORS = {
     type: 'unified_frame_crop',
     label: 'Frame-Aware Crop — detect frame and fit to TV aspect ratio in one informed pass',
     replaces: ['frame_detect', 'aspect_crop'],
+    consumesWindow: true,
   },
   scored_crop: {
     fn: scoredCropProcessor,
     type: 'unified_frame_crop',
     label: 'Scored Crop — score candidate crop rectangles for edge uniformity and interior complexity; finds painting without explicit frame detection',
     replaces: ['frame_detect', 'aspect_crop'],
+    consumesWindow: true,
   },
   coherence_crop: {
     fn: coherenceCropProcessor,
     type: 'unified_frame_crop',
     label: 'Coherence Crop — variance-weighted centroid crop; centers on the most complex region; frame excluded naturally with no boundary detection',
     replaces: ['frame_detect', 'aspect_crop'],
+    consumesWindow: true,
   },
   // Pre-processor wrappers (frame detection algorithms)
   ...Object.fromEntries(
@@ -154,6 +181,7 @@ async function runPipeline(buffer, orientation, steps) {
     orientation,
     targetW: finalW,
     targetH: finalH,
+    focusWindow: null,
     debug: {},
   };
 

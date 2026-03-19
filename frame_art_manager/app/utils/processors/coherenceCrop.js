@@ -143,8 +143,19 @@ async function coherenceCropProcessor(context, {
   const tCentroid = Date.now();
 
   // Step 4: scale centroid from tile-space to original image coordinates.
-  const origCx = Math.round(cx * effTile * scaleX);
-  const origCy = Math.round(cy * effTile * scaleY);
+  let origCx = Math.round(cx * effTile * scaleX);
+  let origCy = Math.round(cy * effTile * scaleY);
+
+  // Focus window override: if an upstream processor (e.g. face_cascade) set a
+  // focus window, use its center as the crop anchor instead of the variance centroid.
+  let focusSource = null;
+  if (context.focusWindow) {
+    const fw = context.focusWindow;
+    origCx = Math.round(fw.x + fw.w / 2);
+    origCy = Math.round(fw.y + fw.h / 2);
+    focusSource = fw.source;
+    console.log(`[coherence_crop] focus window from '${fw.source}' overrides centroid → (${origCx},${origCy})`);
+  }
 
   // Step 5: place extraction rectangle centered at centroid, clamped to image bounds.
   //
@@ -196,9 +207,10 @@ async function coherenceCropProcessor(context, {
   context.height = targetH;
 
   context.debug.coherence_crop = {
-    timing:   { total: tEnd - t0, decode: tDecode - t0, centroid: tCentroid - tDecode, encode: tEnd - tCentroid },
-    centroid: { tileX: cx, tileY: cy, origX: origCx, origY: origCy, offsetX: centerOffsetX, offsetY: centerOffsetY },
-    extract:  { left: extractLeft, top: extractTop, width: extractW, height: extractH },
+    timing:      { total: tEnd - t0, decode: tDecode - t0, centroid: tCentroid - tDecode, encode: tEnd - tCentroid },
+    centroid:    { tileX: cx, tileY: cy, origX: origCx, origY: origCy, offsetX: centerOffsetX, offsetY: centerOffsetY },
+    focusSource: focusSource || null,
+    extract:     { left: extractLeft, top: extractTop, width: extractW, height: extractH },
     strategy,
     borderWeight: bw,
     borderBandFrac,
