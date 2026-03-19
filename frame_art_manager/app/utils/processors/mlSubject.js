@@ -71,22 +71,23 @@ function getModel(dtype = 'q8') {
       const t0 = Date.now();
       console.log('[ml_subject] loading RMBG-1.4 model...');
 
-      // Dynamic import required: the browser bundle (@huggingface/transformers web
-      // entry point) is an ES Module and cannot be require()'d from CJS.
-      const tf = await import('@huggingface/transformers');
+      // Dynamic import required: the browser bundle is an ES Module.
+      // Use pipeline('background-removal') rather than AutoModelForImageSegmentation:
+      // RMBG-1.4 has model_type 'segformer' which is unsupported in transformers.js
+      // model class dispatch, but the background-removal pipeline loads the ONNX
+      // files directly and bypasses that dispatch.
+      const { pipeline, env } = await import('@huggingface/transformers');
 
       // Set cache directory to HA persistent storage before loading the model.
-      tf.env.cacheDir = '/data/huggingface';
+      env.cacheDir = '/data/huggingface';
 
-      const model = await tf.AutoModelForImageSegmentation.from_pretrained(MODEL_ID, {
+      const pipe = await pipeline('background-removal', MODEL_ID, {
         dtype,
         device: 'wasm',
       });
 
       console.log(`[ml_subject] RMBG-1.4 ready in ${Date.now() - t0}ms`);
-      // Return model + Tensor class together so the processor doesn't need a
-      // second import() call.
-      return { model, Tensor: tf.Tensor };
+      return pipe;
     })();
 
     _modelPromise.catch((e) => {
@@ -114,10 +115,10 @@ async function mlSubjectProcessor(context, {
   const origW = context.width;
   const origH = context.height;
 
-  // Load model (cached after first call).
-  let model, Tensor;
+  // Load pipeline (cached after first call).
+  let pipe;
   try {
-    ({ model, Tensor } = await getModel(dtype));
+    pipe = await getModel(dtype);
   } catch (e) {
     console.warn(`[ml_subject] model unavailable: ${e.message} — skipping`);
     context.debug.ml_subject = { error: e.message, timing: { total: Date.now() - t0 } };
@@ -126,32 +127,15 @@ async function mlSubjectProcessor(context, {
 
   const tLoad = Date.now();
 
-  // Preprocess manually with Sharp — resize to MODEL_INPUT_SIZE × MODEL_INPUT_SIZE,
-  // extract raw RGB, build NCHW float32 tensor with ImageNet normalization.
-  // We do NOT use RawImage.fromURL/fromBlob to avoid the transformers sharp mock.
-  const { data: pixels, info } = await sharp(context.buffer)
-    .resize(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, { fit: 'fill' })
-    .removeAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  const n = MODEL_INPUT_SIZE * MODEL_INPUT_SIZE;
-  const inputData = new Float32Array(3 * n);
-  const ch = info.channels;
-  for (let i = 0; i < n; i++) {
-    inputData[i]         = (pixels[i * ch]     / 255 - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
-    inputData[i + n]     = (pixels[i * ch + 1] / 255 - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
-    inputData[i + 2 * n] = (pixels[i * ch + 2] / 255 - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
-  }
-
-  const pixel_values = new Tensor('float32', inputData, [1, 3, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE]);
-
-  const tPreprocess = Date.now();
+  // Pass image as a base64 data URL. The pipeline handles its own preprocessing
+  // (resize to 1024×1024, normalization). We avoid Sharp preprocessing here so
+  // we don't conflict with the pipeline's internal image handling.
+  const dataUrl = `data:image/jpeg;base64,${context.buffer.toString('base64')}`;
 
   // Run inference.
-  let outputs;
+  let results;
   try {
-    outputs = await model({ pixel_values });
+    results = await pipe(dataUrl);
   } catch (e) {
     console.warn(`[ml_subject] inference failed: ${e.message} — skipping`);
     context.debug.ml_subject = { error: `inference: ${e.message}`, timing: { total: Date.now() - t0 } };
@@ -160,21 +144,27 @@ async function mlSubjectProcessor(context, {
 
   const tInfer = Date.now();
 
-  // Extract mask. RMBG-1.4 output tensor may be named 'output' or be the first value.
-  const maskTensor = outputs.output ?? Object.values(outputs)[0];
-  if (!maskTensor) {
-    console.warn('[ml_subject] no output tensor — skipping');
-    context.debug.ml_subject = { error: 'no output tensor', timing: { total: Date.now() - t0 } };
+  // The background-removal pipeline returns [{score, label, mask}] where mask
+  // is a RawImage (grayscale, values 0–255). Extract the first result's mask.
+  const result = Array.isArray(results) ? results[0] : results;
+  if (!result || !result.mask) {
+    console.warn('[ml_subject] no mask in pipeline result — skipping');
+    context.debug.ml_subject = { error: 'no mask in result', result: JSON.stringify(result), timing: { total: Date.now() - t0 } };
     return context;
   }
-  const mask = maskTensor.data;  // Float32Array [MODEL_INPUT_SIZE × MODEL_INPUT_SIZE]
+
+  const maskImg  = result.mask;
+  const maskData = maskImg.data;   // Uint8ClampedArray or similar, grayscale 0–255
+  const maskW    = maskImg.width;
+  const maskH    = maskImg.height;
+  const maskThresh = Math.round(threshold * 255);
 
   // Find bounding box of foreground pixels (mask value >= threshold).
-  let minX = MODEL_INPUT_SIZE, minY = MODEL_INPUT_SIZE, maxX = -1, maxY = -1;
+  let minX = maskW, minY = maskH, maxX = -1, maxY = -1;
   let fgCount = 0;
-  for (let y = 0; y < MODEL_INPUT_SIZE; y++) {
-    for (let x = 0; x < MODEL_INPUT_SIZE; x++) {
-      if (mask[y * MODEL_INPUT_SIZE + x] >= threshold) {
+  for (let y = 0; y < maskH; y++) {
+    for (let x = 0; x < maskW; x++) {
+      if (maskData[y * maskW + x] >= maskThresh) {
         fgCount++;
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
@@ -188,14 +178,16 @@ async function mlSubjectProcessor(context, {
     console.log('[ml_subject] no foreground detected — focusWindow unchanged');
     context.debug.ml_subject = {
       detected: false,
-      timing: { total: Date.now() - t0, load: tLoad - t0, preprocess: tPreprocess - tLoad, infer: tInfer - tPreprocess },
+      timing: { total: Date.now() - t0, load: tLoad - t0, infer: tInfer - tLoad },
     };
     return context;
   }
 
-  // Project bounding box to original image coordinates + expand by padFraction.
-  const scaleX = origW / MODEL_INPUT_SIZE;
-  const scaleY = origH / MODEL_INPUT_SIZE;
+  // Project bounding box to original image coordinates.
+  // The background-removal pipeline returns a mask at the original image size,
+  // so scale from maskW/maskH → origW/origH (usually 1:1, but use actual mask dims).
+  const scaleX = origW / maskW;
+  const scaleY = origH / maskH;
   const bboxW  = (maxX - minX) * scaleX;
   const bboxH  = (maxY - minY) * scaleY;
   const padX   = Math.round(bboxW * padFraction);
@@ -214,16 +206,17 @@ async function mlSubjectProcessor(context, {
 
   const tEnd = Date.now();
   console.log(
-    `[ml_subject] fg=${fgCount}px mask(${minX},${minY}→${maxX},${maxY})` +
+    `[ml_subject] fg=${fgCount}px mask${maskW}×${maskH}(${minX},${minY}→${maxX},${maxY})` +
     ` → orig window(${wx},${wy} ${wr-wx}×${wb-wy})` +
-    ` [load=${tLoad-t0}ms pre=${tPreprocess-tLoad}ms infer=${tInfer-tPreprocess}ms post=${tEnd-tInfer}ms]`
+    ` [load=${tLoad-t0}ms infer=${tInfer-tLoad}ms post=${tEnd-tInfer}ms]`
   );
 
   context.debug.ml_subject = {
-    timing:    { total: tEnd - t0, load: tLoad - t0, preprocess: tPreprocess - tLoad, infer: tInfer - tPreprocess, postprocess: tEnd - tInfer },
+    timing:    { total: tEnd - t0, load: tLoad - t0, infer: tInfer - tLoad, postprocess: tEnd - tInfer },
     detected:  true,
     fgPixels:  fgCount,
-    bbox1024:  { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
+    bboxMask:  { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
+    maskSize:  { w: maskW, h: maskH },
     window:    { ...context.focusWindow },
   };
 
