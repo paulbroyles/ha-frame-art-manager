@@ -32,14 +32,28 @@ const sharp = require('sharp');
  * no separate frame detection pass, no boundary coordinates, no thresholds to tune.
  *
  * options:
- *   tileSize  8           Tile size in working-resolution pixels. Smaller tiles
- *                         give finer centroid resolution; larger tiles are faster
- *                         and more noise-resistant.
- *   strategy  'attention' Sharp resize position for the final output step.
+ *   tileSize       8           Tile size in working-resolution pixels. Smaller tiles
+ *                              give finer centroid resolution; larger tiles are faster
+ *                              and more noise-resistant.
+ *   strategy       'attention' Sharp resize position for the final output step.
+ *   borderWeight   0.2         Weight multiplier (0–1) for tiles inside the border
+ *                              band. Lower values suppress frame material attracting
+ *                              the centroid. 1.0 disables border downweighting.
+ *   borderBandFrac 0.12        Width of the downweighted border band, as a fraction
+ *                              of the working-resolution image dimension per side.
+ *   attentionWindow 1.0        Extract a region this many times larger than the
+ *                              target, then let Sharp's attention strategy find the
+ *                              most salient sub-region within it. Values > 1.0 give
+ *                              Sharp room to locate faces, subjects, and focal points
+ *                              that coherence (variance-only) may miss. Clamped so
+ *                              the window never exceeds the full image.
  */
 async function coherenceCropProcessor(context, {
   tileSize = 8,
   strategy = 'attention',
+  borderWeight = 0.2,
+  borderBandFrac = 0.12,
+  attentionWindow = 1.0,
 } = {}) {
   const t0 = Date.now();
 
@@ -84,17 +98,40 @@ async function coherenceCropProcessor(context, {
     return (sum2 / n) - mean * mean;
   }
 
-  // Step 2+3: variance-weighted centroid.
+  // Step 2+3: variance-weighted centroid, with optional border downweighting.
   //
-  // Weight per tile = sqrt(variance). sqrt compresses extreme values — a single
-  // very sharp edge or artifact won't dominate — while still pulling strongly
-  // toward complex painting content (var ~200–2000) over uniform frame material
-  // (var ~0–50). No threshold, no classification: the center of mass naturally
-  // falls in the painting region.
+  // Weight per tile = sqrt(variance) × borderFactor.
+  //
+  // sqrt(variance) compresses extreme values — a single very sharp edge or
+  // artifact won't dominate — while still pulling strongly toward complex
+  // painting content (var ~200–2000) over uniform frame material (var ~0–50).
+  //
+  // borderFactor: tiles within `borderBandFrac` of any edge get their weight
+  // multiplied by `borderWeight` (default 0.2). This suppresses frame material
+  // (wood, matte, gilding) that sits at the perimeter from attracting the
+  // centroid, without needing explicit frame boundary detection. The multiplier
+  // ramps linearly from borderWeight at the outermost tile row/column to 1.0
+  // at the inner edge of the border band.
+  const borderBandX = Math.max(1, Math.round(numTilesX * borderBandFrac));
+  const borderBandY = Math.max(1, Math.round(numTilesY * borderBandFrac));
+  const bw = Math.min(1, Math.max(0, borderWeight));
+
+  function borderFactor(tx, ty) {
+    if (bw >= 1) return 1;
+    // Distance from nearest border edge (in tile units), capped at band width.
+    const distX = Math.min(tx, numTilesX - 1 - tx);
+    const distY = Math.min(ty, numTilesY - 1 - ty);
+    const fracX = distX < borderBandX ? distX / borderBandX : 1;
+    const fracY = distY < borderBandY ? distY / borderBandY : 1;
+    // Use min: a tile in the corner of both bands gets the lowest factor.
+    const frac = Math.min(fracX, fracY);
+    return bw + (1 - bw) * frac;
+  }
+
   let totalW = 0, cx = 0, cy = 0;
   for (let ty = 0; ty < numTilesY; ty++) {
     for (let tx = 0; tx < numTilesX; tx++) {
-      const w = Math.sqrt(tileVar(tx, ty));
+      const w = Math.sqrt(tileVar(tx, ty)) * borderFactor(tx, ty);
       totalW += w;
       cx += (tx + 0.5) * w;  // tile center coordinates
       cy += (ty + 0.5) * w;
@@ -109,11 +146,22 @@ async function coherenceCropProcessor(context, {
   const origCx = Math.round(cx * effTile * scaleX);
   const origCy = Math.round(cy * effTile * scaleY);
 
-  // Step 5: place target rectangle centered at centroid, clamped to image bounds.
-  const extractLeft = Math.max(0, Math.min(origW - targetW, Math.round(origCx - targetW / 2)));
-  const extractTop  = Math.max(0, Math.min(origH - targetH, Math.round(origCy - targetH / 2)));
-  const extractW    = Math.min(targetW, origW - extractLeft);
-  const extractH    = Math.min(targetH, origH - extractTop);
+  // Step 5: place extraction rectangle centered at centroid, clamped to image bounds.
+  //
+  // When attentionWindow > 1: extract a larger window, then let Sharp's attention
+  // strategy find the most salient sub-crop within it. This gives Sharp room to
+  // locate faces and focal points that coherence (variance only) may miss.
+  // The window is scaled symmetrically and clamped so it never exceeds the
+  // original image. Because Sharp will resize to targetW×targetH with fit:'cover',
+  // the extra window area is used for attention scoring only.
+  const winScale = Math.max(1, attentionWindow);
+  const windowW = Math.min(origW, Math.round(targetW * winScale));
+  const windowH = Math.min(origH, Math.round(targetH * winScale));
+
+  const extractLeft = Math.max(0, Math.min(origW - windowW, Math.round(origCx - windowW / 2)));
+  const extractTop  = Math.max(0, Math.min(origH - windowH, Math.round(origCy - windowH / 2)));
+  const extractW    = Math.min(windowW, origW - extractLeft);
+  const extractH    = Math.min(windowH, origH - extractTop);
 
   // Centroid offset from geometric center — indicates how far the crop was pulled
   // toward the painting. Zero = symmetric content; nonzero = asymmetric frame.
@@ -124,6 +172,7 @@ async function coherenceCropProcessor(context, {
     `[coherence_crop] work=${workW}×${workH} tiles=${numTilesX}×${numTilesY}` +
     ` centroid=(${cx.toFixed(1)}t,${cy.toFixed(1)}t) → orig(${origCx},${origCy})` +
     ` offset from center=(${centerOffsetX > 0 ? '+' : ''}${centerOffsetX},${centerOffsetY > 0 ? '+' : ''}${centerOffsetY})` +
+    ` borderWeight=${bw} window=${winScale.toFixed(2)}x` +
     ` → extract(left=${extractLeft},top=${extractTop} ${extractW}×${extractH}) → ${targetW}×${targetH}`
   );
 
@@ -151,6 +200,9 @@ async function coherenceCropProcessor(context, {
     centroid: { tileX: cx, tileY: cy, origX: origCx, origY: origCy, offsetX: centerOffsetX, offsetY: centerOffsetY },
     extract:  { left: extractLeft, top: extractTop, width: extractW, height: extractH },
     strategy,
+    borderWeight: bw,
+    borderBandFrac,
+    attentionWindow: winScale,
   };
 
   console.log(`[coherence_crop timing] decode=${tDecode-t0}ms centroid=${tCentroid-tDecode}ms encode=${tEnd-tCentroid}ms total=${tEnd-t0}ms`);
