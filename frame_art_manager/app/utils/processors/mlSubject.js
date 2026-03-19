@@ -6,9 +6,7 @@
 // globalThis[Symbol.for('onnxruntime')]. In a browser this is populated by
 // onnxruntime-web's own init code; in Node.js it is not. The IIFE below sets it
 // synchronously at module load time — before the first dynamic import of the
-// transformers module evaluates. Uses the /wasm subpath specifically; the default
-// entry is the native-first Node.js build which tries to fetch WASM from an
-// https:// CDN URL that Node.js ESM rejects.
+// transformers module evaluates.
 //
 // This must be at the top of the file so it runs when pipeline.js requires
 // this module, which is before mlSubjectProcessor() is ever called.
@@ -16,11 +14,17 @@
   const sym = Symbol.for('onnxruntime');
   if (!(sym in globalThis)) {
     try {
-      // Must use the /wasm subpath (dist/ort.wasm.min.js) — the default
-      // onnxruntime-web entry is the native-first Node.js build which tries
-      // to fetch WASM from an https:// CDN URL that Node.js ESM rejects.
-      const ortWasm = require('onnxruntime-web/wasm');
-      globalThis[sym] = ortWasm.default ?? ortWasm;
+      // Use the default onnxruntime-web entry. The /wasm subpath uses blob: URLs
+      // which Node.js ESM rejects; the default entry uses https: by default but
+      // env.wasm.wasmPaths redirects it to a local file:// URL instead.
+      const ortWeb = require('onnxruntime-web');
+      const ortObj = ortWeb.default ?? ortWeb;
+      const wasmDistDir = require('url').pathToFileURL(
+        require('path').dirname(require.resolve('onnxruntime-web')) + require('path').sep
+      ).href;
+      ortObj.env.wasm.wasmPaths = wasmDistDir;
+      ortObj.env.wasm.numThreads = 1;
+      globalThis[sym] = ortObj;
     } catch (_) {}
   }
   // Expose sharp to the transformers.web.js bundle (Patch 3 uses this via
