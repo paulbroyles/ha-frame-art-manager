@@ -99,6 +99,8 @@ const IMAGE_PROCESSING_SCHEMA = {
           description: 'Mask confidence above which a pixel is considered foreground (0–1).' },
         { key: 'padFraction', label: 'Padding', type: 'number', default: 0.10,
           description: 'Expand the detected bounding box by this fraction of its dimension on each edge.' },
+        { key: 'headFraction', label: 'Head Fraction', type: 'number', default: 0.35,
+          description: 'Use only the top fraction of the detected bounding box height. RMBG detects the full figure; 0.35 limits the window to the upper 35% where the face/head typically appears. Set to 1.0 to use the full bounding box.' },
       ] },
     { value: 'peak_variance', label: 'Peak Variance — find the most densely complex compact region and set focus window for downstream crop processors',
       options: [
