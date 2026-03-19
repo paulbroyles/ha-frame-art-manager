@@ -54,7 +54,7 @@ const sharp = require('sharp');
  */
 async function scoredCropProcessor(context, {
   numSizes          = 8,
-  minSizeFrac       = 0.40,
+  minSizeFrac       = 0.65,
   tileStride        = 8,
   edgeVarThreshold  = 200,
   interiorVarTarget = 800,

@@ -100,8 +100,8 @@ const IMAGE_PROCESSING_SCHEMA = {
           description: 'Local variance below this = frame-like edge material. Lower = stricter (may miss textured frames). Higher = more permissive.' },
         { key: 'interiorVarTarget', label: 'Interior Complexity Target', type: 'number', default: 800,
           description: 'Local variance level that counts as fully complex painting content. Raise for very flat or minimalist paintings.' },
-        { key: 'minSizeFrac', label: 'Min Candidate Size', type: 'number', default: 0.40,
-          description: 'Smallest candidate rectangle as fraction of image dimension (0.2–0.8). Lower allows finding paintings inside very wide frames.' },
+        { key: 'minSizeFrac', label: 'Min Candidate Size', type: 'number', default: 0.65,
+          description: 'Smallest candidate rectangle as fraction of image dimension (0.2–0.9). Lower allows finding paintings inside very wide frames but risks over-zooming. 0.65–0.75 works well for typical museum frames.' },
         { key: 'strategy', label: 'Crop Strategy', type: 'select', default: 'centre',
           description: 'How to position the final resize. Centre is recommended since candidate selection already handles spatial positioning; attention/entropy can cause unintended drift toward frame material.',
           choices: [
