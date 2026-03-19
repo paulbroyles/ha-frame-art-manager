@@ -29,9 +29,10 @@
  */
 
 const sharp = require('sharp');
-const { backgroundStripProcessor } = require('./processors/backgroundStrip');
-const { sharpCropProcessor }       = require('./processors/sharpCrop');
-const { PRE_PROCESSOR_WRAPPERS }   = require('./processors/preprocessorWrappers');
+const { backgroundStripProcessor }  = require('./processors/backgroundStrip');
+const { sharpCropProcessor }        = require('./processors/sharpCrop');
+const { frameAwareCropProcessor }   = require('./processors/frameAwareCrop');
+const { PRE_PROCESSOR_WRAPPERS }    = require('./processors/preprocessorWrappers');
 
 // ── Target dimensions ─────────────────────────────────────────────────────────
 
@@ -123,6 +124,12 @@ const PROCESSORS = {
     fn: sharpCropProcessor,
     type: 'aspect_crop',
     label: 'Sharp Crop — scale and crop to TV aspect ratio',
+  },
+  frame_aware_crop: {
+    fn: frameAwareCropProcessor,
+    type: 'unified_frame_crop',
+    label: 'Frame-Aware Crop — detect frame and fit to TV aspect ratio in one informed pass',
+    replaces: ['frame_detect', 'aspect_crop'],
   },
   // Pre-processor wrappers (frame detection algorithms)
   ...Object.fromEntries(

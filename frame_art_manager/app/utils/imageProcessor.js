@@ -85,6 +85,28 @@ const IMAGE_PROCESSING_SCHEMA = {
     { value: 'trim',             label: 'Sharp Trim — background strip only (same as None; redundant with automatic Stage 1)' },
     // TODO (Option 3): ML Segmentation — handles irregular/ornate frames; see docs/ROADMAP.md
   ],
+  unifiedProcessors: [
+    { value: 'frame_aware_crop', label: 'Frame-Aware Crop — detect frame and fit to TV aspect ratio in one informed pass',
+      replaces: ['frame_detect', 'aspect_crop'],
+      options: [
+        { key: 'strategy', label: 'Crop Strategy', type: 'select', default: 'attention',
+          description: 'How to position the crop within the painting area when fitting to the TV aspect ratio.',
+          choices: [
+            { value: 'attention', label: 'Attention — focus on faces and salient regions (recommended)' },
+            { value: 'entropy',   label: 'Entropy — focus on high-detail, textured regions' },
+            { value: 'centre',    label: 'Center — crop from the geometric center' },
+          ] },
+        { key: 'detectionMode', label: 'Detection Mode', type: 'select', default: 'combined',
+          description: 'Whether to use luminance, color (chromaticity), or both for frame detection.',
+          choices: [
+            { value: 'combined',  label: 'Combined (default) — luminance + color analysis' },
+            { value: 'luminance', label: 'Luminance only' },
+            { value: 'color',     label: 'Color only' },
+          ] },
+        { key: 'safetyMargin', label: 'Safety Margin', type: 'number', default: 0.01,
+          description: 'Extra inward fraction added on critical edges where frame detection was uncertain (0.0–0.05).' },
+      ] },
+  ],
   cropEngines: [
     { value: 'sharp', label: 'Sharp (built-in)',
       options: [

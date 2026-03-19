@@ -259,6 +259,33 @@ needs a `POST /api/shuffle/confirm` (or equivalent) that the integration calls a
 send, so the add-on can record what was actually displayed. Once that exists, the integration can
 stop passing `recentImages` and the display log query can move to the add-on side.
 
+### Multi-pass dezoomify for zoomable image sources
+
+**Idea**: For sources that deliver zoomable images (currently Google Arts & Culture via dezoomify),
+compute frame boundaries on a low-resolution first-pass image, then request exactly the resolution
+needed for the cropped painting area to be 3840×2160 — eliminating unnecessary over-downloading
+and avoiding any post-dezoomify downscaling.
+
+**Current approach**: Download at whatever dezoomify resolves (often 8K+), then pipeline downsamples
+for frame detection and crops the full-res image.
+
+**Proposed approach**:
+1. Download a low-res version (e.g., 1200px longest edge) for frame detection
+2. Run frame-aware crop processor → outputs painting region as a fraction of original image
+3. Compute what dezoomify output resolution is needed so the painting subregion == 3840×2160
+4. Re-request via dezoomify at that exact resolution
+5. Extract painting region from the result → exactly 4K, no further scaling needed
+
+**Dependencies**:
+- Requires frame-aware crop (Part B) to expose painting region bounds, not just final buffer
+- Requires verification that dezoomify's `--max-width`/`--max-height` flags deliver reliable
+  output at the requested resolution (IIIF server behavior varies)
+- Pipeline and source fetcher would need to cooperate (two-phase fetch model)
+
+**When to implement**: After frame-aware crop is complete and its output shape (painting bounds
+as fractions) is defined. Target as a dezoomify utility enhancement in `utils/dezoomify.js` +
+source-level coordination in `google_arts.js`.
+
 ### Consolidate SOURCE_DISPLAY_NAMES with BUILTIN_SOURCES
 
 `artwork.js` has a hardcoded 3-entry `SOURCE_DISPLAY_NAMES` map for the "View on →" link. This
