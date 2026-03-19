@@ -19,8 +19,6 @@
 })();
 
 const sharp = require('sharp');
-const path  = require('path');
-const fs    = require('fs');
 
 /**
  * ML Subject window-setter processor.
@@ -73,9 +71,11 @@ function getModel(dtype = 'q8') {
       const t0 = Date.now();
       console.log('[ml_subject] loading RMBG-1.4 model...');
 
-      // Set cache directory to HA persistent storage before first import.
-      // Must be set on the env object before the model is loaded.
-      const tf = require('@huggingface/transformers');
+      // Dynamic import required: the browser bundle (@huggingface/transformers web
+      // entry point) is an ES Module and cannot be require()'d from CJS.
+      const tf = await import('@huggingface/transformers');
+
+      // Set cache directory to HA persistent storage before loading the model.
       tf.env.cacheDir = '/data/huggingface';
 
       const model = await tf.AutoModelForImageSegmentation.from_pretrained(MODEL_ID, {
@@ -84,7 +84,9 @@ function getModel(dtype = 'q8') {
       });
 
       console.log(`[ml_subject] RMBG-1.4 ready in ${Date.now() - t0}ms`);
-      return model;
+      // Return model + Tensor class together so the processor doesn't need a
+      // second import() call.
+      return { model, Tensor: tf.Tensor };
     })();
 
     _modelPromise.catch((e) => {
@@ -95,10 +97,10 @@ function getModel(dtype = 'q8') {
   return _modelPromise;
 }
 
-// Pre-warm: start loading at module load time so the first pipeline request
-// doesn't wait for the full model load. Errors are expected before the model
-// is cached (/data/huggingface may not exist yet) — swallow them here.
-getModel().catch(() => {});
+// Pre-warm: kick off model loading at module load time. Uses dynamic import()
+// which is valid in CJS. Errors are expected on first startup (model not yet
+// cached) — swallow them here; each request retries via getModel().
+import('@huggingface/transformers').catch(() => {});
 
 
 // ── Processor ─────────────────────────────────────────────────────────────────
@@ -113,9 +115,9 @@ async function mlSubjectProcessor(context, {
   const origH = context.height;
 
   // Load model (cached after first call).
-  let model;
+  let model, Tensor;
   try {
-    model = await getModel(dtype);
+    ({ model, Tensor } = await getModel(dtype));
   } catch (e) {
     console.warn(`[ml_subject] model unavailable: ${e.message} — skipping`);
     context.debug.ml_subject = { error: e.message, timing: { total: Date.now() - t0 } };
@@ -142,7 +144,6 @@ async function mlSubjectProcessor(context, {
     inputData[i + 2 * n] = (pixels[i * ch + 2] / 255 - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
   }
 
-  const { Tensor } = require('@huggingface/transformers');
   const pixel_values = new Tensor('float32', inputData, [1, 3, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE]);
 
   const tPreprocess = Date.now();
