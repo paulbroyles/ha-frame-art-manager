@@ -6,19 +6,25 @@
 // globalThis[Symbol.for('onnxruntime')]. In a browser this is populated by
 // onnxruntime-web's own init code; in Node.js it is not. The IIFE below sets it
 // synchronously at module load time — before the first dynamic import of the
-// transformers module evaluates.
+// transformers module evaluates. Uses the /wasm subpath specifically; the default
+// entry is the native-first Node.js build which tries to fetch WASM from an
+// https:// CDN URL that Node.js ESM rejects.
 //
 // This must be at the top of the file so it runs when pipeline.js requires
 // this module, which is before mlSubjectProcessor() is ever called.
 (function () {
-  try {
-    const ort = require('onnxruntime-web');
-    const sym = Symbol.for('onnxruntime');
-    if (!globalThis[sym]) globalThis[sym] = ort;
-  } catch (_) {}
-  // Expose sharp to the transformers.web.js bundle context (Patch 3 uses this
-  // via globalThis.__nativeSharp instead of require() which is unavailable
-  // inside webpack module factories).
+  const sym = Symbol.for('onnxruntime');
+  if (!(sym in globalThis)) {
+    try {
+      // Must use the /wasm subpath (dist/ort.wasm.min.js) — the default
+      // onnxruntime-web entry is the native-first Node.js build which tries
+      // to fetch WASM from an https:// CDN URL that Node.js ESM rejects.
+      const ortWasm = require('onnxruntime-web/wasm');
+      globalThis[sym] = ortWasm.default ?? ortWasm;
+    } catch (_) {}
+  }
+  // Expose sharp to the transformers.web.js bundle (Patch 3 uses this via
+  // globalThis.__nativeSharp; require() is unavailable inside webpack factories).
   try {
     if (!globalThis.__nativeSharp) globalThis.__nativeSharp = require('sharp');
   } catch (_) {}
