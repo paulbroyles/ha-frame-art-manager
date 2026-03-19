@@ -110,6 +110,17 @@ const IMAGE_PROCESSING_SCHEMA = {
             { value: 'centre',    label: 'Center — crop from the geometric center' },
           ] },
       ] },
+    { value: 'coherence_crop', label: 'Coherence Crop — variance-weighted centroid; centers crop on the most complex region; frame excluded naturally with no boundary detection',
+      replaces: ['frame_detect', 'aspect_crop'],
+      options: [
+        { key: 'strategy', label: 'Crop Strategy', type: 'select', default: 'attention',
+          description: 'How to position the final resize. Minimal effect since the centroid placement drives crop positioning.',
+          choices: [
+            { value: 'attention', label: 'Attention — focus on faces and salient regions' },
+            { value: 'entropy',   label: 'Entropy — focus on high-detail, textured regions' },
+            { value: 'centre',    label: 'Center — crop from the geometric center' },
+          ] },
+      ] },
     { value: 'frame_aware_crop', label: 'Frame-Aware Crop — detect frame and fit to TV aspect ratio in one informed pass',
       replaces: ['frame_detect', 'aspect_crop'],
       options: [
