@@ -14897,41 +14897,64 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
     return opts;
   }
 
-  const preProcessors  = webSourceImageProcessingSchema.preProcessors || [];
-  const cropEngines    = webSourceImageProcessingSchema.cropEngines   || [];
+  const preProcessors     = webSourceImageProcessingSchema.preProcessors     || [];
+  const cropEngines       = webSourceImageProcessingSchema.cropEngines       || [];
+  const unifiedProcessors = webSourceImageProcessingSchema.unifiedProcessors || [];
   const currentPreProc = webSourcesConfig?.imageProcessing?.preProcessor  || 'corner_consensus';
   const currentEngine  = webSourcesConfig?.imageProcessing?.cropEngine    || 'sharp';
-  const currentPreProcOpts   = webSourcesConfig?.imageProcessing?.preProcessorOptions  || {};
-  const currentCropEngOpts   = webSourcesConfig?.imageProcessing?.cropEngineOptions    || {};
+  const currentPreProcOpts      = webSourcesConfig?.imageProcessing?.preProcessorOptions      || {};
+  const currentCropEngOpts      = webSourcesConfig?.imageProcessing?.cropEngineOptions        || {};
+  const currentUnifiedProcessor = webSourcesConfig?.imageProcessing?.unifiedProcessor        ?? null;
+  const currentUnifiedOpts      = webSourcesConfig?.imageProcessing?.unifiedProcessorOptions  || {};
   const currentSkipLowRes    = webSourcesConfig?.imageProcessing?.skipLowRes   ?? false;
   const currentMinResolution = webSourcesConfig?.imageProcessing?.minResolution ?? 1080;
 
-  const currentPreProcSchema = preProcessors.find(p => p.value === currentPreProc);
-  const currentEngineSchema  = cropEngines.find(e => e.value === currentEngine);
+  const currentPreProcSchema    = preProcessors.find(p => p.value === currentPreProc);
+  const currentEngineSchema     = cropEngines.find(e => e.value === currentEngine);
+  const currentUnifiedSchema    = unifiedProcessors.find(u => u.value === currentUnifiedProcessor) || unifiedProcessors[0];
+  const isUnifiedMode = !!currentUnifiedProcessor;
 
-  if (preProcessors.length > 0 || cropEngines.length > 0) {
+  if (preProcessors.length > 0 || cropEngines.length > 0 || unifiedProcessors.length > 0) {
     const processingHtml = `
       <div class="ws-global-setting" style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color,#e0e0e0);">
-        ${preProcessors.length > 0 ? `
-          <label class="ws-global-label">Frame Detection</label>
-          <p class="pool-health-description">Detect and remove decorative frames or borders from artwork images before cropping.</p>
-          <select id="ws-pre-processor-select" class="ws-select">
-            ${preProcessors.map(p => `<option value="${p.value}" ${currentPreProc === p.value ? 'selected' : ''}>${escapeHtml(p.label)}</option>`).join('')}
-          </select>
-          <div id="ws-pre-processor-options">
-            ${renderProcessorOptionsPanel(currentPreProcSchema, currentPreProcOpts, 'ws-pre-processor-options', preProcessors)}
-          </div>
-        ` : ''}
-        ${cropEngines.length > 0 ? `
-          <label class="ws-global-label" style="margin-top:16px;display:block;">Crop Engine</label>
-          <p class="pool-health-description">How to scale and crop the image to fit the TV's 4K aspect ratio.</p>
-          <select id="ws-crop-engine-select" class="ws-select">
-            ${cropEngines.map(e => `<option value="${e.value}" ${currentEngine === e.value ? 'selected' : ''}>${escapeHtml(e.label)}</option>`).join('')}
-          </select>
-          <div id="ws-crop-engine-options">
-            ${renderProcessorOptionsPanel(currentEngineSchema, currentCropEngOpts, 'ws-crop-engine-options', preProcessors)}
-          </div>
-        ` : ''}
+        <label class="ws-global-label">Image Processing Mode</label>
+        <p class="pool-health-description">Unified mode detects frames and crops to the TV aspect ratio in a single informed pass. Classic mode runs frame detection and cropping as separate steps.</p>
+        <div style="display:flex;gap:8px;margin-top:4px;">
+          <button id="ws-mode-unified" class="ws-mode-btn ${isUnifiedMode ? 'ws-mode-btn-active' : ''}" style="flex:1;padding:8px 12px;border:1px solid var(--border-color,#ddd);border-radius:6px;cursor:pointer;background:${isUnifiedMode ? 'var(--primary-color,#03a9f4)' : 'var(--card-background-color,#fff)'};color:${isUnifiedMode ? '#fff' : 'inherit'};">Unified <span style="font-size:0.8em;opacity:0.8;">(recommended)</span></button>
+          <button id="ws-mode-classic" class="ws-mode-btn ${!isUnifiedMode ? 'ws-mode-btn-active' : ''}" style="flex:1;padding:8px 12px;border:1px solid var(--border-color,#ddd);border-radius:6px;cursor:pointer;background:${!isUnifiedMode ? 'var(--primary-color,#03a9f4)' : 'var(--card-background-color,#fff)'};color:${!isUnifiedMode ? '#fff' : 'inherit'};">Classic</button>
+        </div>
+
+        <div id="ws-unified-section" style="display:${isUnifiedMode ? 'block' : 'none'};">
+          ${unifiedProcessors.length > 0 ? `
+            <div id="ws-unified-processor-options" style="margin-top:12px;">
+              ${renderProcessorOptionsPanel(currentUnifiedSchema, currentUnifiedOpts, 'ws-unified-processor-options', preProcessors)}
+            </div>
+          ` : ''}
+        </div>
+
+        <div id="ws-classic-section" style="display:${isUnifiedMode ? 'none' : 'block'};">
+          ${preProcessors.length > 0 ? `
+            <label class="ws-global-label" style="margin-top:16px;display:block;">Frame Detection</label>
+            <p class="pool-health-description">Detect and remove decorative frames or borders from artwork images before cropping.</p>
+            <select id="ws-pre-processor-select" class="ws-select">
+              ${preProcessors.map(p => `<option value="${p.value}" ${currentPreProc === p.value ? 'selected' : ''}>${escapeHtml(p.label)}</option>`).join('')}
+            </select>
+            <div id="ws-pre-processor-options">
+              ${renderProcessorOptionsPanel(currentPreProcSchema, currentPreProcOpts, 'ws-pre-processor-options', preProcessors)}
+            </div>
+          ` : ''}
+          ${cropEngines.length > 0 ? `
+            <label class="ws-global-label" style="margin-top:16px;display:block;">Crop Engine</label>
+            <p class="pool-health-description">How to scale and crop the image to fit the TV's 4K aspect ratio.</p>
+            <select id="ws-crop-engine-select" class="ws-select">
+              ${cropEngines.map(e => `<option value="${e.value}" ${currentEngine === e.value ? 'selected' : ''}>${escapeHtml(e.label)}</option>`).join('')}
+            </select>
+            <div id="ws-crop-engine-options">
+              ${renderProcessorOptionsPanel(currentEngineSchema, currentCropEngOpts, 'ws-crop-engine-options', preProcessors)}
+            </div>
+          ` : ''}
+        </div>
+
         <label class="ws-global-label" style="margin-top:16px;display:block;">Minimum Resolution</label>
         <p class="pool-health-description">Skip images whose shorter side is below this threshold (pixels) and fetch a different one. Uses up to 3 attempts. Useful for sources that occasionally serve very small images.</p>
         <div style="display:flex;align-items:center;gap:12px;margin-top:4px;">
@@ -14948,6 +14971,69 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
         </div>
       </div>`;
     container.insertAdjacentHTML('beforeend', processingHtml);
+
+    // Helper: switch between Unified and Classic modes.
+    async function switchMode(toUnified) {
+      const unifiedSection = document.getElementById('ws-unified-section');
+      const classicSection = document.getElementById('ws-classic-section');
+      const btnUnified = document.getElementById('ws-mode-unified');
+      const btnClassic = document.getElementById('ws-mode-classic');
+      if (unifiedSection) unifiedSection.style.display = toUnified ? 'block' : 'none';
+      if (classicSection) classicSection.style.display = toUnified ? 'none' : 'block';
+      const activeStyle = 'var(--primary-color,#03a9f4)';
+      const inactiveStyle = 'var(--card-background-color,#fff)';
+      if (btnUnified) { btnUnified.style.background = toUnified ? activeStyle : inactiveStyle; btnUnified.style.color = toUnified ? '#fff' : 'inherit'; }
+      if (btnClassic) { btnClassic.style.background = toUnified ? inactiveStyle : activeStyle; btnClassic.style.color = toUnified ? 'inherit' : '#fff'; }
+      try {
+        const unifiedProcessor = toUnified ? (currentUnifiedSchema?.value || unifiedProcessors[0]?.value || null) : null;
+        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ unifiedProcessor, unifiedProcessorOptions: {} }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
+          showToast(toUnified ? 'Switched to Unified mode' : 'Switched to Classic mode');
+        } else {
+          throw new Error(data.error || 'Failed to update setting');
+        }
+      } catch (error) {
+        console.error('Error switching mode:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    }
+
+    document.getElementById('ws-mode-unified')?.addEventListener('click', () => switchMode(true));
+    document.getElementById('ws-mode-classic')?.addEventListener('click', () => switchMode(false));
+
+    // Helper: save unifiedProcessorOptions after any unified processor option changes.
+    async function saveUnifiedProcessorOptions() {
+      const schema = currentUnifiedSchema;
+      const opts = collectProcessorOptions(schema, 'ws-unified-processor-options', preProcessors);
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ unifiedProcessorOptions: opts }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
+          showToast('Processing options updated');
+        } else {
+          throw new Error(data.error || 'Failed to update setting');
+        }
+      } catch (error) {
+        console.error('Error updating unified processor options:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    }
+
+    // Bind listeners for initially rendered unified processor options panel.
+    if (isUnifiedMode) {
+      bindOptionsPanelListeners('ws-unified-processor-options', saveUnifiedProcessorOptions, currentUnifiedSchema, 'ws-unified-processor-options', preProcessors);
+    }
 
     // Helper: save preProcessorOptions after any pre-processor option changes.
     async function savePreProcessorOptions() {
