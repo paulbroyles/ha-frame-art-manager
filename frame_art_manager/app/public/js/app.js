@@ -14940,6 +14940,8 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
   const preProcessors     = webSourceImageProcessingSchema.preProcessors     || [];
   const cropEngines       = webSourceImageProcessingSchema.cropEngines       || [];
   const unifiedProcessors = webSourceImageProcessingSchema.unifiedProcessors || [];
+  const windowSetters     = webSourceImageProcessingSchema.windowSetters     || [];
+  const windowModifiers   = webSourceImageProcessingSchema.windowModifiers   || [];
   const currentSkipLowRes    = webSourcesConfig?.imageProcessing?.skipLowRes   ?? false;
   const currentMinResolution = webSourcesConfig?.imageProcessing?.minResolution ?? 1080;
 
@@ -14975,15 +14977,21 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
       const engine = cropEngines.find(e => e.value === engineKey);
       if (engine) return { ...engine, type: 'aspect_crop' };
     }
+    const windowSetter = windowSetters.find(p => p.value === key);
+    if (windowSetter) return { ...windowSetter, type: 'window_set' };
+    const windowModifier = windowModifiers.find(p => p.value === key);
+    if (windowModifier) return { ...windowModifier, type: 'window_clear', options: [] };
     return { value: key, label: key, type: 'unknown', options: [] };
   }
 
   function getStepTypeBadge(type) {
     const badges = {
-      background_strip:   { text: 'Auto',         color: '#6c757d' },
+      background_strip:   { text: 'Auto',           color: '#6c757d' },
       frame_detect:       { text: 'Frame Detection', color: '#0d6efd' },
-      unified_frame_crop: { text: 'Frame + Crop',  color: '#6f42c1' },
-      aspect_crop:        { text: 'Crop',          color: '#fd7e14' },
+      unified_frame_crop: { text: 'Frame + Crop',   color: '#6f42c1' },
+      aspect_crop:        { text: 'Crop',            color: '#fd7e14' },
+      window_set:         { text: 'Focus Setter',    color: '#20c997' },
+      window_clear:       { text: 'Focus Clear',     color: '#adb5bd' },
     };
     const b = badges[type] || { text: type, color: '#6c757d' };
     return `<span style="font-size:0.75em;padding:2px 6px;border-radius:4px;background:${b.color};color:#fff;margin-left:6px;vertical-align:middle;">${b.text}</span>`;
@@ -15033,6 +15041,12 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
       if (!currentKeys.has(pKey)) {
         options.push({ key: pKey, label: `[Crop] ${e.label.split(' — ')[0]}` });
       }
+    }
+    for (const w of windowSetters) {
+      options.push({ key: w.value, label: `[Focus] ${w.label.split(' — ')[0]}` });
+    }
+    for (const m of windowModifiers) {
+      options.push({ key: m.value, label: `[Focus] ${m.label.split(' — ')[0]}` });
     }
     if (!options.length) return '';
     return `

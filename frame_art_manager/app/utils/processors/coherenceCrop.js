@@ -148,26 +148,33 @@ async function coherenceCropProcessor(context, {
 
   // Focus window override: if an upstream processor (e.g. ml_subject) set a
   // focus window, use its center as the crop anchor instead of the variance centroid.
+  // When a focus window is set we already know where the subject is, so disable
+  // the attention window expansion (use 1.0×) and switch to strategy='centre'.
+  // Leaving attentionWindow > 1 would let Sharp's attention sub-crop drift away
+  // from the focus point toward a more texturally complex region (e.g. the torso).
   let focusSource = null;
+  let effectiveWinScale = Math.max(1, attentionWindow);
+  let effectiveStrategy = strategy;
   if (context.focusWindow) {
     const fw = context.focusWindow;
     origCx = Math.round(fw.x + fw.w / 2);
     origCy = Math.round(fw.y + fw.h / 2);
     focusSource = fw.source;
-    console.log(`[coherence_crop] focus window from '${fw.source}' overrides centroid → (${origCx},${origCy})`);
+    effectiveWinScale = 1.0;
+    effectiveStrategy = 'centre';
+    console.log(`[coherence_crop] focus window from '${fw.source}' overrides centroid → (${origCx},${origCy}) [winScale→1.0, strategy→centre]`);
   }
 
   // Step 5: place extraction rectangle centered at centroid, clamped to image bounds.
   //
-  // When attentionWindow > 1: extract a larger window, then let Sharp's attention
-  // strategy find the most salient sub-crop within it. This gives Sharp room to
-  // locate faces and focal points that coherence (variance only) may miss.
-  // The window is scaled symmetrically and clamped so it never exceeds the
-  // original image. Because Sharp will resize to targetW×targetH with fit:'cover',
-  // the extra window area is used for attention scoring only.
-  const winScale = Math.max(1, attentionWindow);
-  const windowW = Math.min(origW, Math.round(targetW * winScale));
-  const windowH = Math.min(origH, Math.round(targetH * winScale));
+  // When attentionWindow > 1 (and no focus window): extract a larger window, then
+  // let Sharp's attention strategy find the most salient sub-crop within it. This
+  // gives Sharp room to locate faces and focal points that coherence (variance
+  // only) may miss. The window is scaled symmetrically and clamped so it never
+  // exceeds the original image. Because Sharp will resize to targetW×targetH with
+  // fit:'cover', the extra window area is used for attention scoring only.
+  const windowW = Math.min(origW, Math.round(targetW * effectiveWinScale));
+  const windowH = Math.min(origH, Math.round(targetH * effectiveWinScale));
 
   const extractLeft = Math.max(0, Math.min(origW - windowW, Math.round(origCx - windowW / 2)));
   const extractTop  = Math.max(0, Math.min(origH - windowH, Math.round(origCy - windowH / 2)));
@@ -183,7 +190,7 @@ async function coherenceCropProcessor(context, {
     `[coherence_crop] work=${workW}×${workH} tiles=${numTilesX}×${numTilesY}` +
     ` centroid=(${cx.toFixed(1)}t,${cy.toFixed(1)}t) → orig(${origCx},${origCy})` +
     ` offset from center=(${centerOffsetX > 0 ? '+' : ''}${centerOffsetX},${centerOffsetY > 0 ? '+' : ''}${centerOffsetY})` +
-    ` borderWeight=${bw} window=${winScale.toFixed(2)}x` +
+    ` borderWeight=${bw} window=${effectiveWinScale.toFixed(2)}x strategy=${effectiveStrategy}` +
     ` → extract(left=${extractLeft},top=${extractTop} ${extractW}×${extractH}) → ${targetW}×${targetH}`
   );
 
@@ -191,12 +198,12 @@ async function coherenceCropProcessor(context, {
   let result;
   if (extractLeft === 0 && extractTop === 0 && extractW === origW && extractH === origH) {
     result = await sharp(context.buffer)
-      .resize(targetW, targetH, { fit: 'cover', position: strategy })
+      .resize(targetW, targetH, { fit: 'cover', position: effectiveStrategy })
       .toBuffer();
   } else {
     result = await sharp(context.buffer)
       .extract({ left: extractLeft, top: extractTop, width: extractW, height: extractH })
-      .resize(targetW, targetH, { fit: 'cover', position: strategy })
+      .resize(targetW, targetH, { fit: 'cover', position: effectiveStrategy })
       .toBuffer();
   }
   const tEnd = Date.now();
@@ -211,10 +218,10 @@ async function coherenceCropProcessor(context, {
     centroid:    { tileX: cx, tileY: cy, origX: origCx, origY: origCy, offsetX: centerOffsetX, offsetY: centerOffsetY },
     focusSource: focusSource || null,
     extract:     { left: extractLeft, top: extractTop, width: extractW, height: extractH },
-    strategy,
+    strategy: effectiveStrategy,
     borderWeight: bw,
     borderBandFrac,
-    attentionWindow: winScale,
+    attentionWindow: effectiveWinScale,
   };
 
   console.log(`[coherence_crop timing] decode=${tDecode-t0}ms centroid=${tCentroid-tDecode}ms encode=${tEnd-tCentroid}ms total=${tEnd-t0}ms`);

@@ -69,6 +69,13 @@ const sharp = require('sharp');
  *   padFraction  0.10  Expand the detected bounding box by this fraction of its
  *                      dimension on each edge, to include context around the subject.
  *   dtype        'q8'  ONNX model quantization: 'q8' (44 MB) or 'fp32' (175 MB).
+ *
+ * Note: a headFraction parameter existed previously to truncate the bounding box
+ * to the upper N% of the figure to bias toward the face. It was removed because
+ * encoding assumptions about face position within the bounding box is brittle.
+ * Instead, coherence_crop now honours the focus window without attentionWindow
+ * expansion when a focusWindow is set, preventing Sharp from drifting toward the
+ * torso.
  */
 
 const MODEL_ID         = 'briaai/RMBG-1.4';
@@ -123,10 +130,9 @@ import('@huggingface/transformers').catch(() => {});
 // ── Processor ─────────────────────────────────────────────────────────────────
 
 async function mlSubjectProcessor(context, {
-  threshold    = 0.5,
-  padFraction  = 0.10,
-  dtype        = 'q8',
-  headFraction = 0.35,
+  threshold   = 0.5,
+  padFraction = 0.10,
+  dtype       = 'q8',
 } = {}) {
   const t0    = Date.now();
   const origW = context.width;
@@ -215,14 +221,6 @@ async function mlSubjectProcessor(context, {
       timing: { total: Date.now() - t0, load: tLoad - t0, infer: tInfer - tLoad },
     };
     return context;
-  }
-
-  // Truncate the bounding box to the upper headFraction of its height.
-  // RMBG detects the full painted figure as foreground; for a standing portrait
-  // the face is in the top ~35% of the figure bounding box. Limiting the window
-  // to that upper portion biases the downstream crop toward the head.
-  if (headFraction > 0 && headFraction < 1) {
-    maxY = minY + Math.round((maxY - minY) * headFraction);
   }
 
   // Project bounding box to original image coordinates.
