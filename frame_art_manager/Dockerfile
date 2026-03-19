@@ -40,23 +40,23 @@ WORKDIR /app
 # Copy package files
 COPY app/package*.json ./
 
-# Install Node dependencies
-RUN npm ci --only=production
-
-# Alpine compatibility patch for @huggingface/transformers:
-# The package's "node" export condition loads a Node.js-specific bundle that
-# requires onnxruntime-node (glibc binary, incompatible with Alpine musl).
-# Removing it forces Node.js to load the browser/WASM bundle instead, which
-# uses onnxruntime-web (pure WASM, Alpine-safe).
-RUN node -e "\
-const fs=require('fs');\
-const p='node_modules/@huggingface/transformers/package.json';\
-const pkg=JSON.parse(fs.readFileSync(p,'utf8'));\
-function stripNode(o){if(typeof o!=='object'||o===null)return o;const r={};for(const[k,v]of Object.entries(o))if(k!=='node')r[k]=stripNode(v);return r;}\
-if(pkg.exports)pkg.exports=stripNode(pkg.exports);\
-fs.writeFileSync(p,JSON.stringify(pkg,null,2));\
-console.log('Alpine patch: removed node export condition from @huggingface/transformers');\
-"
+# Install Node dependencies, then apply three patches for Alpine/musl compatibility
+# with @huggingface/transformers (which defaults to onnxruntime-node, a glibc binary):
+#
+# Patch 1 — transformers package.json: remove the "node" export condition so Node.js
+# loads transformers.web.js (the web bundle) instead of transformers.node.cjs.
+#
+# Patch 2 — transformers.web.js: in the ORT_SYMBOL branch (taken when mlSubject.js
+# pre-populates globalThis[ORT_SYMBOL] with onnxruntime-web at module load time),
+# the bundle sets ONNX but leaves supportedDevices=[]. Add 'wasm' and 'cpu' so that
+# device:'wasm' passes the deviceToExecutionProviders() check.
+#
+# Patch 3 — transformers.web.js: the web bundle mocks sharp as (ignored), returning {}.
+# Replace with globalThis.__nativeSharp (pre-loaded by the CJS IIFE in mlSubject.js).
+RUN npm ci --only=production && \
+    python3 -c "import json; p='/app/node_modules/@huggingface/transformers/package.json'; d=json.load(open(p)); d['exports'].pop('node', None); json.dump(d, open(p,'w'), indent=2); print('Patch 1: removed node export condition from @huggingface/transformers')" && \
+    python3 -c "p='/app/node_modules/@huggingface/transformers/dist/transformers.web.js'; src=open(p).read(); old='ONNX = globalThis[ORT_SYMBOL];'; new='ONNX = globalThis[ORT_SYMBOL]; if (!supportedDevices.includes(\"wasm\")) { supportedDevices.push(\"wasm\", \"cpu\"); defaultDevices = [\"wasm\"]; }'; assert old in src, 'Patch 2 target not found'; open(p,'w').write(src.replace(old, new, 1)); print('Patch 2: added wasm+cpu to supportedDevices in ORT_SYMBOL branch of transformers.web.js')" && \
+    python3 -c "p='/app/node_modules/@huggingface/transformers/dist/transformers.web.js'; src=open(p).read(); old='/***/ \"?2b25\":\n/*!***********************!*\\\\\n  !*** sharp (ignored) ***!\n  \\\\***********************/\n/***/ (() => {\n\n/* (ignored) */\n\n/***/ }),'; new='/***/ \"?2b25\":\n/*!***********************!*\\\\\n  !*** sharp (ignored) ***!\n  \\\\***********************/\n/***/ ((module) => {\nmodule.exports = globalThis.__nativeSharp;\n/***/ }),'; assert old in src, 'Patch 3 target not found'; open(p,'w').write(src.replace(old, new, 1)); print('Patch 3: replaced sharp (ignored) mock with globalThis.__nativeSharp in transformers.web.js')"
 
 # Copy application files
 COPY app/ ./

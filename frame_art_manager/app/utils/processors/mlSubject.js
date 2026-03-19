@@ -16,6 +16,12 @@
     const sym = Symbol.for('onnxruntime');
     if (!globalThis[sym]) globalThis[sym] = ort;
   } catch (_) {}
+  // Expose sharp to the transformers.web.js bundle context (Patch 3 uses this
+  // via globalThis.__nativeSharp instead of require() which is unavailable
+  // inside webpack module factories).
+  try {
+    if (!globalThis.__nativeSharp) globalThis.__nativeSharp = require('sharp');
+  } catch (_) {}
 })();
 
 const sharp = require('sharp');
