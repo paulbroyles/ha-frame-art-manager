@@ -4,7 +4,7 @@
  * Window Clear processor.
  *
  * Resets context.focusWindow to null, cancelling any focus window set by a
- * preceding window-setter processor (e.g., face_cascade).
+ * preceding window-setter processor (e.g., ml_subject).
  *
  * Useful in pipelines where a window setter should only influence specific
  * downstream steps and not propagate further.

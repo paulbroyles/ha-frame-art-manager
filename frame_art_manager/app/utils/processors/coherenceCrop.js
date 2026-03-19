@@ -146,7 +146,7 @@ async function coherenceCropProcessor(context, {
   let origCx = Math.round(cx * effTile * scaleX);
   let origCy = Math.round(cy * effTile * scaleY);
 
-  // Focus window override: if an upstream processor (e.g. face_cascade) set a
+  // Focus window override: if an upstream processor (e.g. ml_subject) set a
   // focus window, use its center as the crop anchor instead of the variance centroid.
   let focusSource = null;
   if (context.focusWindow) {

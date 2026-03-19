@@ -43,7 +43,7 @@ const { sharpCropProcessor }        = require('./processors/sharpCrop');
 const { frameAwareCropProcessor }   = require('./processors/frameAwareCrop');
 const { scoredCropProcessor }       = require('./processors/scoredCrop');
 const { coherenceCropProcessor }    = require('./processors/coherenceCrop');
-const { faceCascadeProcessor }      = require('./processors/faceCascade');
+const { peakVarianceProcessor }     = require('./processors/peakVariance');
 const { windowClearProcessor }      = require('./processors/windowClear');
 const { PRE_PROCESSOR_WRAPPERS }    = require('./processors/preprocessorWrappers');
 const { ensureRaw, invalidateRaw }  = require('./processors/contextUtils');
@@ -112,10 +112,10 @@ const PROCESSORS = {
     label: 'Background Strip — remove solid-color borders',
     auto: true,
   },
-  face_cascade: {
-    fn: faceCascadeProcessor,
+  peak_variance: {
+    fn: peakVarianceProcessor,
     type: 'window_set',
-    label: 'Face Cascade — detect faces and set focus window for downstream crop processors',
+    label: 'Peak Variance — find the most densely complex compact region and set focus window',
   },
   window_clear: {
     fn: windowClearProcessor,
