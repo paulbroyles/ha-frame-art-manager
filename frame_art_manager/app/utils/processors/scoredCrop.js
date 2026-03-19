@@ -44,11 +44,13 @@ const sharp = require('sharp');
  *   interiorVarTarget 800    Local variance level that counts as fully complex content.
  *   edgeWeight        0.4    Weight of edge penalty in the combined score.
  *   interiorWeight    0.6    Weight of interior reward in the combined score.
- *   centeringWeight   0.15   Weight of centering preference. Penalizes candidates
- *                            whose center is far from the image center (normalized
- *                            distance 0–1). Prevents the scorer from drifting off
- *                            to one side when both sides have similar frame material.
- *                            Set to 0 to disable.
+ *   centeringWeightX  0.15   Horizontal centering penalty. Penalizes candidates
+ *                            whose horizontal center is far from the image center.
+ *                            Prevents the scorer from drifting left/right when both
+ *                            sides have similar frame material. Set to 0 to disable.
+ *   centeringWeightY  0.0    Vertical centering penalty. Default 0 — vertical content
+ *                            position (e.g. face at top of portrait) should be driven
+ *                            by interior reward, not forced to center.
  *   minScoreThreshold -0.1   Fall back to centered crop if no candidate beats this.
  *   strategy          'attention'  Sharp resize position: attention | entropy | centre.
  */
@@ -60,7 +62,8 @@ async function scoredCropProcessor(context, {
   interiorVarTarget = 800,
   edgeWeight        = 0.6,
   interiorWeight    = 0.6,
-  centeringWeight   = 0.15,
+  centeringWeightX  = 0.15,
+  centeringWeightY  = 0.0,
   minScoreThreshold = -0.1,
   strategy          = 'centre',
 } = {}) {
@@ -184,15 +187,15 @@ async function scoredCropProcessor(context, {
         // sides have similar frame material.
         const centerDx = (left + cW / 2 - workW / 2) / workW;
         const centerDy = (top  + cH / 2 - workH / 2) / workH;
-        const centerPenalty = Math.sqrt(centerDx * centerDx + centerDy * centerDy);
 
         const score = interiorWeight * interiorReward
-                    - edgeWeight     * edgePenalty
-                    - centeringWeight * centerPenalty;
+                    - edgeWeight       * edgePenalty
+                    - centeringWeightX * Math.abs(centerDx)
+                    - centeringWeightY * Math.abs(centerDy);
 
         if (score > bestScore) {
           bestScore = score;
-          bestCandidate = { left, top, w: cW, h: cH, score, edgePenalty, interiorReward, centerPenalty };
+          bestCandidate = { left, top, w: cW, h: cH, score, edgePenalty, interiorReward, centerDx, centerDy };
         }
       }
     }
