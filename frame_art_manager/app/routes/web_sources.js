@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const axios = require('axios');
 const sharp = require('sharp');
-const { processWebSourceImage, solidBorderStrip, runPipeline, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA } = require('../utils/imageProcessor');
+const { processWebSourceImage, solidBorderStrip, runPipeline, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA, PROCESSORS } = require('../utils/imageProcessor');
 const { applyFieldFormat } = require('../utils/fieldFormatters');
 
 // Source modules — each must export fetchRandomArtwork, selectMode, metadataFields, and defaultMapping.
@@ -250,6 +250,7 @@ async function readWebSourcesConfig(frameArtPath) {
   if (!ip.minResolution)      ip.minResolution      = 1080;
   if (!Object.prototype.hasOwnProperty.call(ip, 'unifiedProcessor')) ip.unifiedProcessor = null;
   if (!ip.unifiedProcessorOptions) ip.unifiedProcessorOptions = {};
+  if (!Object.prototype.hasOwnProperty.call(ip, 'pipeline')) ip.pipeline = null;
 
   // Ensure all builtin sources are present (add any missing ones with defaults)
   for (const [id, def] of Object.entries(BUILTIN_SOURCES)) {
@@ -593,7 +594,7 @@ router.get('/config', async (req, res) => {
 router.put('/image-processing', async (req, res) => {
   try {
     const { preProcessor, cropEngine, preProcessorOptions, cropEngineOptions, skipLowRes, minResolution,
-            unifiedProcessor, unifiedProcessorOptions } = req.body;
+            unifiedProcessor, unifiedProcessorOptions, pipeline } = req.body;
     const validPreProcessors  = IMAGE_PROCESSING_SCHEMA.preProcessors.map(p => p.value);
     const validEngines        = IMAGE_PROCESSING_SCHEMA.cropEngines.map(e => e.value);
     const validUnified        = IMAGE_PROCESSING_SCHEMA.unifiedProcessors.map(p => p.value);
@@ -605,6 +606,17 @@ router.put('/image-processing', async (req, res) => {
     }
     if (unifiedProcessor !== undefined && unifiedProcessor !== null && !validUnified.includes(unifiedProcessor)) {
       return res.status(400).json({ error: `unifiedProcessor must be null or one of: ${validUnified.join(', ')}` });
+    }
+    if (pipeline !== undefined && pipeline !== null) {
+      if (!Array.isArray(pipeline)) return res.status(400).json({ error: 'pipeline must be an array' });
+      for (const step of pipeline) {
+        if (!step?.key || !PROCESSORS[step.key]) {
+          return res.status(400).json({ error: `Unknown pipeline step key: '${step?.key}'` });
+        }
+        if (step.options !== undefined && (typeof step.options !== 'object' || Array.isArray(step.options))) {
+          return res.status(400).json({ error: `pipeline step '${step.key}' options must be an object` });
+        }
+      }
     }
     if (preProcessorOptions !== undefined && (typeof preProcessorOptions !== 'object' || Array.isArray(preProcessorOptions))) {
       return res.status(400).json({ error: 'preProcessorOptions must be an object' });
@@ -630,6 +642,7 @@ router.put('/image-processing', async (req, res) => {
     if (minResolution          !== undefined) webSources.imageProcessing.minResolution          = minResolution;
     if (unifiedProcessor       !== undefined) webSources.imageProcessing.unifiedProcessor       = unifiedProcessor;
     if (unifiedProcessorOptions !== undefined) webSources.imageProcessing.unifiedProcessorOptions = unifiedProcessorOptions;
+    if (pipeline               !== undefined) webSources.imageProcessing.pipeline               = pipeline;
     // Discard legacy flat option fields to avoid config cruft.
     delete webSources.imageProcessing.sharpStrategy;
     delete webSources.imageProcessing.detectionMode;
@@ -1084,12 +1097,17 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
   const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
   const orientation = tvOrientation || 'landscape';
-  const { unifiedProcessor, unifiedProcessorOptions = {},
+  const { pipeline, unifiedProcessor, unifiedProcessorOptions = {},
           preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
   const alreadyProcessed = !!SOURCE_MODULES[chosenSourceId]?.alreadyProcessed;
   let processedBuffer;
   if (alreadyProcessed) {
     processedBuffer = imageBuffer;
+  } else if (pipeline) {
+    const label = artMetadata?.artworkUrl;
+    ({ buffer: processedBuffer } = await runPipeline(imageBuffer, orientation,
+      pipeline.map(s => s.key === 'background_strip' ? s : { ...s, options: { label, ...s.options } })
+    ));
   } else if (unifiedProcessor) {
     ({ buffer: processedBuffer } = await runPipeline(imageBuffer, orientation, [
       { key: 'background_strip' },
@@ -1455,7 +1473,7 @@ router.post('/test-fetch', async (req, res) => {
     }
 
     const orientation = tvOrientation || 'landscape';
-    const { unifiedProcessor, unifiedProcessorOptions = {},
+    const { pipeline, unifiedProcessor, unifiedProcessorOptions = {},
             preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
     const alreadyProcessed = !!SOURCE_MODULES[chosenSourceId]?.alreadyProcessed;
 
@@ -1466,6 +1484,14 @@ router.post('/test-fetch', async (req, res) => {
 
     if (alreadyProcessed) {
       processedBuffer = imageBuffer;
+    } else if (pipeline) {
+      // Pipeline mode: single runPipeline call (no separate intermediate).
+      const label = artMetadata?.artworkUrl;
+      const pipelineResult = await runPipeline(imageBuffer, orientation,
+        pipeline.map(s => s.key === 'background_strip' ? s : { ...s, options: { label, ...s.options } })
+      );
+      processedBuffer = pipelineResult.buffer;
+      processingInfo = { mode: 'pipeline', pipeline, debug: pipelineResult.debug };
     } else if (unifiedProcessor) {
       // Unified mode: single pipeline pass (no separate Phase 2 intermediate).
       const pipelineResult = await runPipeline(imageBuffer, orientation, [
@@ -1555,7 +1581,7 @@ router.post('/test-reprocess', async (req, res) => {
     const imageBuffer = await fs.readFile(path.join(cacheDir, testCache.rawFilename));
     const ext = path.extname(testCache.rawFilename).slice(1);
 
-    const { unifiedProcessor, unifiedProcessorOptions = {},
+    const { pipeline, unifiedProcessor, unifiedProcessorOptions = {},
             preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
     const alreadyProcessed = !!SOURCE_MODULES[testCache.sourceId]?.alreadyProcessed;
     const orientation = testCache.orientation || 'landscape';
@@ -1567,6 +1593,13 @@ router.post('/test-reprocess', async (req, res) => {
 
     if (alreadyProcessed) {
       processedBuffer = imageBuffer;
+    } else if (pipeline) {
+      const label = testCache.metadata?.artworkUrl;
+      const pipelineResult = await runPipeline(imageBuffer, orientation,
+        pipeline.map(s => s.key === 'background_strip' ? s : { ...s, options: { label, ...s.options } })
+      );
+      processedBuffer = pipelineResult.buffer;
+      processingInfo = { mode: 'pipeline', pipeline, debug: pipelineResult.debug };
     } else if (unifiedProcessor) {
       const pipelineResult = await runPipeline(imageBuffer, orientation, [
         { key: 'background_strip' },

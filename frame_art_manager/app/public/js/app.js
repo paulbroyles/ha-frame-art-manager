@@ -14857,6 +14857,19 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
           </div>`;
       }
 
+      if (opt.type === 'number') {
+        return `
+          <div style="${marginTop}">
+            <label class="ws-global-label" style="display:block;">${escapeHtml(opt.label)}</label>
+            ${opt.description ? `<p class="pool-health-description">${escapeHtml(opt.description)}</p>` : ''}
+            <input type="number" id="${fieldId}" class="ws-select" style="width:120px;"
+              value="${currentVal !== undefined ? currentVal : (opt.default ?? '')}"
+              ${opt.min !== undefined ? `min="${opt.min}"` : ''} ${opt.max !== undefined ? `max="${opt.max}"` : ''}
+              ${opt.step !== undefined ? `step="${opt.step}"` : 'step="any"'}
+              data-option-key="${escapeHtml(opt.key)}">
+          </div>`;
+      }
+
       if (opt.type === 'preProcessor') {
         const available = allProcessors.filter(p => !(opt.excludeValues || []).includes(p.value));
         const nestedOpts = currentOptions?.[`${opt.key}Options`] ?? {};
@@ -14887,7 +14900,7 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
     for (const opt of processorSchema.options) {
       const el = document.getElementById(`${idPrefix}-${opt.key}`);
       if (!el) continue;
-      opts[opt.key] = el.value;
+      opts[opt.key] = opt.type === 'number' ? parseFloat(el.value) : el.value;
       if (opt.type === 'preProcessor') {
         const nestedIdPrefix = `${idPrefix}-${opt.key}-nested`;
         const nestedSchema = allProcessors.find(p => p.value === el.value);
@@ -14897,66 +14910,238 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
     return opts;
   }
 
+  // Binds change listeners on an options panel after render.
+  // panelId: ID of the container div (existence check only)
+  // idPrefix: prefix for field IDs within the panel
+  function bindOptionsPanelListeners(panelId, saveFn, processorSchema, idPrefix, allProcs) {
+    const panel = document.getElementById(panelId);
+    if (!panel || !processorSchema?.options?.length) return;
+    for (const opt of processorSchema.options) {
+      const fieldEl = document.getElementById(`${idPrefix}-${opt.key}`);
+      if (!fieldEl) continue;
+      if (opt.type === 'preProcessor') {
+        fieldEl.addEventListener('change', async () => {
+          const nestedPanelEl = document.getElementById(`${idPrefix}-${opt.key}-nested`);
+          if (nestedPanelEl) {
+            const subSchema = allProcs.find(p => p.value === fieldEl.value);
+            nestedPanelEl.innerHTML = renderProcessorOptionsPanel(subSchema, {}, `${idPrefix}-${opt.key}-nested`, allProcs);
+            bindOptionsPanelListeners(`${idPrefix}-${opt.key}-nested`, saveFn, subSchema, `${idPrefix}-${opt.key}-nested`, allProcs);
+          }
+          await saveFn();
+        });
+        const nestedSchema = allProcs.find(p => p.value === fieldEl.value);
+        bindOptionsPanelListeners(`${idPrefix}-${opt.key}-nested`, saveFn, nestedSchema, `${idPrefix}-${opt.key}-nested`, allProcs);
+      } else {
+        fieldEl.addEventListener('change', saveFn);
+      }
+    }
+  }
+
   const preProcessors     = webSourceImageProcessingSchema.preProcessors     || [];
   const cropEngines       = webSourceImageProcessingSchema.cropEngines       || [];
   const unifiedProcessors = webSourceImageProcessingSchema.unifiedProcessors || [];
-  const currentPreProc = webSourcesConfig?.imageProcessing?.preProcessor  || 'corner_consensus';
-  const currentEngine  = webSourcesConfig?.imageProcessing?.cropEngine    || 'sharp';
-  const currentPreProcOpts      = webSourcesConfig?.imageProcessing?.preProcessorOptions      || {};
-  const currentCropEngOpts      = webSourcesConfig?.imageProcessing?.cropEngineOptions        || {};
-  const currentUnifiedProcessor = webSourcesConfig?.imageProcessing?.unifiedProcessor        ?? null;
-  const currentUnifiedOpts      = webSourcesConfig?.imageProcessing?.unifiedProcessorOptions  || {};
   const currentSkipLowRes    = webSourcesConfig?.imageProcessing?.skipLowRes   ?? false;
   const currentMinResolution = webSourcesConfig?.imageProcessing?.minResolution ?? 1080;
 
-  const currentPreProcSchema    = preProcessors.find(p => p.value === currentPreProc);
-  const currentEngineSchema     = cropEngines.find(e => e.value === currentEngine);
-  const currentUnifiedSchema    = unifiedProcessors.find(u => u.value === currentUnifiedProcessor) || unifiedProcessors[0];
-  const isUnifiedMode = !!currentUnifiedProcessor;
+  // Derive the current pipeline to display from config.
+  // If pipeline[] is set, use it directly. Otherwise derive from legacy fields.
+  function deriveCurrentPipeline() {
+    const ip = webSourcesConfig?.imageProcessing || {};
+    if (ip.pipeline) return ip.pipeline;
+    const steps = [{ key: 'background_strip', options: {} }];
+    if (ip.unifiedProcessor) {
+      steps.push({ key: ip.unifiedProcessor, options: ip.unifiedProcessorOptions || {} });
+    } else {
+      if (ip.preProcessor && ip.preProcessor !== 'none') {
+        steps.push({ key: ip.preProcessor, options: ip.preProcessorOptions || {} });
+      }
+      const cropEngine = ip.cropEngine || 'sharp';
+      steps.push({ key: `${cropEngine}_crop`, options: ip.cropEngineOptions || {} });
+    }
+    return steps;
+  }
+
+  // Look up schema entry for a pipeline step key.
+  function getStepSchema(key) {
+    if (key === 'background_strip') {
+      return { value: 'background_strip', label: 'Background Strip — remove solid-color borders', type: 'background_strip', options: [] };
+    }
+    const unified = unifiedProcessors.find(p => p.value === key);
+    if (unified) return { ...unified, type: 'unified_frame_crop' };
+    const preProc = preProcessors.find(p => p.value === key);
+    if (preProc) return { ...preProc, type: 'frame_detect' };
+    if (key.endsWith('_crop')) {
+      const engineKey = key.slice(0, -4);
+      const engine = cropEngines.find(e => e.value === engineKey);
+      if (engine) return { ...engine, type: 'aspect_crop' };
+    }
+    return { value: key, label: key, type: 'unknown', options: [] };
+  }
+
+  function getStepTypeBadge(type) {
+    const badges = {
+      background_strip:   { text: 'Auto',         color: '#6c757d' },
+      frame_detect:       { text: 'Frame Detection', color: '#0d6efd' },
+      unified_frame_crop: { text: 'Frame + Crop',  color: '#6f42c1' },
+      aspect_crop:        { text: 'Crop',          color: '#fd7e14' },
+    };
+    const b = badges[type] || { text: type, color: '#6c757d' };
+    return `<span style="font-size:0.75em;padding:2px 6px;border-radius:4px;background:${b.color};color:#fff;margin-left:6px;vertical-align:middle;">${b.text}</span>`;
+  }
+
+  function renderPipelineStepCard(step, index, total) {
+    const schema = getStepSchema(step.key);
+    const idPrefix = `ws-pipeline-step-${index}`;
+    const isAuto = step.key === 'background_strip';
+    const canMoveUp   = index > 1;
+    const canMoveDown = index > 0 && index < total - 1;
+    const optionsHtml = renderProcessorOptionsPanel(schema, step.options || {}, idPrefix, preProcessors);
+    const btnStyle = 'padding:2px 8px;border:1px solid var(--border-color,#ddd);border-radius:4px;cursor:pointer;background:transparent;font-size:0.9em;';
+    return `
+      <div class="ws-pipeline-step" data-step-index="${index}" data-step-key="${escapeHtml(step.key)}"
+           style="border:1px solid var(--border-color,#ddd);border-radius:6px;margin-bottom:8px;overflow:hidden;">
+        <div style="display:flex;align-items:center;padding:8px 12px;background:var(--card-background-color,#f8f9fa);gap:8px;">
+          <span style="font-weight:bold;opacity:0.5;min-width:18px;">${index + 1}.</span>
+          <span style="flex:1;font-size:0.93em;">${escapeHtml(schema.label || step.key)}${getStepTypeBadge(schema.type)}</span>
+          <div style="display:flex;gap:4px;flex-shrink:0;">
+            ${isAuto
+              ? `<span style="font-size:0.8em;opacity:0.5;font-style:italic;">always first</span>`
+              : `<button class="ws-step-up"    data-idx="${index}" title="Move up"    style="${btnStyle}${!canMoveUp   ? 'opacity:0.3;pointer-events:none;' : ''}">↑</button>
+                 <button class="ws-step-down"  data-idx="${index}" title="Move down"  style="${btnStyle}${!canMoveDown ? 'opacity:0.3;pointer-events:none;' : ''}">↓</button>
+                 <button class="ws-step-remove" data-idx="${index}" title="Remove step" style="${btnStyle}border-color:#dc3545;color:#dc3545;">✕</button>`}
+          </div>
+        </div>
+        ${optionsHtml ? `<div id="${idPrefix}-options-wrap" style="padding:12px;border-top:1px solid var(--border-color,#ddd);">${optionsHtml}</div>` : ''}
+      </div>`;
+  }
+
+  function renderAddStepSelect(currentPipeline) {
+    const currentKeys = new Set(currentPipeline.map(s => s.key));
+    const options = [];
+    for (const u of unifiedProcessors) {
+      if (!currentKeys.has(u.value)) {
+        options.push({ key: u.value, label: `[Frame+Crop] ${u.label.split(' — ')[0]}` });
+      }
+    }
+    for (const p of preProcessors) {
+      if (p.value !== 'none' && p.value !== 'trim' && !currentKeys.has(p.value)) {
+        options.push({ key: p.value, label: `[Frame] ${p.label.split(' — ')[0]}` });
+      }
+    }
+    for (const e of cropEngines) {
+      const pKey = `${e.value}_crop`;
+      if (!currentKeys.has(pKey)) {
+        options.push({ key: pKey, label: `[Crop] ${e.label.split(' — ')[0]}` });
+      }
+    }
+    if (!options.length) return '';
+    return `
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+        <select id="ws-add-step-select" class="ws-select" style="flex:1;">
+          ${options.map(o => `<option value="${escapeHtml(o.key)}">${escapeHtml(o.label)}</option>`).join('')}
+        </select>
+        <button id="ws-add-step-btn" style="padding:6px 14px;border:1px solid var(--border-color,#ddd);border-radius:6px;cursor:pointer;background:var(--primary-color,#03a9f4);color:#fff;white-space:nowrap;">Add Step</button>
+      </div>`;
+  }
 
   if (preProcessors.length > 0 || cropEngines.length > 0 || unifiedProcessors.length > 0) {
+    let activePipeline = deriveCurrentPipeline();
+
+    async function savePipeline(pipeline) {
+      try {
+        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pipeline }),
+        });
+        const data = await response.json();
+        if (data.success) {
+          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
+          showToast('Pipeline updated');
+        } else {
+          throw new Error(data.error || 'Failed to update pipeline');
+        }
+      } catch (error) {
+        console.error('Error saving pipeline:', error);
+        showToast(`Error: ${error.message}`, 'error');
+      }
+    }
+
+    async function saveCurrentPipelineOptions() {
+      const pipeline = activePipeline.map((step, i) => {
+        const schema = getStepSchema(step.key);
+        const opts = collectProcessorOptions(schema, `ws-pipeline-step-${i}`, preProcessors);
+        return { key: step.key, options: opts };
+      });
+      activePipeline = pipeline;
+      await savePipeline(pipeline);
+    }
+
+    function bindPipelineListeners() {
+      document.querySelectorAll('.ws-step-up').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const idx = parseInt(btn.dataset.idx, 10);
+          if (idx <= 1) return;
+          [activePipeline[idx - 1], activePipeline[idx]] = [activePipeline[idx], activePipeline[idx - 1]];
+          await savePipeline(activePipeline);
+          renderPipelineUI();
+        });
+      });
+      document.querySelectorAll('.ws-step-down').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const idx = parseInt(btn.dataset.idx, 10);
+          if (idx === 0 || idx >= activePipeline.length - 1) return;
+          [activePipeline[idx], activePipeline[idx + 1]] = [activePipeline[idx + 1], activePipeline[idx]];
+          await savePipeline(activePipeline);
+          renderPipelineUI();
+        });
+      });
+      document.querySelectorAll('.ws-step-remove').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const idx = parseInt(btn.dataset.idx, 10);
+          activePipeline.splice(idx, 1);
+          await savePipeline(activePipeline);
+          renderPipelineUI();
+        });
+      });
+      document.getElementById('ws-add-step-btn')?.addEventListener('click', async () => {
+        const sel = document.getElementById('ws-add-step-select');
+        if (!sel) return;
+        activePipeline.push({ key: sel.value, options: {} });
+        await savePipeline(activePipeline);
+        renderPipelineUI();
+      });
+      activePipeline.forEach((step, i) => {
+        const schema = getStepSchema(step.key);
+        const idPrefix = `ws-pipeline-step-${i}`;
+        bindOptionsPanelListeners(`${idPrefix}-options-wrap`, saveCurrentPipelineOptions, schema, idPrefix, preProcessors);
+      });
+    }
+
+    function renderPipelineUI() {
+      document.getElementById('ws-pipeline-steps').innerHTML =
+        activePipeline.map((step, i) => renderPipelineStepCard(step, i, activePipeline.length)).join('');
+      const addRow = document.getElementById('ws-add-step-row');
+      if (addRow) addRow.innerHTML = renderAddStepSelect(activePipeline);
+      bindPipelineListeners();
+    }
+
     const processingHtml = `
       <div class="ws-global-setting" style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color,#e0e0e0);">
-        <label class="ws-global-label">Image Processing Mode</label>
-        <p class="pool-health-description">Unified mode detects frames and crops to the TV aspect ratio in a single informed pass. Classic mode runs frame detection and cropping as separate steps.</p>
-        <div style="display:flex;gap:8px;margin-top:4px;">
-          <button id="ws-mode-unified" class="ws-mode-btn ${isUnifiedMode ? 'ws-mode-btn-active' : ''}" style="flex:1;padding:8px 12px;border:1px solid var(--border-color,#ddd);border-radius:6px;cursor:pointer;background:${isUnifiedMode ? 'var(--primary-color,#03a9f4)' : 'var(--card-background-color,#fff)'};color:${isUnifiedMode ? '#fff' : 'inherit'};">Unified <span style="font-size:0.8em;opacity:0.8;">(recommended)</span></button>
-          <button id="ws-mode-classic" class="ws-mode-btn ${!isUnifiedMode ? 'ws-mode-btn-active' : ''}" style="flex:1;padding:8px 12px;border:1px solid var(--border-color,#ddd);border-radius:6px;cursor:pointer;background:${!isUnifiedMode ? 'var(--primary-color,#03a9f4)' : 'var(--card-background-color,#fff)'};color:${!isUnifiedMode ? '#fff' : 'inherit'};">Classic</button>
+        <label class="ws-global-label">Image Processing Pipeline</label>
+        <p class="pool-health-description">Configure the ordered sequence of processing steps applied to each image before sending to the TV. Each step receives the output of the previous one.</p>
+        <div style="display:flex;gap:8px;margin-top:8px;margin-bottom:12px;">
+          <button id="ws-preset-unified" style="flex:1;padding:8px 12px;border:1px solid var(--border-color,#ddd);border-radius:6px;cursor:pointer;background:var(--card-background-color,#fff);">Unified <span style="font-size:0.8em;opacity:0.7;">(recommended)</span></button>
+          <button id="ws-preset-classic" style="flex:1;padding:8px 12px;border:1px solid var(--border-color,#ddd);border-radius:6px;cursor:pointer;background:var(--card-background-color,#fff);">Classic</button>
         </div>
-
-        <div id="ws-unified-section" style="display:${isUnifiedMode ? 'block' : 'none'};">
-          ${unifiedProcessors.length > 0 ? `
-            <div id="ws-unified-processor-options" style="margin-top:12px;">
-              ${renderProcessorOptionsPanel(currentUnifiedSchema, currentUnifiedOpts, 'ws-unified-processor-options', preProcessors)}
-            </div>
-          ` : ''}
+        <div id="ws-pipeline-steps">
+          ${activePipeline.map((step, i) => renderPipelineStepCard(step, i, activePipeline.length)).join('')}
         </div>
-
-        <div id="ws-classic-section" style="display:${isUnifiedMode ? 'none' : 'block'};">
-          ${preProcessors.length > 0 ? `
-            <label class="ws-global-label" style="margin-top:16px;display:block;">Frame Detection</label>
-            <p class="pool-health-description">Detect and remove decorative frames or borders from artwork images before cropping.</p>
-            <select id="ws-pre-processor-select" class="ws-select">
-              ${preProcessors.map(p => `<option value="${p.value}" ${currentPreProc === p.value ? 'selected' : ''}>${escapeHtml(p.label)}</option>`).join('')}
-            </select>
-            <div id="ws-pre-processor-options">
-              ${renderProcessorOptionsPanel(currentPreProcSchema, currentPreProcOpts, 'ws-pre-processor-options', preProcessors)}
-            </div>
-          ` : ''}
-          ${cropEngines.length > 0 ? `
-            <label class="ws-global-label" style="margin-top:16px;display:block;">Crop Engine</label>
-            <p class="pool-health-description">How to scale and crop the image to fit the TV's 4K aspect ratio.</p>
-            <select id="ws-crop-engine-select" class="ws-select">
-              ${cropEngines.map(e => `<option value="${e.value}" ${currentEngine === e.value ? 'selected' : ''}>${escapeHtml(e.label)}</option>`).join('')}
-            </select>
-            <div id="ws-crop-engine-options">
-              ${renderProcessorOptionsPanel(currentEngineSchema, currentCropEngOpts, 'ws-crop-engine-options', preProcessors)}
-            </div>
-          ` : ''}
+        <div id="ws-add-step-row">
+          ${renderAddStepSelect(activePipeline)}
         </div>
-
         <label class="ws-global-label" style="margin-top:16px;display:block;">Minimum Resolution</label>
-        <p class="pool-health-description">Skip images whose shorter side is below this threshold (pixels) and fetch a different one. Uses up to 3 attempts. Useful for sources that occasionally serve very small images.</p>
+        <p class="pool-health-description">Skip images whose shorter side is below this threshold (pixels) and fetch a different one. Uses up to 3 attempts.</p>
         <div style="display:flex;align-items:center;gap:12px;margin-top:4px;">
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
             <input type="checkbox" id="ws-skip-low-res-toggle" ${currentSkipLowRes ? 'checked' : ''}>
@@ -14972,207 +15157,23 @@ function renderWebSourcesGlobalSettings(expandedTypes) {
       </div>`;
     container.insertAdjacentHTML('beforeend', processingHtml);
 
-    // Helper: switch between Unified and Classic modes.
-    async function switchMode(toUnified) {
-      const unifiedSection = document.getElementById('ws-unified-section');
-      const classicSection = document.getElementById('ws-classic-section');
-      const btnUnified = document.getElementById('ws-mode-unified');
-      const btnClassic = document.getElementById('ws-mode-classic');
-      if (unifiedSection) unifiedSection.style.display = toUnified ? 'block' : 'none';
-      if (classicSection) classicSection.style.display = toUnified ? 'none' : 'block';
-      const activeStyle = 'var(--primary-color,#03a9f4)';
-      const inactiveStyle = 'var(--card-background-color,#fff)';
-      if (btnUnified) { btnUnified.style.background = toUnified ? activeStyle : inactiveStyle; btnUnified.style.color = toUnified ? '#fff' : 'inherit'; }
-      if (btnClassic) { btnClassic.style.background = toUnified ? inactiveStyle : activeStyle; btnClassic.style.color = toUnified ? 'inherit' : '#fff'; }
-      try {
-        const unifiedProcessor = toUnified ? (currentUnifiedSchema?.value || unifiedProcessors[0]?.value || null) : null;
-        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ unifiedProcessor, unifiedProcessorOptions: {} }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
-          showToast(toUnified ? 'Switched to Unified mode' : 'Switched to Classic mode');
-        } else {
-          throw new Error(data.error || 'Failed to update setting');
-        }
-      } catch (error) {
-        console.error('Error switching mode:', error);
-        showToast(`Error: ${error.message}`, 'error');
-      }
-    }
-
-    document.getElementById('ws-mode-unified')?.addEventListener('click', () => switchMode(true));
-    document.getElementById('ws-mode-classic')?.addEventListener('click', () => switchMode(false));
-
-    // Helper: save unifiedProcessorOptions after any unified processor option changes.
-    async function saveUnifiedProcessorOptions() {
-      const schema = currentUnifiedSchema;
-      const opts = collectProcessorOptions(schema, 'ws-unified-processor-options', preProcessors);
-      try {
-        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ unifiedProcessorOptions: opts }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
-          showToast('Processing options updated');
-        } else {
-          throw new Error(data.error || 'Failed to update setting');
-        }
-      } catch (error) {
-        console.error('Error updating unified processor options:', error);
-        showToast(`Error: ${error.message}`, 'error');
-      }
-    }
-
-    // Bind listeners for initially rendered unified processor options panel.
-    if (isUnifiedMode) {
-      bindOptionsPanelListeners('ws-unified-processor-options', saveUnifiedProcessorOptions, currentUnifiedSchema, 'ws-unified-processor-options', preProcessors);
-    }
-
-    // Helper: save preProcessorOptions after any pre-processor option changes.
-    async function savePreProcessorOptions() {
-      const selEl = document.getElementById('ws-pre-processor-select');
-      if (!selEl) return;
-      const schema = preProcessors.find(p => p.value === selEl.value);
-      const opts = collectProcessorOptions(schema, 'ws-pre-processor-options', preProcessors);
-      try {
-        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ preProcessorOptions: opts }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
-          showToast('Frame detection options updated');
-        } else {
-          throw new Error(data.error || 'Failed to update setting');
-        }
-      } catch (error) {
-        console.error('Error updating pre-processor options:', error);
-        showToast(`Error: ${error.message}`, 'error');
-      }
-    }
-
-    // Helper: save cropEngineOptions after any crop engine option changes.
-    async function saveCropEngineOptions() {
-      const selEl = document.getElementById('ws-crop-engine-select');
-      if (!selEl) return;
-      const schema = cropEngines.find(e => e.value === selEl.value);
-      const opts = collectProcessorOptions(schema, 'ws-crop-engine-options', preProcessors);
-      try {
-        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cropEngineOptions: opts }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
-          showToast('Crop engine options updated');
-        } else {
-          throw new Error(data.error || 'Failed to update setting');
-        }
-      } catch (error) {
-        console.error('Error updating crop engine options:', error);
-        showToast(`Error: ${error.message}`, 'error');
-      }
-    }
-
-    // Helper: bind option panel change listeners (called after render and after re-render).
-    function bindOptionsPanelListeners(panelId, saveFn, processorSchema, idPrefix, allProcs) {
-      const panel = document.getElementById(panelId);
-      if (!panel || !processorSchema?.options?.length) return;
-      for (const opt of processorSchema.options) {
-        const fieldEl = document.getElementById(`${idPrefix}-${opt.key}`);
-        if (!fieldEl) continue;
-        if (opt.type === 'preProcessor') {
-          fieldEl.addEventListener('change', async () => {
-            // Re-render the nested options panel for the newly selected sub-processor.
-            const nestedPanelEl = document.getElementById(`${idPrefix}-${opt.key}-nested`);
-            if (nestedPanelEl) {
-              const subSchema = allProcs.find(p => p.value === fieldEl.value);
-              nestedPanelEl.innerHTML = renderProcessorOptionsPanel(subSchema, {}, `${idPrefix}-${opt.key}-nested`, allProcs);
-              // Bind listeners for the newly rendered nested panel.
-              bindOptionsPanelListeners(`${idPrefix}-${opt.key}-nested`, saveFn, subSchema, `${idPrefix}-${opt.key}-nested`, allProcs);
-            }
-            await saveFn();
-          });
-          // Bind listeners for the initially rendered nested panel too.
-          const nestedSchema = allProcs.find(p => p.value === (fieldEl.value));
-          bindOptionsPanelListeners(`${idPrefix}-${opt.key}-nested`, saveFn, nestedSchema, `${idPrefix}-${opt.key}-nested`, allProcs);
-        } else {
-          fieldEl.addEventListener('change', saveFn);
-        }
-      }
-    }
-
-    document.getElementById('ws-pre-processor-select')?.addEventListener('change', async (e) => {
-      const preProcessor = e.target.value;
-      // Re-render the options panel for the newly selected pre-processor.
-      const schema = preProcessors.find(p => p.value === preProcessor);
-      const optsPanelEl = document.getElementById('ws-pre-processor-options');
-      if (optsPanelEl) {
-        optsPanelEl.innerHTML = renderProcessorOptionsPanel(schema, {}, 'ws-pre-processor-options', preProcessors);
-        bindOptionsPanelListeners('ws-pre-processor-options', savePreProcessorOptions, schema, 'ws-pre-processor-options', preProcessors);
-      }
-      try {
-        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ preProcessor, preProcessorOptions: {} }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
-          showToast('Frame detection updated');
-        } else {
-          throw new Error(data.error || 'Failed to update setting');
-        }
-      } catch (error) {
-        console.error('Error updating frame detection setting:', error);
-        showToast(`Error: ${error.message}`, 'error');
-      }
+    document.getElementById('ws-preset-unified')?.addEventListener('click', async () => {
+      activePipeline = [{ key: 'background_strip', options: {} }, { key: 'frame_aware_crop', options: {} }];
+      await savePipeline(activePipeline);
+      renderPipelineUI();
     });
 
-    // Bind initial option panel listeners.
-    bindOptionsPanelListeners('ws-pre-processor-options', savePreProcessorOptions, currentPreProcSchema, 'ws-pre-processor-options', preProcessors);
-
-    document.getElementById('ws-crop-engine-select')?.addEventListener('change', async (e) => {
-      const cropEngine = e.target.value;
-      const schema = cropEngines.find(eng => eng.value === cropEngine);
-      const optsPanelEl = document.getElementById('ws-crop-engine-options');
-      if (optsPanelEl) {
-        optsPanelEl.innerHTML = renderProcessorOptionsPanel(schema, {}, 'ws-crop-engine-options', preProcessors);
-        bindOptionsPanelListeners('ws-crop-engine-options', saveCropEngineOptions, schema, 'ws-crop-engine-options', preProcessors);
-      }
-      try {
-        const response = await fetch(`${API_BASE}/web-sources/image-processing`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cropEngine, cropEngineOptions: {} }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          if (webSourcesConfig) webSourcesConfig.imageProcessing = data.imageProcessing;
-          showToast('Crop engine updated');
-        } else {
-          throw new Error(data.error || 'Failed to update setting');
-        }
-      } catch (error) {
-        console.error('Error updating crop engine setting:', error);
-        showToast(`Error: ${error.message}`, 'error');
-      }
+    document.getElementById('ws-preset-classic')?.addEventListener('click', async () => {
+      activePipeline = [
+        { key: 'background_strip', options: {} },
+        { key: 'mean_profile', options: {} },
+        { key: 'sharp_crop', options: {} },
+      ];
+      await savePipeline(activePipeline);
+      renderPipelineUI();
     });
 
-    // Bind initial crop engine option panel listeners.
-    bindOptionsPanelListeners('ws-crop-engine-options', saveCropEngineOptions, currentEngineSchema, 'ws-crop-engine-options', preProcessors);
+    bindPipelineListeners();
 
     document.getElementById('ws-skip-low-res-toggle')?.addEventListener('change', async (e) => {
       const skipLowRes = e.target.checked;
