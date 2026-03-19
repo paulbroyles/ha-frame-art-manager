@@ -148,21 +148,17 @@ async function coherenceCropProcessor(context, {
 
   // Focus window override: if an upstream processor (e.g. ml_subject) set a
   // focus window, use its center as the crop anchor instead of the variance centroid.
-  // When a focus window is set we already know where the subject is, so disable
-  // the attention window expansion (use 1.0×) and switch to strategy='centre'.
-  // Leaving attentionWindow > 1 would let Sharp's attention sub-crop drift away
-  // from the focus point toward a more texturally complex region (e.g. the torso).
+  // The attentionWindow and strategy options still apply — the focus window shifts
+  // where the extract is centered, then Sharp's attention sub-crops within that window.
   let focusSource = null;
-  let effectiveWinScale = Math.max(1, attentionWindow);
-  let effectiveStrategy = strategy;
+  const effectiveWinScale = Math.max(1, attentionWindow);
+  const effectiveStrategy = strategy;
   if (context.focusWindow) {
     const fw = context.focusWindow;
     origCx = Math.round(fw.x + fw.w / 2);
     origCy = Math.round(fw.y + fw.h / 2);
     focusSource = fw.source;
-    effectiveWinScale = 1.0;
-    effectiveStrategy = 'centre';
-    console.log(`[coherence_crop] focus window from '${fw.source}' overrides centroid → (${origCx},${origCy}) [winScale→1.0, strategy→centre]`);
+    console.log(`[coherence_crop] focus window from '${fw.source}' overrides centroid → (${origCx},${origCy})`);
   }
 
   // Step 5: place extraction rectangle centered at centroid, clamped to image bounds.
