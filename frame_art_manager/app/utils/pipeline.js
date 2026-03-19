@@ -44,6 +44,7 @@ const { frameAwareCropProcessor }   = require('./processors/frameAwareCrop');
 const { scoredCropProcessor }       = require('./processors/scoredCrop');
 const { coherenceCropProcessor }    = require('./processors/coherenceCrop');
 const { peakVarianceProcessor }     = require('./processors/peakVariance');
+const { mlSubjectProcessor }        = require('./processors/mlSubject');
 const { windowClearProcessor }      = require('./processors/windowClear');
 const { PRE_PROCESSOR_WRAPPERS }    = require('./processors/preprocessorWrappers');
 const { ensureRaw, invalidateRaw }  = require('./processors/contextUtils');
@@ -116,6 +117,11 @@ const PROCESSORS = {
     fn: peakVarianceProcessor,
     type: 'window_set',
     label: 'Peak Variance — find the most densely complex compact region and set focus window',
+  },
+  ml_subject: {
+    fn: mlSubjectProcessor,
+    type: 'window_set',
+    label: 'ML Subject — detect foreground subject with RMBG-1.4 and set focus window (~11 s, model cached after first use)',
   },
   window_clear: {
     fn: windowClearProcessor,

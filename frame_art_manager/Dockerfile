@@ -43,6 +43,21 @@ COPY app/package*.json ./
 # Install Node dependencies
 RUN npm ci --only=production
 
+# Alpine compatibility patch for @huggingface/transformers:
+# The package's "node" export condition loads a Node.js-specific bundle that
+# requires onnxruntime-node (glibc binary, incompatible with Alpine musl).
+# Removing it forces Node.js to load the browser/WASM bundle instead, which
+# uses onnxruntime-web (pure WASM, Alpine-safe).
+RUN node -e "\
+const fs=require('fs');\
+const p='node_modules/@huggingface/transformers/package.json';\
+const pkg=JSON.parse(fs.readFileSync(p,'utf8'));\
+function stripNode(o){if(typeof o!=='object'||o===null)return o;const r={};for(const[k,v]of Object.entries(o))if(k!=='node')r[k]=stripNode(v);return r;}\
+if(pkg.exports)pkg.exports=stripNode(pkg.exports);\
+fs.writeFileSync(p,JSON.stringify(pkg,null,2));\
+console.log('Alpine patch: removed node export condition from @huggingface/transformers');\
+"
+
 # Copy application files
 COPY app/ ./
 

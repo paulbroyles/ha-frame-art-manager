@@ -93,6 +93,13 @@ const IMAGE_PROCESSING_SCHEMA = {
     // TODO (Option 3): ML Segmentation — handles irregular/ornate frames; see docs/ROADMAP.md
   ],
   windowSetters: [
+    { value: 'ml_subject', label: 'ML Subject — detect foreground subject with RMBG-1.4 and set focus window (~11 s; model cached after first use)',
+      options: [
+        { key: 'threshold', label: 'Mask Threshold', type: 'number', default: 0.5,
+          description: 'Mask confidence above which a pixel is considered foreground (0–1).' },
+        { key: 'padFraction', label: 'Padding', type: 'number', default: 0.10,
+          description: 'Expand the detected bounding box by this fraction of its dimension on each edge.' },
+      ] },
     { value: 'peak_variance', label: 'Peak Variance — find the most densely complex compact region and set focus window for downstream crop processors',
       options: [
         { key: 'windowFrac', label: 'Window Size', type: 'number', default: 0.25,
