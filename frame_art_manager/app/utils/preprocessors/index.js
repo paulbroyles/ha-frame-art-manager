@@ -8,6 +8,7 @@ const { meanProfilePreProcessor }       = require('./meanProfile');
 const { tileColorPreProcessor }         = require('./tileColor');
 const { symmetricScanPreProcessor }  = require('./symmetricScan');
 const { adaptiveScanPreProcessor }   = require('./adaptiveScan');
+const { coherenceScanPreProcessor }  = require('./coherenceScan');
 
 const PRE_PROCESSORS = {
   trim:              trimPreProcessor,
@@ -18,6 +19,7 @@ const PRE_PROCESSORS = {
   tile_color:        tileColorPreProcessor,
   symmetric_scan:    symmetricScanPreProcessor,
   adaptive_scan:     adaptiveScanPreProcessor,
+  coherence_scan:    coherenceScanPreProcessor,
 };
 
 module.exports = {
@@ -30,4 +32,5 @@ module.exports = {
   tileColorPreProcessor,
   symmetricScanPreProcessor,
   adaptiveScanPreProcessor,
+  coherenceScanPreProcessor,
 };

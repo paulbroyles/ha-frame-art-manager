@@ -32,6 +32,7 @@ const sharp                         = require('sharp');
 const { backgroundStripProcessor }  = require('./processors/backgroundStrip');
 const { sharpCropProcessor }        = require('./processors/sharpCrop');
 const { frameAwareCropProcessor }   = require('./processors/frameAwareCrop');
+const { scoredCropProcessor }       = require('./processors/scoredCrop');
 const { PRE_PROCESSOR_WRAPPERS }    = require('./processors/preprocessorWrappers');
 const { ensureRaw, invalidateRaw }  = require('./processors/contextUtils');
 
@@ -105,6 +106,12 @@ const PROCESSORS = {
     fn: frameAwareCropProcessor,
     type: 'unified_frame_crop',
     label: 'Frame-Aware Crop — detect frame and fit to TV aspect ratio in one informed pass',
+    replaces: ['frame_detect', 'aspect_crop'],
+  },
+  scored_crop: {
+    fn: scoredCropProcessor,
+    type: 'unified_frame_crop',
+    label: 'Scored Crop — score candidate crop rectangles for edge uniformity and interior complexity; finds painting without explicit frame detection',
     replaces: ['frame_detect', 'aspect_crop'],
   },
   // Pre-processor wrappers (frame detection algorithms)

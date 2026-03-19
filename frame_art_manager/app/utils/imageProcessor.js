@@ -81,11 +81,35 @@ const IMAGE_PROCESSING_SCHEMA = {
           description: 'Pre-processor to use when Adaptive Scan cannot find a confident crop (no frame anchor found). Its own options appear below.',
           excludeValues: ['adaptive_scan', 'none'], default: 'corner_consensus' },
       ] },
+    { value: 'coherence_scan',   label: 'Coherence Scan — detect frames using 2D tile variance map; handles irregular frames better than row/column projections',
+      options: [
+        { key: 'coherenceThreshold', label: 'Coherence Threshold', type: 'number', default: 400,
+          description: 'Tile luminance variance below this = frame material. Lower = stricter (misses textured frames). Higher = more permissive (may bleed into flat painting regions).' },
+        { key: 'minCoherentFrac', label: 'Min Coherent Fraction', type: 'number', default: 0.70,
+          description: 'Fraction of tiles in a row or column that must be coherent to extend the frame band (0.5–1.0). Lower tolerates more noise or texture in frame material.' },
+      ] },
     { value: 'variance_scan',    label: 'Variance Scan — detect frames by local edge variance (legacy)' },
     { value: 'trim',             label: 'Sharp Trim — background strip only (same as None; redundant with automatic Stage 1)' },
     // TODO (Option 3): ML Segmentation — handles irregular/ornate frames; see docs/ROADMAP.md
   ],
   unifiedProcessors: [
+    { value: 'scored_crop', label: 'Scored Crop — score candidate crop rectangles for edge uniformity and interior complexity; finds painting without explicit frame detection',
+      replaces: ['frame_detect', 'aspect_crop'],
+      options: [
+        { key: 'edgeVarThreshold', label: 'Edge Variance Threshold', type: 'number', default: 200,
+          description: 'Local variance below this = frame-like edge material. Lower = stricter (may miss textured frames). Higher = more permissive.' },
+        { key: 'interiorVarTarget', label: 'Interior Complexity Target', type: 'number', default: 800,
+          description: 'Local variance level that counts as fully complex painting content. Raise for very flat or minimalist paintings.' },
+        { key: 'minSizeFrac', label: 'Min Candidate Size', type: 'number', default: 0.40,
+          description: 'Smallest candidate rectangle as fraction of image dimension (0.2–0.8). Lower allows finding paintings inside very wide frames.' },
+        { key: 'strategy', label: 'Crop Strategy', type: 'select', default: 'attention',
+          description: 'How to position the final resize when the extracted region does not exactly match the target aspect ratio.',
+          choices: [
+            { value: 'attention', label: 'Attention — focus on faces and salient regions (recommended)' },
+            { value: 'entropy',   label: 'Entropy — focus on high-detail, textured regions' },
+            { value: 'centre',    label: 'Center — crop from the geometric center' },
+          ] },
+      ] },
     { value: 'frame_aware_crop', label: 'Frame-Aware Crop — detect frame and fit to TV aspect ratio in one informed pass',
       replaces: ['frame_detect', 'aspect_crop'],
       options: [
