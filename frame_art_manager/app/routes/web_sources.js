@@ -1329,7 +1329,8 @@ router.post('/cache/:deviceId/promote', async (req, res) => {
     }
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 
-    res.json({ success: true });
+    const displayCacheFile = path.basename(cacheFileFor(req.frameArtPath, deviceId, ext));
+    res.json({ success: true, cacheFile: displayCacheFile });
   } catch (error) {
     console.error('Error promoting staged cache:', error);
     res.status(500).json({ error: 'Failed to promote staged cache' });

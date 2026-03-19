@@ -205,22 +205,22 @@ router.get('/tvs', requireHA, async (req, res) => {
                 {% set ns.screen_on = false %}
               {% endif %}
             {% endif %}
-            {% if entity.endswith('_current_artwork') %}
-              {% set selected = state_attr(entity, 'selected_tagset') %}
-              {% if selected %}{% set ns.selected_tagset = selected %}{% endif %}
-              {% set override = state_attr(entity, 'override_tagset') %}
-              {% if override %}{% set ns.override_tagset = override %}{% endif %}
-              {% set expiry = state_attr(entity, 'override_expiry_time') %}
-              {% if expiry %}{% set ns.override_expiry_time = expiry %}{% endif %}
-              {% set active = state_attr(entity, 'active_tagset') %}
-              {% if active %}{% set ns.active_tagset = active %}{% endif %}
-              {% set tags_attr = state_attr(entity, 'tags') %}
-              {% if tags_attr and tags_attr is iterable and tags_attr is not string %}
-                {% set ns.tags = tags_attr %}
+            {% if entity.endswith('_selected_tagset') and not entity.endswith('_selected_tagset_weighting') %}
+              {% set sel = states(entity) %}
+              {% if sel and sel not in ['unknown', 'unavailable', 'None'] %}
+                {% set ns.selected_tagset = sel %}
               {% endif %}
-              {% set exclude_attr = state_attr(entity, 'exclude_tags') %}
-              {% if exclude_attr and exclude_attr is iterable and exclude_attr is not string %}
-                {% set ns.exclude_tags = exclude_attr %}
+            {% endif %}
+            {% if entity.endswith('_override_tagset') %}
+              {% set ovr = states(entity) %}
+              {% if ovr and ovr not in ['unknown', 'unavailable', 'None'] %}
+                {% set ns.override_tagset = ovr %}
+              {% endif %}
+            {% endif %}
+            {% if entity.endswith('_override_expiry') %}
+              {% set exp = states(entity) %}
+              {% if exp and exp not in ['unknown', 'unavailable', 'None'] %}
+                {% set ns.override_expiry_time = exp %}
               {% endif %}
             {% endif %}
           {% endfor %}
@@ -253,6 +253,11 @@ router.get('/tvs', requireHA, async (req, res) => {
       }
     } else if (Array.isArray(result)) {
       tvs = result;
+    }
+
+    // Compute active_tagset from override/selected (no dedicated HA entity)
+    for (const tv of tvs) {
+      tv.active_tagset = tv.override_tagset || tv.selected_tagset || null;
     }
 
     // Tagset definitions come from local storage, not HA
