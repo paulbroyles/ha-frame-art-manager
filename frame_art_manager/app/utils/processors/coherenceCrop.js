@@ -148,29 +148,50 @@ async function coherenceCropProcessor(context, {
 
   // Focus window override: if an upstream processor (e.g. ml_subject) set a
   // focus window, use its center as the crop anchor instead of the variance centroid.
-  // The attentionWindow and strategy options still apply — the focus window shifts
-  // where the extract is centered, then Sharp's attention sub-crops within that window.
+  // When a focus window is provided we also switch to an AR-matched extract (see
+  // Step 5) and strategy='centre' to prevent Sharp from sub-cropping away from
+  // the focus point.
   let focusSource = null;
-  const effectiveWinScale = Math.max(1, attentionWindow);
-  const effectiveStrategy = strategy;
+  let effectiveWinScale = Math.max(1, attentionWindow);
+  let effectiveStrategy = strategy;
   if (context.focusWindow) {
     const fw = context.focusWindow;
     origCx = Math.round(fw.x + fw.w / 2);
     origCy = Math.round(fw.y + fw.h / 2);
     focusSource = fw.source;
-    console.log(`[coherence_crop] focus window from '${fw.source}' overrides centroid → (${origCx},${origCy})`);
+    effectiveStrategy = 'centre';
+    console.log(`[coherence_crop] focus window from '${fw.source}' overrides centroid → (${origCx},${origCy}) [strategy→centre]`);
   }
 
   // Step 5: place extraction rectangle centered at centroid, clamped to image bounds.
   //
-  // When attentionWindow > 1 (and no focus window): extract a larger window, then
-  // let Sharp's attention strategy find the most salient sub-crop within it. This
-  // gives Sharp room to locate faces and focal points that coherence (variance
-  // only) may miss. The window is scaled symmetrically and clamped so it never
-  // exceeds the original image. Because Sharp will resize to targetW×targetH with
-  // fit:'cover', the extra window area is used for attention scoring only.
-  const windowW = Math.min(origW, Math.round(targetW * effectiveWinScale));
-  const windowH = Math.min(origH, Math.round(targetH * effectiveWinScale));
+  // Without a focus window: extract a window scaled by attentionWindow, then let
+  // Sharp's attention strategy find the most salient sub-crop within it.
+  //
+  // With a focus window: use an AR-matched extract — the largest rectangle with the
+  // same aspect ratio as the target that fits inside the source image. For a portrait
+  // source targeting a landscape TV this is (origW × origW*targetH/targetW). With
+  // this extract, fit:'cover' applies the same scale factor to both axes, so no
+  // sub-crop occurs in either dimension. strategy='centre' then positions the crop
+  // exactly on the focus point with no drift. Without this sizing, a cover resize
+  // on an oversized extract would sub-crop heavily in one axis, pushing the focus
+  // point to the edge of the output (e.g. face at the very bottom of a landscape TV).
+  let windowW, windowH;
+  if (context.focusWindow) {
+    if (origW * targetH <= origH * targetW) {
+      // Portrait source (origAR ≤ targetAR): width-limited — use full source width.
+      windowW = origW;
+      windowH = Math.min(origH, Math.round(origW * targetH / targetW));
+    } else {
+      // Landscape source (origAR > targetAR): height-limited — use full source height.
+      windowH = origH;
+      windowW = Math.min(origW, Math.round(origH * targetW / targetH));
+    }
+    effectiveWinScale = windowH / targetH; // for logging
+  } else {
+    windowW = Math.min(origW, Math.round(targetW * effectiveWinScale));
+    windowH = Math.min(origH, Math.round(targetH * effectiveWinScale));
+  }
 
   const extractLeft = Math.max(0, Math.min(origW - windowW, Math.round(origCx - windowW / 2)));
   const extractTop  = Math.max(0, Math.min(origH - windowH, Math.round(origCy - windowH / 2)));
