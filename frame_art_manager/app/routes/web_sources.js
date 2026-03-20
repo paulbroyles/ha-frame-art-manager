@@ -16,6 +16,7 @@ const SOURCE_MODULES = {
   met_museum: require('../sources/met_museum'),
   moma: require('../sources/moma'),
   louvre: require('../sources/louvre'),
+  artsy: require('../sources/artsy'),
 };
 
 const SOURCE_FETCHERS = Object.fromEntries(
@@ -446,20 +447,25 @@ async function sendImageToTV(imagePath, deviceId, {
 /**
  * Compute the effective metadata mapping for a source.
  *
- * Effective = source module's defaultMapping hints (as plain attribute name strings)
- * overridden by any per-source userMapping stored in config.
+ * Effective = source module's defaultMapping (adjusted for current settings) merged
+ * with any per-source userMapping stored in config. userMapping overrides defaults;
+ * fields absent from userMapping fall back to the module's current defaults.
  *
- * The defaultMapping hints are bare attribute name strings (e.g. 'title', 'artist').
- * The userMapping values are the full stored format: null | string | {entity, attribute}.
+ * This ensures that settings-dependent fields (e.g. google_art_wallpaper's rich fields
+ * added when fetchRichMetadata is enabled) are included in the effective mapping even
+ * if they were added after the initial userMapping was seeded.
  *
  * @param {string} sourceId
  * @param {object} userMapping - Stored user overrides from config.sources[id].userMapping
+ * @param {object} [settings]  - Stored source settings (passed to getDefaultMapping if present)
  * @returns {object} Merged mapping: { fieldKey: null|string|{entity,attribute} }
  */
-function getEffectiveMapping(_sourceId, userMapping) {
-  // userMapping is the sole source of truth — defaults are seeded into it at
-  // config-read time (readWebSourcesConfig), so no implicit fallback is needed.
-  return { ...(userMapping || {}) };
+function getEffectiveMapping(sourceId, userMapping, settings) {
+  const mod = SOURCE_MODULES[sourceId];
+  const defaults = mod?.getDefaultMapping
+    ? mod.getDefaultMapping(settings)
+    : (mod?.defaultMapping || {});
+  return { ...defaults, ...(userMapping || {}) };
 }
 
 /**
@@ -1125,10 +1131,11 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
   const ext = contentType.includes('png') ? 'png' : 'jpg';
 
   const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
-  const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
+  const sourceSettings = webSources.sources?.[chosenSourceId]?.settings;
+  const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping, sourceSettings);
   const sourceMod = SOURCE_MODULES[chosenSourceId];
   const fieldDefs = sourceMod?.getMetadataFields
-    ? sourceMod.getMetadataFields(webSources.sources?.[chosenSourceId]?.settings)
+    ? sourceMod.getMetadataFields(sourceSettings)
     : (sourceMod?.metadataFields || []);
   const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping, {
     fieldDefs,
@@ -1534,10 +1541,11 @@ router.post('/test-fetch', async (req, res) => {
     await fs.writeFile(path.join(cacheDir, testFilename), processedBuffer);
 
     const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
-    const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping);
+    const testSourceSettings = webSources.sources?.[chosenSourceId]?.settings;
+    const effectiveMapping = getEffectiveMapping(chosenSourceId, userMapping, testSourceSettings);
     const testSourceMod = SOURCE_MODULES[chosenSourceId];
     const testFieldDefs = testSourceMod?.getMetadataFields
-      ? testSourceMod.getMetadataFields(webSources.sources?.[chosenSourceId]?.settings)
+      ? testSourceMod.getMetadataFields(testSourceSettings)
       : (testSourceMod?.metadataFields || []);
     const { attributeSnapshot, entitySnapshot } = buildWebSourceSnapshot(artMetadata, effectiveMapping, {
       fieldDefs: testFieldDefs,
@@ -1638,12 +1646,13 @@ router.post('/test-reprocess', async (req, res) => {
     await fs.writeFile(path.join(cacheDir, testFilename), processedBuffer);
 
     // Remap metadata using current settings (formatDates may have changed since last fetch).
+    const remapSourceSettings = webSources.sources?.[testCache.sourceId]?.settings;
     const remapSourceMod = SOURCE_MODULES[testCache.sourceId];
     const remapFieldDefs = remapSourceMod?.getMetadataFields
-      ? remapSourceMod.getMetadataFields(webSources.sources?.[testCache.sourceId]?.settings)
+      ? remapSourceMod.getMetadataFields(remapSourceSettings)
       : (remapSourceMod?.metadataFields || []);
     const remapUserMapping = webSources.sources[testCache.sourceId]?.userMapping || {};
-    const remapEffectiveMapping = getEffectiveMapping(testCache.sourceId, remapUserMapping);
+    const remapEffectiveMapping = getEffectiveMapping(testCache.sourceId, remapUserMapping, remapSourceSettings);
     const { attributeSnapshot: newAttrSnapshot, entitySnapshot: newEntitySnapshot } = buildWebSourceSnapshot(
       testCache.metadata || {}, remapEffectiveMapping,
       { fieldDefs: remapFieldDefs, applyFormatting: webSources.formatDates !== false }
