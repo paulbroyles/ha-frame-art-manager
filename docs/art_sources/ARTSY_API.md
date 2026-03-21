@@ -65,9 +65,11 @@ Maps to `marketingCollectionID` on `artworksConnection`. When multiple values ar
 
 **By Region**: `american-artists`, `chinese-artists`, `german-artists`
 
-### Keyword (`type: 'keyword'`, `mode: 'require'`)
+### Search (`type: 'search'`, `mode: 'require'`)
 
-Maps to the `keyword` parameter. First value is used. Combinable with medium and collection.
+Maps to the `keyword` parameter on `artworksConnection`. First value is used. Combinable with medium and collection filters.
+
+Unlike the Google Arts `/api/search` endpoint, this filter is applied server-side by Artsy and returns works matching the keyword in title, artist name, or description. Pagination across sort orders still applies, so the accessible result pool is the full 60,000 positions (not a fixed result set).
 
 ## Metadata Fields
 

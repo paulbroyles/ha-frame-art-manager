@@ -126,6 +126,21 @@ minutes to download the GitHub dataset on first install or after the 7-day TTL).
 
 ## Filtering
 
+### Keyword search (`type: 'search'`, `mode: 'require'`)
+
+MoMA has no search API — all filtering happens in-process against the in-memory artwork index.
+A keyword search filters the pool to records where the term appears (case-insensitive substring)
+in any of:
+- `t` (title)
+- `a` (artists array — any element)
+- `med` (medium)
+
+The filtered pool is then subject to any classification, department, curated, or aspect ratio
+filters, and a random record is selected from the result. No additional API calls are needed.
+
+**Limitation**: Only title, artist, and medium are searchable. Department, date, nationality, and
+description text are not. MoMA's dataset does not include gallery label text in the GitHub export.
+
 ### Classification filter
 
 Values come from the `Classification` field in the GitHub dataset. Common values:

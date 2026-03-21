@@ -15382,16 +15382,10 @@ function renderFilterList({ containerId, availableFilterTypes, currentFilters, l
   // mode is already active and another is available.
   const addableOptions = [];
   for (const ft of availableFilterTypes) {
-    // Single-value non-multiValue filters locked by parent are not addable
-    if (lockedTypes.has(ft.type) && !ft.multiValue) continue;
-    // Modes already active at this level are always blocked.
-    // Locked modes from parent are only blocked for non-multiValue types;
-    // multiValue types can add the same mode at a lower level to narrow further
-    // (require = intersection, exclude = union).
-    const usedModes = [
-      ...currentFilters.filter(f => f.type === ft.type).map(f => f.mode),
-      ...(!ft.multiValue ? lockedFilters.filter(f => f.type === ft.type).map(f => f.mode) : []),
-    ];
+    // Modes already active at this level are blocked (can't add the same type:mode twice).
+    // Parent locked modes are NOT blocked — child can add the same type to narrow further
+    // (require = intersection, exclude = union of parent + child exclusions).
+    const usedModes = currentFilters.filter(f => f.type === ft.type).map(f => f.mode);
     const availableModes = (ft.modes || ['require']).filter(m => !usedModes.includes(m));
     if (availableModes.length === 0) continue;
     if (!activeTypes.has(ft.type)) {
