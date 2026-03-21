@@ -87,6 +87,10 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
   let objectIDs;
 
+  // Keyword search filter — overrides the broad query when present.
+  const searchTerm = filters.find(f => f.type === 'search' && f.mode === 'require')?.values?.[0] || null;
+  const q = searchTerm || BROAD_QUERY;
+
   // Apply media filters to the eligible category pool.
   // require: category must appear in ALL require sets (intersection).
   // exclude: category removed if in ANY exclude set (union).
@@ -121,7 +125,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     // No filter: single search for all public-domain objects with images
     try {
       const response = await axios.get(`${BASE_URL}/search`, {
-        params: { q: BROAD_QUERY, hasImages: true },
+        params: { q, hasImages: true },
         timeout: 15000,
       });
       objectIDs = response.data.objectIDs || [];
@@ -136,7 +140,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     for (const classification of classificationFilter) {
       try {
         const response = await axios.get(`${BASE_URL}/search`, {
-          params: { q: BROAD_QUERY, hasImages: true, medium: classification },
+          params: { q, hasImages: true, medium: classification },
           timeout: 15000,
         });
         (response.data.objectIDs || []).forEach(id => idSet.add(id));
@@ -256,9 +260,10 @@ const defaultMapping = {
  * @returns {{ mode: string, apiFilters: Array, postFilters: Array }}
  */
 function selectMode(filters = []) {
-  const apiFilters = filters.filter(f => f.type === 'media');
+  const hasSearch  = filters.some(f => f.type === 'search');
+  const apiFilters = filters.filter(f => f.type === 'media' || f.type === 'search');
   const postFilters = [];
-  return { mode: 'search', apiFilters, postFilters };
+  return { mode: hasSearch ? 'keyword_search' : 'search', apiFilters, postFilters };
 }
 
 function getFilterTypes() {
@@ -271,6 +276,15 @@ function getFilterTypes() {
       multiValue: true,
       groups: MEDIUM_CATEGORIES.map(cat => ({ name: cat.name, values: cat.media })),
       values: MEDIUM_TYPES.map(name => ({ value: name, label: name })),
+    },
+    {
+      type: 'search',
+      label: 'Search',
+      description: 'Search by title, artist, or subject.',
+      modes: ['require'],
+      multiValue: false,
+      values: [],
+      inputStyle: 'search',
     },
   ];
 }

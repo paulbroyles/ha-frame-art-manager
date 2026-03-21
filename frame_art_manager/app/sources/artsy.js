@@ -165,7 +165,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     .filter(f => f.type === 'collection' && f.mode === 'require')
     .flatMap(f => f.values || []);
   const keyword = filters
-    .filter(f => f.type === 'keyword')
+    .filter(f => f.type === 'search')
     .map(f => (f.values || [])[0])
     .find(Boolean) || null;
 
@@ -290,8 +290,8 @@ const defaultMapping = {
 function selectMode(filters = []) {
   const hasMedium     = filters.some(f => f.type === 'medium');
   const hasCollection = filters.some(f => f.type === 'collection');
-  const hasKeyword    = filters.some(f => f.type === 'keyword');
-  const mode = hasKeyword    ? 'keyword_search'
+  const hasSearch     = filters.some(f => f.type === 'search');
+  const mode = hasSearch     ? 'keyword_search'
              : hasCollection ? 'collection_filter'
              : hasMedium     ? 'medium_filter'
              :                 'browse_all';
@@ -325,7 +325,7 @@ function getFilterTypes() {
       values: COLLECTIONS.map(c => ({ value: c.value, label: c.label })),
     },
     {
-      type: 'keyword',
+      type: 'search',
       label: 'Search',
       description: 'Search artworks by title, artist, or subject.',
       modes: ['require'],

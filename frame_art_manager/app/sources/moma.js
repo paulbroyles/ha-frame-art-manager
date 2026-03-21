@@ -306,6 +306,17 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     pool = pool.filter(a => !excClsVals.has((a.cls || '').toLowerCase()));
   }
 
+  // Keyword search filter — client-side substring match across title, artists, and medium.
+  const searchTerm = filters.find(f => f.type === 'search' && f.mode === 'require')?.values?.[0];
+  if (searchTerm) {
+    const kw = searchTerm.toLowerCase();
+    pool = pool.filter(a =>
+      (a.t && a.t.toLowerCase().includes(kw)) ||
+      a.a.some(name => name.toLowerCase().includes(kw)) ||
+      (a.med && a.med.toLowerCase().includes(kw))
+    );
+  }
+
   // Department filter
   const reqDptSets = filters
     .filter(f => f.type === 'department' && f.mode === 'require')
@@ -417,11 +428,12 @@ async function fetchByIdentifier(identifier) {
  * MoMA always uses the local index; no API call is needed for selection.
  */
 function selectMode(filters = []) {
+  const hasSearch = filters.some(f => f.type === 'search');
   const postFilters = filters.filter(f =>
     f.type === 'classification' || f.type === 'department' ||
-    f.type === 'curated' || f.type === 'on_view'
+    f.type === 'curated' || f.type === 'on_view' || f.type === 'search'
   );
-  return { mode: 'index', apiFilters: [], postFilters };
+  return { mode: hasSearch ? 'keyword_search' : 'index', apiFilters: [], postFilters };
 }
 
 function getFilterTypes() {
@@ -457,6 +469,15 @@ function getFilterTypes() {
       modes: ['require'],
       multiValue: false,
       values: [{ value: 'on_view', label: 'On view only' }],
+    },
+    {
+      type: 'search',
+      label: 'Search',
+      description: 'Search by title, artist name, or medium.',
+      modes: ['require'],
+      multiValue: false,
+      values: [],
+      inputStyle: 'search',
     },
   ];
 }

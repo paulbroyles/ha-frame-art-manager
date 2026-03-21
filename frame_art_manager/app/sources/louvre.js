@@ -81,13 +81,14 @@ function parseMaxPages(html) {
  * Fetch a Louvre search results page.
  * typologyIds: array of numeric typology IDs for pre-filtering (e.g. [22] for Paintings,
  *   [22, 24] for Paintings + Sculptures), or null/[] for no category filter.
+ * searchTerm: optional keyword passed as the q= parameter.
  * Returns { arkIds, html }.
  */
-async function fetchSearchPage(page, typologyIds) {
+async function fetchSearchPage(page, typologyIds, searchTerm) {
   // Build the query string manually to preserve literal brackets in typology[N] parameter
   // names. URLSearchParams would percent-encode them as typology%5BN%5D, which the
   // Louvre server does not recognise.
-  let qs = `q=&page=${encodeURIComponent(page)}`;
+  let qs = `q=${encodeURIComponent(searchTerm || '')}&page=${encodeURIComponent(page)}`;
   if (typologyIds && typologyIds.length > 0) {
     typologyIds.forEach((id, i) => { qs += `&typology[${i}]=${id}`; });
   }
@@ -99,17 +100,17 @@ async function fetchSearchPage(page, typologyIds) {
 }
 
 /**
- * Get (and cache) the max page count for a given set of typology IDs.
+ * Get (and cache) the max page count for a given set of typology IDs and optional search term.
  * Probes page 1 to read the pagination total; falls back to MAX_PAGES on parse failure.
  */
-async function getMaxPages(typologyIds) {
-  const key = (typologyIds || []).slice().sort().join(',');
+async function getMaxPages(typologyIds, searchTerm) {
+  const key = [...(typologyIds || []).slice().sort(), searchTerm || ''].join(',');
   const cached = _pageCountCache.get(key);
   if (cached && (Date.now() - cached.fetchedAt) < PAGE_COUNT_TTL_MS) return cached.maxPages;
 
   let maxPages = cached?.maxPages || MAX_PAGES; // keep stale value on failure
   try {
-    const { html } = await fetchSearchPage(1, typologyIds);
+    const { html } = await fetchSearchPage(1, typologyIds, searchTerm);
     maxPages = parseMaxPages(html) || maxPages;
   } catch (err) {
     console.warn(`[louvre] Could not probe page count for [${key || 'all'}]: ${err.message} — using ${maxPages}`);
@@ -191,6 +192,9 @@ function buildDateString(record) {
 async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
 
+  // Keyword search filter — passed as the q= parameter to the Louvre search URL.
+  const searchTerm = filters.find(f => f.type === 'search' && f.mode === 'require')?.values?.[0] || null;
+
   // Compute eligible categories (require intersection, then exclude union).
   const requireSets = filters
     .filter(f => f.type === 'category' && f.mode === 'require')
@@ -219,8 +223,8 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     ? eligibleCategories.map(c => CATEGORIES[c].id)
     : null;
 
-  // Get (possibly cached) page count for this category combination.
-  const maxPages = await getMaxPages(typologyIds);
+  // Get (possibly cached) page count for this category + search combination.
+  const maxPages = await getMaxPages(typologyIds, searchTerm);
 
   const MAX_ATTEMPTS = 20;
   let arkIds = [];
@@ -230,7 +234,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     if (arkIds.length === 0) {
       const page = Math.floor(Math.random() * maxPages) + 1;
       try {
-        ({ arkIds } = await fetchSearchPage(page, typologyIds));
+        ({ arkIds } = await fetchSearchPage(page, typologyIds, searchTerm));
       } catch (err) {
         console.warn(`[louvre] Failed to fetch search page ${page}: ${err.message}`);
         continue;
@@ -325,10 +329,14 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 
 function selectMode(filters = []) {
   const catFilters = filters.filter(f => f.type === 'category');
+  const hasSearch  = filters.some(f => f.type === 'search');
   const hasRequire = catFilters.some(f => f.mode === 'require');
   const hasExclude = catFilters.some(f => f.mode === 'exclude');
-  const mode = hasRequire ? 'filtered_page' : hasExclude ? 'excluded_page' : 'random_page';
-  return { mode, apiFilters: catFilters, postFilters: [] };
+  const mode = hasSearch  ? 'keyword_search'
+             : hasRequire ? 'filtered_page'
+             : hasExclude ? 'excluded_page'
+             :              'random_page';
+  return { mode, apiFilters: [...catFilters, ...filters.filter(f => f.type === 'search')], postFilters: [] };
 }
 
 // ── Metadata schema ───────────────────────────────────────────────────────────
@@ -365,6 +373,15 @@ function getFilterTypes() {
       multiValue:  true,
       groups:      CATEGORY_GROUPS.map(g => ({ name: g.name, values: g.media })),
       values:      CATEGORY_TYPES.map(name => ({ value: name, label: name })),
+    },
+    {
+      type:        'search',
+      label:       'Search',
+      description: 'Search by title, artist, or subject. Applied via the Louvre collection search API.',
+      modes:       ['require'],
+      multiValue:  false,
+      values:      [],
+      inputStyle:  'search',
     },
   ];
 }
