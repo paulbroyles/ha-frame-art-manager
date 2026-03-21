@@ -16631,8 +16631,11 @@ function renderVirtualTagsList() {
   } else {
     let html = '<div class="ws-virtual-tags-cards">';
     for (const [id, tag] of tagEntries) {
-      const sourceName = webSourcesConfig?.sources?.[tag.sourceId]?.name || tag.sourceId;
-      const filterSummary = summarizeFilters(tag.filters || []);
+      const isUnified = tag.sourceId === null && tag.queryMode === 'search';
+      const sourceName = isUnified
+        ? `All sources — "${tag.queryParams?.keyword || ''}"`
+        : (webSourcesConfig?.sources?.[tag.sourceId]?.name || tag.sourceId);
+      const filterSummary = isUnified ? '' : summarizeFilters(tag.filters || []);
       html += `
         <div class="ws-virtual-tag-card" data-tag-id="${escapeHtml(id)}">
           <div class="ws-virtual-tag-info">
@@ -16673,6 +16676,14 @@ function summarizeFilters(filters) {
   }).join('; ');
 }
 
+function renderUnifiedSearchKeywordInput(keyword) {
+  return `
+    <label class="ws-section-label">Keyword</label>
+    <p class="pool-health-description">Searches all compatible sources simultaneously. One is chosen at random per shuffle.</p>
+    <input type="text" id="ws-vt-unified-keyword" class="ws-type-input" style="width:100%;margin-top:6px;"
+           placeholder="e.g. Monet, impressionism, still life" value="${escapeHtml(keyword)}">`;
+}
+
 function openVirtualTagModal(tagId) {
   virtualTagEditingId = tagId;
   const isEdit = !!tagId;
@@ -16681,6 +16692,7 @@ function openVirtualTagModal(tagId) {
   document.getElementById('ws-virtual-tag-modal-title').textContent =
     isEdit ? 'Edit Virtual Tag' : 'New Virtual Tag';
 
+  const isUnifiedSearch = tag.sourceId === null && tag.queryMode === 'search';
   const sources = webSourcesConfig?.sources || {};
   const sourceOptions = Object.entries(sources).map(([id, s]) =>
     `<option value="${escapeHtml(id)}" ${tag.sourceId === id ? 'selected' : ''}>${escapeHtml(s.name || id)}</option>`
@@ -16702,15 +16714,19 @@ function openVirtualTagModal(tagId) {
         <label class="ws-global-label">Source</label>
         <select id="ws-vt-source" class="ws-select" style="width:100%;">
           <option value="">— Select a source —</option>
+          <option value="__unified_search__" ${isUnifiedSearch ? 'selected' : ''}>All sources (keyword search)</option>
           ${sourceOptions}
         </select>
       </div>
-      <div class="ws-filters-section">
-        <label class="ws-section-label">Filters</label>
-        <p class="pool-health-description">Narrow results for this virtual tag. Inherited global and source filters are shown locked.</p>
-        <div id="ws-vt-filters-container">
-          ${tag.sourceId ? renderVirtualTagFilters(tag.sourceId, tag.filters || []) : '<p class="pool-health-description" style="font-style:italic;">Select a source to configure filters.</p>'}
-        </div>
+      <div class="ws-filters-section" id="ws-vt-filters-section">
+        ${isUnifiedSearch
+          ? renderUnifiedSearchKeywordInput(tag.queryParams?.keyword || '')
+          : `<label class="ws-section-label">Filters</label>
+             <p class="pool-health-description">Narrow results for this virtual tag. Inherited global and source filters are shown locked.</p>
+             <div id="ws-vt-filters-container">
+               ${tag.sourceId ? renderVirtualTagFilters(tag.sourceId, tag.filters || []) : '<p class="pool-health-description" style="font-style:italic;">Select a source to configure filters.</p>'}
+             </div>`
+        }
       </div>
     </div>`;
 
@@ -16723,20 +16739,29 @@ function openVirtualTagModal(tagId) {
     });
   }
 
-  // Source change re-renders filters
+  // Source change re-renders the filters section
   body.querySelector('#ws-vt-source').addEventListener('change', (e) => {
     const sourceId = e.target.value;
-    const filtersContainer = document.getElementById('ws-vt-filters-container');
-    if (sourceId) {
-      initVirtualTagFilterList(filtersContainer, sourceId, []);
+    const filtersSection = document.getElementById('ws-vt-filters-section');
+    if (sourceId === '__unified_search__') {
+      filtersSection.innerHTML = renderUnifiedSearchKeywordInput('');
+    } else if (sourceId) {
+      filtersSection.innerHTML = `
+        <label class="ws-section-label">Filters</label>
+        <p class="pool-health-description">Narrow results for this virtual tag. Inherited global and source filters are shown locked.</p>
+        <div id="ws-vt-filters-container"></div>`;
+      initVirtualTagFilterList(document.getElementById('ws-vt-filters-container'), sourceId, []);
     } else {
-      filtersContainer.innerHTML = '<p class="pool-health-description">Select a source to configure filters.</p>';
+      filtersSection.innerHTML = `
+        <label class="ws-section-label">Filters</label>
+        <p class="pool-health-description">Narrow results for this virtual tag. Inherited global and source filters are shown locked.</p>
+        <div id="ws-vt-filters-container"><p class="pool-health-description" style="font-style:italic;">Select a source to configure filters.</p></div>`;
     }
   });
 
-  // Init filter interactions for pre-rendered filters
+  // Init filter interactions for pre-rendered filters (non-unified-search case)
   const filtersContainer = document.getElementById('ws-vt-filters-container');
-  if (tag.sourceId) {
+  if (tag.sourceId && filtersContainer) {
     initVirtualTagFilterList(filtersContainer, tag.sourceId, tag.filters || [], true);
   }
 
@@ -16857,8 +16882,8 @@ async function saveVirtualTag() {
   const isEdit = virtualTagEditingId !== null;
   const id = isEdit ? virtualTagEditingId : document.getElementById('ws-vt-id')?.value?.trim();
   const label = document.getElementById('ws-vt-label')?.value?.trim();
-  const sourceId = document.getElementById('ws-vt-source')?.value;
-  const filters = readVirtualTagFiltersFromUI();
+  const sourceSelectValue = document.getElementById('ws-vt-source')?.value;
+  const isUnifiedSearch = sourceSelectValue === '__unified_search__';
 
   if (!id || !/^[a-z0-9_-]+$/.test(id)) {
     showToast('ID must be a lowercase slug (a-z, 0-9, hyphens, underscores)', 'error');
@@ -16868,9 +16893,21 @@ async function saveVirtualTag() {
     showToast('Label is required', 'error');
     return;
   }
-  if (!sourceId) {
+  if (!sourceSelectValue) {
     showToast('Please select a source', 'error');
     return;
+  }
+
+  let tagPayload;
+  if (isUnifiedSearch) {
+    const keyword = document.getElementById('ws-vt-unified-keyword')?.value?.trim();
+    if (!keyword) {
+      showToast('Enter a keyword for the search', 'error');
+      return;
+    }
+    tagPayload = { label, sourceId: null, queryMode: 'search', queryParams: { keyword }, filters: [] };
+  } else {
+    tagPayload = { label, sourceId: sourceSelectValue, filters: readVirtualTagFiltersFromUI() };
   }
 
   const saveBtn = document.getElementById('ws-virtual-tag-save');
@@ -16881,9 +16918,7 @@ async function saveVirtualTag() {
       ? `${API_BASE}/web-sources/virtual-tags/${encodeURIComponent(id)}`
       : `${API_BASE}/web-sources/virtual-tags`;
     const method = isEdit ? 'PUT' : 'POST';
-    const body = isEdit
-      ? { label, sourceId, filters }
-      : { id, label, sourceId, filters };
+    const body = isEdit ? tagPayload : { id, ...tagPayload };
 
     const response = await fetch(url, {
       method,

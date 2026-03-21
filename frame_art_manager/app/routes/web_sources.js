@@ -1064,20 +1064,26 @@ async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio) {
       throw Object.assign(new Error('Unified search virtual tag requires queryParams.keyword'), { statusCode: 400 });
     }
 
-    const candidates = getSearchCapableSources()
+    const pool = getSearchCapableSources()
       .filter(id => BUILTIN_SOURCES[id])
-      .filter(id => isSourceCompatible(id, aspectRatio))
-      .sort(() => Math.random() - 0.5);
+      .filter(id => isSourceCompatible(id, aspectRatio));
 
-    if (candidates.length === 0) {
+    if (pool.length === 0) {
       throw Object.assign(
         new Error(`No search-capable sources available for aspect ratio "${aspectRatio}"`),
         { statusCode: 503 }
       );
     }
 
+    // Draw sources one at a time using equal-weight random selection (splice from pool).
+    // This guarantees each source has the same probability of being selected regardless
+    // of response time or reliability — unlike shuffle+first-wins which biases toward
+    // faster/more-reliable sources.
     let lastErr;
-    for (const candidateId of candidates) {
+    const remaining = pool.slice();
+    while (remaining.length > 0) {
+      const idx = Math.floor(Math.random() * remaining.length);
+      const candidateId = remaining.splice(idx, 1)[0];
       try {
         const searchFilter = { type: 'search', mode: 'require', values: [keyword] };
         const cFilters = mergeFilterCascade(
