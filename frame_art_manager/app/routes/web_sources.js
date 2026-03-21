@@ -17,6 +17,7 @@ const SOURCE_MODULES = {
   moma: require('../sources/moma'),
   louvre: require('../sources/louvre'),
   artsy: require('../sources/artsy'),
+  delart: require('../sources/delart'),
 };
 
 const SOURCE_FETCHERS = Object.fromEntries(
@@ -171,6 +172,12 @@ const BUILTIN_SOURCES = {
     name: 'Artsy',
     description: 'For-sale artworks from galleries worldwide via Artsy\'s marketplace',
     type: 'artsy',
+  },
+  delart: {
+    id: 'delart',
+    name: 'Delaware Art Museum',
+    description: 'American paintings, Pre-Raphaelite works, illustrations, and more from the Delaware Art Museum\'s collection of ~12,800 objects',
+    type: 'delart',
   },
 };
 
