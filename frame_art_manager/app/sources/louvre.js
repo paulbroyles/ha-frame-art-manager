@@ -113,7 +113,7 @@ async function getMaxPages(typologyIds, searchTerm) {
     const { html } = await fetchSearchPage(1, typologyIds, searchTerm);
     maxPages = parseMaxPages(html) || maxPages;
   } catch (err) {
-    console.warn(`[louvre] Could not probe page count for [${key || 'all'}]: ${err.message} — using ${maxPages}`);
+    console.warn(`[louvre] Could not probe page count for [${key || 'all'}]: ${err.message} (code=${err.code} status=${err.response?.status}) — using ${maxPages}`);
   }
   _pageCountCache.set(key, { maxPages, fetchedAt: Date.now() });
   console.log(`[louvre] Page count for [${key || 'all'}]: ${maxPages}`);
