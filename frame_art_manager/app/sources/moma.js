@@ -545,6 +545,19 @@ async function suggestArtists(query, limit = 10) {
     .map(e => ({ name: e.name, count: e.count, source: 'moma' }));
 }
 
+/**
+ * Count how many artworks in the MoMA index match a given artist name.
+ * Uses the same substring match as fetchRandomArtwork's artist filter.
+ *
+ * @param {string} artistName
+ * @returns {Promise<number>}
+ */
+async function countArtistArtworks(artistName) {
+  await ensureCache();
+  const q = artistName.toLowerCase().trim();
+  return artworkIndex.filter(rec => rec.a.some(n => n.toLowerCase().includes(q))).length;
+}
+
 const settingsSchema = { fields: [] };
 
 const metadataFields = [
@@ -580,6 +593,7 @@ module.exports = {
   selectMode,
   getFilterTypes,
   suggestArtists,
+  countArtistArtworks,
   settingsSchema,
   metadataFields,
   defaultMapping,

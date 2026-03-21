@@ -17234,6 +17234,7 @@ function renderWebSourcesTestSection() {
         ${vtOptions}
       </select>
     </div>
+    <div id="ws-test-artist-counts" style="display:none;margin-bottom:10px;font-size:12px;color:var(--text-muted,#666);"></div>
   </div>`;
 
   // Ad-hoc mode
@@ -17444,7 +17445,12 @@ function renderWebSourcesTestSection() {
   // Virtual tag selector
   document.getElementById('ws-test-virtual-tag')?.addEventListener('change', (e) => {
     webSourceTestVirtualTagId = e.target.value;
+    updateArtistSourceCounts(webSourceTestVirtualTagId);
   });
+  // Show counts if an artist tag is already selected
+  if (webSourceTestMode === 'virtual-tag' && webSourceTestVirtualTagId) {
+    updateArtistSourceCounts(webSourceTestVirtualTagId);
+  }
 
   // Ad-hoc source selector + filter rendering
   const adHocSourceSelect = document.getElementById('ws-test-ad-hoc-source');
@@ -17577,6 +17583,44 @@ function readTestAdHocFiltersFromUI() {
     }
   });
   return filters;
+}
+
+/**
+ * Fetch and display per-source artwork counts for the selected artist virtual tag.
+ * Only runs when the selected tag has queryMode === 'artist'.
+ */
+async function updateArtistSourceCounts(tagId) {
+  const el = document.getElementById('ws-test-artist-counts');
+  if (!el) return;
+
+  const tag = tagId && webSourcesConfig?.virtualTags?.[tagId];
+  if (!tag || tag.queryMode !== 'artist' || !tag.queryParams?.artist) {
+    el.style.display = 'none';
+    el.textContent = '';
+    return;
+  }
+
+  const artist = tag.queryParams.artist;
+  el.style.display = '';
+  el.innerHTML = `<span style="font-style:italic;">Checking source counts for "${escapeHtml(artist)}"…</span>`;
+
+  try {
+    const resp = await fetch(`${API_BASE}/artist-suggest/counts?artist=${encodeURIComponent(artist)}`);
+    if (!resp.ok) throw new Error('Request failed');
+    const { counts } = await resp.json();
+
+    const SOURCE_LABELS = { moma: 'MoMA', met_museum: 'Met', google_arts: 'Google Arts', artsy: 'Artsy' };
+    const parts = Object.entries(counts).map(([id, count]) => {
+      const label = SOURCE_LABELS[id] || id;
+      const value = count === null ? '—' : count === 0
+        ? `<span style="color:var(--error-color,#c00);">0</span>`
+        : `<strong>${count}</strong>`;
+      return `${label}: ${value}`;
+    });
+    el.innerHTML = `<span style="font-weight:600;">Source counts:</span> ${parts.join(' &nbsp;·&nbsp; ')}`;
+  } catch {
+    el.innerHTML = `<span style="font-style:italic;color:var(--error-color,#c00);">Could not fetch source counts</span>`;
+  }
 }
 
 async function fetchTestWebSource() {

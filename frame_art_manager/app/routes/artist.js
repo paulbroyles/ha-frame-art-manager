@@ -22,6 +22,7 @@ const wikidata = require('../utils/wikidata');
 const moma = require('../sources/moma');
 const artsy = require('../sources/artsy');
 const googleArts = require('../sources/google_arts');
+const metMuseum = require('../sources/met_museum');
 
 // Wire the resolver once at module load time.
 // Source suggest functions are injected — the resolver has no direct dependency on these modules.
@@ -95,6 +96,47 @@ router.get('/enrich', async (req, res) => {
     console.error('[artist-suggest] enrich error:', err);
     res.status(500).json({ error: 'Failed to fetch artist data from Wikidata' });
   }
+});
+
+/**
+ * GET /api/artist-suggest/counts?artist=Van+Gogh
+ *
+ * Returns per-source artwork counts for a given artist name.
+ * All capable sources are queried in parallel. Sources that don't support
+ * counting (Artsy, Louvre, DelArt) return null.
+ *
+ * Response:
+ * {
+ *   "artist": "Van Gogh",
+ *   "counts": {
+ *     "moma":        42,
+ *     "met_museum":  8,      // raw API total — may include partial-word false matches
+ *     "google_arts": 50,
+ *     "artsy":       null
+ *   }
+ * }
+ */
+router.get('/counts', async (req, res) => {
+  const artist = (req.query.artist || '').trim();
+  if (artist.length < 2) {
+    return res.status(400).json({ error: 'artist must be at least 2 characters' });
+  }
+
+  const [momaCount, metCount, googleCount] = await Promise.all([
+    moma.countArtistArtworks(artist),
+    metMuseum.countArtistArtworks(artist),
+    googleArts.countArtistArtworks(artist),
+  ]);
+
+  res.json({
+    artist,
+    counts: {
+      moma:        momaCount,
+      met_museum:  metCount,
+      google_arts: googleCount,
+      artsy:       null,
+    },
+  });
 });
 
 module.exports = router;

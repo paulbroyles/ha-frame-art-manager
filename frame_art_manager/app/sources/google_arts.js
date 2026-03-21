@@ -1571,6 +1571,24 @@ function getDefaultFilters() {
 }
 
 /**
+ * Count how many artworks Google Arts has for a given artist name.
+ * Resolves the artist entity ID then fetches the total count.
+ * Returns 0 if the artist is not found; null on error.
+ *
+ * @param {string} artistName
+ * @returns {Promise<number|null>}
+ */
+async function countArtistArtworks(artistName) {
+  try {
+    const entityId = await resolveArtistEntity(artistName);
+    if (!entityId) return 0;
+    return await getArtistEntityCount(entityId);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Suggest artist name candidates from Google Arts & Culture search.
  * Seeds _artistEntityCache as a side effect (entity IDs needed for subsequent queries).
  *
@@ -1615,4 +1633,4 @@ async function suggestArtists(query, limit = 5) {
   return results.slice(0, limit);
 }
 
-module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, selectMode, suggestArtists, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, DEFAULT_EXCLUDED_TYPES, getFilterTypes, getDefaultFilters, metadataFields, defaultMapping };
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, selectMode, suggestArtists, countArtistArtworks, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, DEFAULT_EXCLUDED_TYPES, getFilterTypes, getDefaultFilters, metadataFields, defaultMapping };

@@ -386,4 +386,25 @@ async function fetchByIdentifier(identifier) {
   return _fetchByObjectIdOriginal(objectId);
 }
 
-module.exports = { fetchRandomArtwork, fetchByObjectId, fetchByIdentifier, canHandleIdentifier, selectMode, MEDIUM_TYPES, MEDIUM_CATEGORIES, getFilterTypes, metadataFields, defaultMapping };
+/**
+ * Count how many artworks the Met has for a given artist name.
+ * Uses the same artistOrCulture=true search as fetchRandomArtwork.
+ * Returns the raw API total (pre artist-name post-filter — may include partial-word false matches).
+ * Returns null on network error.
+ *
+ * @param {string} artistName
+ * @returns {Promise<number|null>}
+ */
+async function countArtistArtworks(artistName) {
+  try {
+    const response = await axios.get(`${BASE_URL}/search`, {
+      params: { q: artistName, hasImages: true, artistOrCulture: true },
+      timeout: 10000,
+    });
+    return response.data.total ?? null;
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { fetchRandomArtwork, fetchByObjectId, fetchByIdentifier, canHandleIdentifier, selectMode, countArtistArtworks, MEDIUM_TYPES, MEDIUM_CATEGORIES, getFilterTypes, metadataFields, defaultMapping };
