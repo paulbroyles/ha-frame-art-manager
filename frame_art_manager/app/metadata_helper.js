@@ -130,6 +130,16 @@ class MetadataHelper {
         await this.writeMetadata(parsed);
       }
 
+      // Migrate: stamp kind='artist' on the built-in creator entity type if missing.
+      // Covers deployments created before the artist-linking feature was added.
+      if (parsed.entityTypes) {
+        const creator = parsed.entityTypes.find(e => e.id === 'creator');
+        if (creator && !creator.kind) {
+          creator.kind = 'artist';
+          await this.writeMetadata(parsed);
+        }
+      }
+
       // Seed default Custom Metadata fields if none have been defined yet.
       // Covers fresh installs and configs created before attributes existed.
       // Only runs when 'attributes' is absent (user has never touched Custom Metadata).
