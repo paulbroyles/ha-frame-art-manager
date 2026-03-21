@@ -17612,11 +17612,9 @@ async function updateArtistSourceCounts(tagId) {
     const SOURCE_LABELS = { moma: 'MoMA', met_museum: 'Met', google_arts: 'Google Arts', louvre: 'Louvre', artsy: 'Artsy', delart: 'DelArt' };
     const parts = Object.entries(counts).map(([id, count]) => {
       const label = SOURCE_LABELS[id] || id;
-      const unit = units?.[id];
       if (count === null) return `${label}: <span style="color:var(--text-muted,#999);">—</span>`;
       if (count === 0) return `${label}: <span style="color:var(--error-color,#c00);">0</span>`;
-      const display = unit === 'pages' ? `~${count} pages` : String(count);
-      return `${label}: <strong>${display}</strong>`;
+      return `${label}: <strong>${count}</strong>`;
     });
     el.innerHTML = `<span style="font-weight:600;">Source counts:</span> ${parts.join(' &nbsp;·&nbsp; ')}`;
   } catch {

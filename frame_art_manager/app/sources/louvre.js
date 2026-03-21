@@ -472,7 +472,11 @@ async function fetchByIdentifier(identifier) {
  */
 async function countArtistArtworks(artistName) {
   try {
-    return await getMaxPages([], artistName);
+    const pages = await getMaxPages([], artistName);
+    // MAX_PAGES is the fallback when the probe fails — treat as unknown.
+    if (pages === MAX_PAGES) return null;
+    // Each page has up to 20 items; multiply for an estimated total.
+    return pages * 20;
   } catch {
     return null;
   }

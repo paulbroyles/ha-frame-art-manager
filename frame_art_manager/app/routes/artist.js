@@ -115,7 +115,7 @@ router.get('/enrich', async (req, res) => {
  *     "moma":        42,
  *     "met_museum":  8,      // raw API total — may include partial-word false matches
  *     "google_arts": 50,
- *     "louvre":      3,      // result pages (~24 items each), not individual artworks
+ *     "louvre":      60,     // estimated artworks (pages × 20); null if probe failed
  *     "delart":      7,      // artworks in DelArt people directory
  *     "artsy":       null    // not countable without additional API calls
  *   },
@@ -148,9 +148,7 @@ router.get('/counts', async (req, res) => {
       delart:      delartCount,
       artsy:       null,
     },
-    units: {
-      louvre: 'pages',
-    },
+    units: {},
   });
 });
 
