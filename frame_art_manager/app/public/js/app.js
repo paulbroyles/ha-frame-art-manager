@@ -11622,7 +11622,7 @@ async function openReviewUnlinkedArtistsModal() {
       return;
     }
     const items = suggestions
-      .filter(s => (s.sources || []).some(src => src !== 'local'))
+      .filter(s => s.artsySlug || s.wikidataId || s.googleEntityId)
       .map(s => {
         const description = s.description
           ? `<span class="artist-suggest-description">${escapeHtml(s.description)}</span>` : '';

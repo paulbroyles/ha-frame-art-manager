@@ -36,7 +36,7 @@ const resolver = createArtistResolver({
     { id: 'delart',      suggestArtists: delart.suggestArtists },
   ],
   wikidata,
-  timeout: 800,
+  timeout: 1500,
 });
 
 /**
