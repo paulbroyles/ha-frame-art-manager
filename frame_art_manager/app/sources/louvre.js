@@ -108,15 +108,21 @@ async function getMaxPages(typologyIds, searchTerm) {
   const cached = _pageCountCache.get(key);
   if (cached && (Date.now() - cached.fetchedAt) < PAGE_COUNT_TTL_MS) return cached.maxPages;
 
-  let maxPages = cached?.maxPages || MAX_PAGES; // keep stale value on failure
+  const fallback = cached?.maxPages || MAX_PAGES; // keep stale value on failure
+  let probed = null;
   try {
     const { html } = await fetchSearchPage(1, typologyIds, searchTerm);
-    maxPages = parseMaxPages(html) || maxPages;
+    probed = parseMaxPages(html);
   } catch (err) {
-    console.warn(`[louvre] Could not probe page count for [${key || 'all'}]: ${err.message} — using ${maxPages}`);
+    console.warn(`[louvre] Could not probe page count for [${key || 'all'}]: ${err.message} — using fallback`);
   }
-  _pageCountCache.set(key, { maxPages, fetchedAt: Date.now() });
-  console.log(`[louvre] Page count for [${key || 'all'}]: ${maxPages}`);
+
+  const maxPages = probed ?? fallback;
+  // Only cache a successful probe — don't lock in a fallback for 7 days.
+  if (probed !== null) {
+    _pageCountCache.set(key, { maxPages: probed, fetchedAt: Date.now() });
+  }
+  console.log(`[louvre] Page count for [${key || 'all'}]: ${maxPages}${probed === null ? ' (fallback)' : ''}`);
   return maxPages;
 }
 
