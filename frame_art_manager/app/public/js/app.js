@@ -14696,9 +14696,10 @@ let webSourceCoreFilterTypes = []; // Cached framework-level filter types (e.g. 
 let webSourceImageProcessingSchema = {}; // Cached imageProcessingSchema from GET /config
 let webSourceTestOrientation = 'landscape'; // Simulated TV orientation for test fetches
 let webSourceSpecificImage = ''; // Optional specific image URL or ID for test fetches
-let webSourceTestMode = 'virtual-tag'; // 'virtual-tag' | 'ad-hoc' | 'specific'
+let webSourceTestMode = 'virtual-tag'; // 'virtual-tag' | 'ad-hoc' | 'specific' | 'tagset'
 let webSourceTestVirtualTagId = ''; // Selected virtual tag for test
 let webSourceTestAdHocSourceId = ''; // Selected source for ad-hoc test
+let webSourceTestTagsetName = ''; // Selected tagset for tagset-mode test
 let webSourceTestAdHocFilters = []; // Ad-hoc filters built inline
 
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
@@ -16949,9 +16950,22 @@ function renderWebSourcesTestSection() {
 
   // Build virtual tag options
   const vtOptions = Object.entries(virtualTags).map(([id, vt]) => {
-    const srcName = sources[vt.sourceId]?.name || vt.sourceId;
+    const srcName = vt.sourceId
+      ? (sources[vt.sourceId]?.name || vt.sourceId)
+      : (vt.queryParams?.keyword ? `Search: "${vt.queryParams.keyword}"` : 'Unified Search');
     return `<option value="${escapeHtml(id)}" ${webSourceTestVirtualTagId === id ? 'selected' : ''}>${escapeHtml(vt.label)} (${escapeHtml(srcName)})</option>`;
   }).join('');
+
+  // Build tagset options — only tagsets that have at least one ws: virtual tag
+  const tagsetOptions = Object.entries(allGlobalTagsets || {})
+    .map(([name, ts]) => {
+      const wsTags = (ts.tags || []).filter(t => t.startsWith('ws:'));
+      return { name, wsTags };
+    })
+    .filter(({ wsTags }) => wsTags.length > 0)
+    .map(({ name, wsTags }) =>
+      `<option value="${escapeHtml(name)}" ${webSourceTestTagsetName === name ? 'selected' : ''}>${escapeHtml(name)} (${wsTags.length} virtual tag${wsTags.length !== 1 ? 's' : ''})</option>`
+    ).join('');
 
   // Build source options for ad-hoc mode
   const sourceOptions = Object.entries(sources).map(([id, src]) =>
@@ -16964,6 +16978,7 @@ function renderWebSourcesTestSection() {
   html += `<div class="ws-test-modes">
     <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'virtual-tag' ? 'active' : ''}" data-mode="virtual-tag">Virtual Tag</button>
     <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'ad-hoc' ? 'active' : ''}" data-mode="ad-hoc">Ad-hoc</button>
+    <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'tagset' ? 'active' : ''}" data-mode="tagset">Tagset</button>
     <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'specific' ? 'active' : ''}" data-mode="specific">Specific Image</button>
   </div>`;
 
@@ -16986,6 +17001,20 @@ function renderWebSourcesTestSection() {
       </select>
     </div>
     <div id="ws-test-ad-hoc-filters"></div>
+  </div>`;
+
+  // Tagset mode
+  html += `<div class="ws-test-mode-panel" id="ws-test-panel-tagset" style="${webSourceTestMode === 'tagset' ? '' : 'display:none;'}">
+    <div style="margin-bottom:10px;">
+      ${tagsetOptions
+        ? `<select id="ws-test-tagset" class="ws-select" style="width:100%;">
+             <option value="">— Select a tagset —</option>
+             ${tagsetOptions}
+           </select>
+           <p style="font-size:12px;color:var(--text-muted,#666);margin:6px 0 0;">Picks a random web source virtual tag from this tagset, simulating shuffle behavior.</p>`
+        : `<p style="font-size:13px;color:var(--text-muted,#666);">No tagsets with web source virtual tags found.</p>`
+      }
+    </div>
   </div>`;
 
   // Specific Image mode
@@ -17183,6 +17212,11 @@ function renderWebSourcesTestSection() {
   // Init ad-hoc filters if source already selected
   if (webSourceTestAdHocSourceId) renderTestAdHocFilters();
 
+  // Tagset selector
+  document.getElementById('ws-test-tagset')?.addEventListener('change', (e) => {
+    webSourceTestTagsetName = e.target.value;
+  });
+
   // Specific image input
   document.getElementById('web-source-specific-image')?.addEventListener('input', (e) => {
     webSourceSpecificImage = e.target.value;
@@ -17315,6 +17349,13 @@ async function fetchTestWebSource() {
       if (!webSourceTestAdHocSourceId) throw new Error('Select a source');
       body.sourceId = webSourceTestAdHocSourceId;
       body.filters = readTestAdHocFiltersFromUI();
+    } else if (webSourceTestMode === 'tagset') {
+      if (!webSourceTestTagsetName) throw new Error('Select a tagset');
+      const tagset = allGlobalTagsets[webSourceTestTagsetName];
+      const wsTags = (tagset?.tags || []).filter(t => t.startsWith('ws:'));
+      if (wsTags.length === 0) throw new Error(`Tagset "${webSourceTestTagsetName}" has no web source virtual tags`);
+      const picked = wsTags[Math.floor(Math.random() * wsTags.length)];
+      body.virtualTagId = picked.slice(3); // strip 'ws:' prefix
     } else {
       // virtual-tag mode
       if (!webSourceTestVirtualTagId) throw new Error('Select a virtual tag');
