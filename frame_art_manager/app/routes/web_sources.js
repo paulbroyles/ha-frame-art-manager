@@ -1534,33 +1534,83 @@ router.post('/test-fetch', async (req, res) => {
     } else {
       // Virtual tag determines source.
       chosenSourceId = virtualTag?.sourceId || null;
-      if (!chosenSourceId) {
-        return res.status(400).json({
-          error: 'Select a virtual tag or source for random test fetches.',
-        });
-      }
 
-      const fetcher = SOURCE_FETCHERS[chosenSourceId];
-      if (!fetcher) {
-        return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
-      }
+      if (!chosenSourceId && virtualTag?.queryMode === 'search') {
+        // Unified keyword search — fan out to all search-capable sources.
+        const keyword = virtualTag.queryParams?.keyword;
+        if (!keyword) {
+          return res.status(400).json({ error: 'Unified search virtual tag requires queryParams.keyword' });
+        }
+        const candidates = getSearchCapableSources()
+          .filter(id => BUILTIN_SOURCES[id])
+          .filter(id => isSourceCompatible(id, aspectRatio))
+          .sort(() => Math.random() - 0.5);
+        if (candidates.length === 0) {
+          return res.status(503).json({ error: `No search-capable sources available for aspect ratio "${aspectRatio}"` });
+        }
+        let lastErr;
+        for (const candidateId of candidates) {
+          try {
+            const searchFilter = { type: 'search', mode: 'require', values: [keyword] };
+            const cFilters = mergeFilterCascade(
+              webSources.globalFilters || [],
+              webSources.sources[candidateId]?.filters || [],
+              virtualTag.filters || []
+            );
+            cFilters.push(searchFilter);
+            const cExtraOpts = SOURCE_MODULES[candidateId]?.getExtraOptions?.(
+              webSources.sources[candidateId]?.settings
+            ) || {};
+            const result = await SOURCE_FETCHERS[candidateId](cFilters, { aspectRatio, ...cExtraOpts });
+            chosenSourceId = candidateId;
+            imageBuffer    = result.imageBuffer;
+            contentType    = result.contentType;
+            artMetadata    = result.metadata;
+            const modeInfo = SOURCE_MODULES[candidateId]?.selectMode?.(cFilters) || { mode: 'keyword_search' };
+            fetchTrace.path = 'unified-search';
+            fetchTrace.virtualTagId = virtualTagId;
+            fetchTrace.keyword = keyword;
+            fetchTrace.sourceId = candidateId;
+            fetchTrace.mode = modeInfo.mode;
+            fetchTrace.mergedFilters = cFilters;
+            break;
+          } catch (err) {
+            console.warn(`[web_sources] test-fetch unified search "${keyword}": ${candidateId} failed — ${err.message}`);
+            lastErr = err;
+          }
+        }
+        if (!chosenSourceId) {
+          return res.status(503).json({ error: `Unified search for "${keyword}": no source returned results. Last error: ${lastErr?.message}` });
+        }
+      } else {
+        if (!chosenSourceId) {
+          return res.status(400).json({
+            error: 'Select a virtual tag or source for random test fetches.',
+          });
+        }
 
-      // Merge filters across cascade levels: global → source → virtual tag.
-      const globalFilters = webSources.globalFilters || [];
-      const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
-      const tagFilters = virtualTag?.filters || [];
-      const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
-      const sourceModule = SOURCE_MODULES[chosenSourceId];
-      const modeInfo = sourceModule?.selectMode?.(mergedFilters) || { mode: 'unknown' };
-      fetchTrace.path = 'virtual-tag';
-      fetchTrace.virtualTagId = virtualTagId;
-      fetchTrace.mode = modeInfo.mode;
-      fetchTrace.globalFilters = globalFilters;
-      fetchTrace.sourceFilters = sourceFilters;
-      fetchTrace.tagFilters = tagFilters;
-      fetchTrace.mergedFilters = mergedFilters;
-      const extraOpts = sourceModule?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
-      ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(mergedFilters, { aspectRatio, ...extraOpts }));
+        const fetcher = SOURCE_FETCHERS[chosenSourceId];
+        if (!fetcher) {
+          return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
+        }
+
+        // Merge filters across cascade levels: global → source → virtual tag.
+        const globalFilters = webSources.globalFilters || [];
+        const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
+        const tagFilters = virtualTag?.filters || [];
+        const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
+        const sourceModule = SOURCE_MODULES[chosenSourceId];
+        const modeInfo = sourceModule?.selectMode?.(mergedFilters) || { mode: 'unknown' };
+        fetchTrace.path = 'virtual-tag';
+        fetchTrace.virtualTagId = virtualTagId;
+        fetchTrace.mode = modeInfo.mode;
+        fetchTrace.globalFilters = globalFilters;
+        fetchTrace.sourceFilters = sourceFilters;
+        fetchTrace.tagFilters = tagFilters;
+        fetchTrace.mergedFilters = mergedFilters;
+        const extraOpts = sourceModule?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
+        ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(mergedFilters, { aspectRatio, ...extraOpts }));
+      }
     }
 
     const orientation = tvOrientation || 'landscape';
