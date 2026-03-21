@@ -122,6 +122,29 @@ const createDefaultEditState = () => ({
   previewEnabled: true
 });
 
+// ── Artist suggest frontend cache ────────────────────────────────────────────
+// Shared by entity autocomplete and web source artist filter inputs.
+const _frontendArtistSuggestCache = new Map();
+const FRONTEND_ARTIST_SUGGEST_TTL = 5 * 60 * 1000; // 5 min
+
+async function fetchArtistSuggestions(q, limit = 8) {
+  const key = q.toLowerCase().trim();
+  const cached = _frontendArtistSuggestCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < FRONTEND_ARTIST_SUGGEST_TTL) {
+    return cached.results;
+  }
+  try {
+    const resp = await fetch(`${API_BASE}/artist-suggest?q=${encodeURIComponent(q)}&limit=${limit}`);
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    const results = data.suggestions || [];
+    _frontendArtistSuggestCache.set(key, { results, fetchedAt: Date.now() });
+    return results;
+  } catch {
+    return [];
+  }
+}
+
 const FILTER_ALIASES = {
   'gallery-soft': 'watercolor',
   'gallery': 'watercolor',
@@ -11745,6 +11768,9 @@ function renderUploadEntities() {
   section.querySelectorAll('.entity-key-input').forEach(input => {
     initEntityKeyAutocomplete(input, allEntityInstances[input.dataset.entityId] || {});
   });
+  section.querySelectorAll('.entity-field-input').forEach(input => {
+    input.addEventListener('input', () => input.classList.remove('suggested'));
+  });
 }
 
 // Collect entity data from the upload form
@@ -11792,6 +11818,10 @@ function renderModalEntities(imageData) {
       initEntityKeyAutocomplete(keyInput, allEntityInstances[entityId] || {});
     }
     box.querySelectorAll('.entity-field-input').forEach(input => {
+      input.addEventListener('input', () => {
+        // User manually edited a Wikidata-suggested field — accept it
+        input.classList.remove('suggested');
+      });
       input.addEventListener('blur', () => {
         setTimeout(() => saveModalEntityBox(box), 150);
       });
@@ -11809,33 +11839,112 @@ function initEntityKeyAutocomplete(keyInput, instances) {
   const dropdown = wrapper && wrapper.querySelector('.entity-autocomplete-dropdown');
   if (!dropdown) return;
 
-  function showDropdown(matches) {
-    if (matches.length === 0) {
+  const isCreator = entityId === 'creator';
+
+  function showDropdown(localMatches, remoteSuggestions = []) {
+    const items = [];
+
+    // Local instances first (with "Saved" badge)
+    for (const [key, data] of localMatches) {
+      items.push(`<div class="entity-autocomplete-item artist-suggest-item" data-key="${escapeHtml(key)}" data-suggest-type="local">
+        <span class="artist-suggest-name">${escapeHtml(data[keyAttr] || key)}</span>
+        <span class="artist-suggest-badge artist-suggest-saved">Saved</span>
+      </div>`);
+    }
+
+    // Remote suggestions (excluding names already shown as local)
+    const localNames = new Set(localMatches.map(([, data]) => (data[keyAttr] || '').toLowerCase()));
+    for (const s of remoteSuggestions) {
+      if (localNames.has((s.name || '').toLowerCase())) continue;
+      const description = s.description
+        ? `<span class="artist-suggest-description">${escapeHtml(s.description)}</span>` : '';
+      const nonLocalSources = (s.sources || []).filter(src => src !== 'local');
+      const badges = nonLocalSources.map(src =>
+        `<span class="artist-suggest-badge">${escapeHtml(src)}</span>`).join('');
+      items.push(`<div class="entity-autocomplete-item artist-suggest-item"
+          data-suggest-type="external"
+          data-name="${escapeHtml(s.name)}"
+          data-wikidata-id="${escapeHtml(s.wikidataId || '')}">
+        <div class="artist-suggest-main">
+          <span class="artist-suggest-name">${escapeHtml(s.name)}</span>
+          ${description}
+        </div>
+        ${badges ? `<div class="artist-suggest-sources">${badges}</div>` : ''}
+      </div>`);
+    }
+
+    if (items.length === 0) {
       dropdown.style.display = 'none';
       dropdown.innerHTML = '';
       return;
     }
-    dropdown.innerHTML = matches
-      .map(([key, data]) => `<div class="entity-autocomplete-item" data-key="${escapeHtml(key)}">${escapeHtml(data[keyAttr] || key)}</div>`)
-      .join('');
+    dropdown.innerHTML = items.join('');
     dropdown.style.display = '';
-    dropdown.querySelectorAll('.entity-autocomplete-item').forEach(item => {
-      item.addEventListener('mousedown', e => {
+
+    dropdown.querySelectorAll('.artist-suggest-item').forEach(item => {
+      item.addEventListener('mousedown', async e => {
         e.preventDefault();
-        selectEntityInstance(keyInput, instances, item.dataset.key, entityType);
         dropdown.style.display = 'none';
         dropdown.innerHTML = '';
+
+        if (item.dataset.suggestType === 'local') {
+          selectEntityInstance(keyInput, instances, item.dataset.key, entityType);
+        } else {
+          // External suggestion: fill name immediately
+          const name = item.dataset.name;
+          keyInput.value = name;
+          // Remove any previous .suggested class from sibling fields
+          const box = keyInput.closest('.entity-input-box');
+          if (box) box.querySelectorAll('.entity-field-input.suggested').forEach(f => f.classList.remove('suggested'));
+
+          // If wikidataId present, enrich and fill remaining fields
+          const wikidataId = item.dataset.wikidataId;
+          if (wikidataId && box) {
+            try {
+              const resp = await fetch(`${API_BASE}/artist-suggest/enrich?wikidataId=${encodeURIComponent(wikidataId)}`);
+              if (resp.ok) {
+                const data = await resp.json();
+                box.querySelectorAll('.entity-field-input').forEach(input => {
+                  const attr = input.dataset.attribute;
+                  if (attr === 'name') return; // already filled
+                  if (attr === 'lifespan' && data.lifespan) {
+                    input.value = data.lifespan;
+                    input.classList.add('suggested');
+                  } else if (attr === 'nationality' && data.nationality) {
+                    input.value = data.nationality;
+                    input.classList.add('suggested');
+                  }
+                });
+              }
+            } catch { /* graceful degradation */ }
+          }
+        }
       });
     });
   }
 
+  let debounceTimer;
   keyInput.addEventListener('input', () => {
     const q = keyInput.value.trim().toLowerCase();
     if (!q) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
-    const matches = Object.entries(instances).filter(([, data]) =>
+
+    const localMatches = Object.entries(instances).filter(([, data]) =>
       String(data[keyAttr] || '').toLowerCase().includes(q)
     );
-    showDropdown(matches);
+
+    if (!isCreator || q.length < 2) {
+      showDropdown(localMatches);
+      return;
+    }
+
+    // Show local matches immediately; enrich with remote after debounce
+    showDropdown(localMatches);
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(async () => {
+      const suggestions = await fetchArtistSuggestions(q, 8);
+      if (keyInput.value.trim().toLowerCase() !== q) return; // stale
+      showDropdown(localMatches, suggestions);
+    }, 300);
   });
 
   keyInput.addEventListener('blur', () => {
@@ -11845,6 +11954,71 @@ function initEntityKeyAutocomplete(keyInput, instances) {
   keyInput.addEventListener('keydown', e => {
     if (e.key === 'Escape') { dropdown.style.display = 'none'; dropdown.innerHTML = ''; }
   });
+}
+
+/**
+ * Attach artist name autocomplete to a web source artist filter input or unified artist input.
+ * Name-only: selection fills the input value, no entity field filling.
+ */
+function initArtistSearchAutocomplete(input) {
+  // Create or find dropdown container
+  const wrap = input.parentElement;
+  let dropdown = wrap.querySelector('.artist-suggest-dropdown');
+  if (!dropdown) {
+    dropdown = document.createElement('div');
+    dropdown.className = 'artist-suggest-dropdown';
+    dropdown.style.display = 'none';
+    if (getComputedStyle(wrap).position === 'static') wrap.style.position = 'relative';
+    wrap.appendChild(dropdown);
+  }
+
+  let debounceTimer;
+  input.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const q = input.value.trim();
+    if (q.length < 2) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
+    debounceTimer = setTimeout(async () => {
+      const suggestions = await fetchArtistSuggestions(q, 8);
+      if (input.value.trim() !== q) return; // stale
+      if (!suggestions.length) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
+      dropdown.innerHTML = suggestions.map(s => {
+        const description = s.description
+          ? `<span class="artist-suggest-description">${escapeHtml(s.description)}</span>` : '';
+        return `<div class="artist-suggest-item" data-name="${escapeHtml(s.name)}">
+          <span class="artist-suggest-name">${escapeHtml(s.name)}</span>
+          ${description}
+        </div>`;
+      }).join('');
+      dropdown.style.display = '';
+      dropdown.querySelectorAll('.artist-suggest-item').forEach(item => {
+        item.addEventListener('mousedown', e => {
+          e.preventDefault();
+          input.value = item.dataset.name;
+          dropdown.style.display = 'none';
+          dropdown.innerHTML = '';
+        });
+      });
+    }, 300);
+  });
+
+  input.addEventListener('blur', () => {
+    setTimeout(() => { dropdown.style.display = 'none'; dropdown.innerHTML = ''; }, 200);
+  });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { dropdown.style.display = 'none'; dropdown.innerHTML = ''; }
+  });
+}
+
+/**
+ * Attach artist autocomplete to all artist-type filter inputs and unified artist input
+ * found within the given container element.
+ */
+function initArtistAutocompletes(container) {
+  container.querySelectorAll('.ws-filter-search-value[data-filter-type="artist"]').forEach(input => {
+    initArtistSearchAutocomplete(input);
+  });
+  const unifiedArtist = container.querySelector('#ws-vt-unified-artist');
+  if (unifiedArtist) initArtistSearchAutocomplete(unifiedArtist);
 }
 
 // Fill entity fields from a selected autocomplete instance
@@ -16108,6 +16282,7 @@ function reRenderSourceFilters(sourceId, currentFilters, expandedTypes) {
       reRenderSourceFilters(sourceId, filters);
     },
   });
+  initArtistAutocompletes(body);
 }
 
 function initFilterListInteractions(container, callbacks = {}) {
@@ -16337,6 +16512,9 @@ function openWebSourceSettings(sourceId) {
   // Bind reset mapping button
   body.querySelector('.ws-reset-mapping-btn')
     ?.addEventListener('click', () => resetSourceMapping(sourceId));
+
+  // Attach artist autocomplete to artist filter inputs
+  initArtistAutocompletes(body);
 
   document.getElementById('web-source-settings-modal').classList.add('active');
 }
@@ -16631,10 +16809,14 @@ function renderVirtualTagsList() {
   } else {
     let html = '<div class="ws-virtual-tags-cards">';
     for (const [id, tag] of tagEntries) {
-      const isUnified = tag.sourceId === null && tag.queryMode === 'search';
-      const sourceName = isUnified
+      const isUnifiedSearch = tag.sourceId === null && tag.queryMode === 'search';
+      const isUnifiedArtist = tag.sourceId === null && tag.queryMode === 'artist';
+      const isUnified = isUnifiedSearch || isUnifiedArtist;
+      const sourceName = isUnifiedSearch
         ? `All sources — "${tag.queryParams?.keyword || ''}"`
-        : (webSourcesConfig?.sources?.[tag.sourceId]?.name || tag.sourceId);
+        : isUnifiedArtist
+          ? `All sources (artist: "${tag.queryParams?.artist || ''}")`
+          : (webSourcesConfig?.sources?.[tag.sourceId]?.name || tag.sourceId);
       const filterSummary = isUnified ? '' : summarizeFilters(tag.filters || []);
       html += `
         <div class="ws-virtual-tag-card" data-tag-id="${escapeHtml(id)}">
@@ -16684,6 +16866,14 @@ function renderUnifiedSearchKeywordInput(keyword) {
            placeholder="e.g. Monet, impressionism, still life" value="${escapeHtml(keyword)}">`;
 }
 
+function renderUnifiedArtistInput(artist) {
+  return `
+    <label class="ws-section-label">Artist Name</label>
+    <p class="pool-health-description">Queries all artist-capable sources simultaneously using each source's native artist mechanism. One is chosen at random per shuffle.</p>
+    <input type="text" id="ws-vt-unified-artist" class="ws-type-input" style="width:100%;margin-top:6px;"
+           placeholder="e.g. Claude Monet, Rembrandt, Frida Kahlo" value="${escapeHtml(artist)}">`;
+}
+
 function openVirtualTagModal(tagId) {
   virtualTagEditingId = tagId;
   const isEdit = !!tagId;
@@ -16693,6 +16883,7 @@ function openVirtualTagModal(tagId) {
     isEdit ? 'Edit Virtual Tag' : 'New Virtual Tag';
 
   const isUnifiedSearch = tag.sourceId === null && tag.queryMode === 'search';
+  const isUnifiedArtist = tag.sourceId === null && tag.queryMode === 'artist';
   const sources = webSourcesConfig?.sources || {};
   const sourceOptions = Object.entries(sources).map(([id, s]) =>
     `<option value="${escapeHtml(id)}" ${tag.sourceId === id ? 'selected' : ''}>${escapeHtml(s.name || id)}</option>`
@@ -16715,20 +16906,26 @@ function openVirtualTagModal(tagId) {
         <select id="ws-vt-source" class="ws-select" style="width:100%;">
           <option value="">— Select a source —</option>
           <option value="__unified_search__" ${isUnifiedSearch ? 'selected' : ''}>All sources (keyword search)</option>
+          <option value="__unified_artist__" ${isUnifiedArtist ? 'selected' : ''}>All sources (by artist)</option>
           ${sourceOptions}
         </select>
       </div>
       <div class="ws-filters-section" id="ws-vt-filters-section">
         ${isUnifiedSearch
           ? renderUnifiedSearchKeywordInput(tag.queryParams?.keyword || '')
-          : `<label class="ws-section-label">Filters</label>
-             <p class="pool-health-description">Narrow results for this virtual tag. Inherited global and source filters are shown locked.</p>
-             <div id="ws-vt-filters-container">
-               ${tag.sourceId ? renderVirtualTagFilters(tag.sourceId, tag.filters || []) : '<p class="pool-health-description" style="font-style:italic;">Select a source to configure filters.</p>'}
-             </div>`
+          : isUnifiedArtist
+            ? renderUnifiedArtistInput(tag.queryParams?.artist || '')
+            : `<label class="ws-section-label">Filters</label>
+               <p class="pool-health-description">Narrow results for this virtual tag. Inherited global and source filters are shown locked.</p>
+               <div id="ws-vt-filters-container">
+                 ${tag.sourceId ? renderVirtualTagFilters(tag.sourceId, tag.filters || []) : '<p class="pool-health-description" style="font-style:italic;">Select a source to configure filters.</p>'}
+               </div>`
         }
       </div>
     </div>`;
+
+  // Attach artist autocomplete if unified artist is pre-selected
+  if (isUnifiedArtist) initArtistAutocompletes(body);
 
   // Auto-generate ID from label (only on create)
   if (!isEdit) {
@@ -16745,6 +16942,9 @@ function openVirtualTagModal(tagId) {
     const filtersSection = document.getElementById('ws-vt-filters-section');
     if (sourceId === '__unified_search__') {
       filtersSection.innerHTML = renderUnifiedSearchKeywordInput('');
+    } else if (sourceId === '__unified_artist__') {
+      filtersSection.innerHTML = renderUnifiedArtistInput('');
+      initArtistAutocompletes(filtersSection);
     } else if (sourceId) {
       filtersSection.innerHTML = `
         <label class="ws-section-label">Filters</label>
@@ -16759,7 +16959,7 @@ function openVirtualTagModal(tagId) {
     }
   });
 
-  // Init filter interactions for pre-rendered filters (non-unified-search case)
+  // Init filter interactions for pre-rendered filters (non-unified case)
   const filtersContainer = document.getElementById('ws-vt-filters-container');
   if (tag.sourceId && filtersContainer) {
     initVirtualTagFilterList(filtersContainer, tag.sourceId, tag.filters || [], true);
@@ -16797,6 +16997,7 @@ function initVirtualTagFilterList(container, sourceId, currentFilters, skipRende
       initVirtualTagFilterList(container, sourceId, filters);
     },
   });
+  initArtistAutocompletes(container);
 }
 
 function renderVirtualTagFilters(sourceId, currentFilters, expandedTypes) {
@@ -16884,6 +17085,7 @@ async function saveVirtualTag() {
   const label = document.getElementById('ws-vt-label')?.value?.trim();
   const sourceSelectValue = document.getElementById('ws-vt-source')?.value;
   const isUnifiedSearch = sourceSelectValue === '__unified_search__';
+  const isUnifiedArtist = sourceSelectValue === '__unified_artist__';
 
   if (!id || !/^[a-z0-9_-]+$/.test(id)) {
     showToast('ID must be a lowercase slug (a-z, 0-9, hyphens, underscores)', 'error');
@@ -16906,6 +17108,13 @@ async function saveVirtualTag() {
       return;
     }
     tagPayload = { label, sourceId: null, queryMode: 'search', queryParams: { keyword }, filters: [] };
+  } else if (isUnifiedArtist) {
+    const artist = document.getElementById('ws-vt-unified-artist')?.value?.trim();
+    if (!artist) {
+      showToast('Enter an artist name', 'error');
+      return;
+    }
+    tagPayload = { label, sourceId: null, queryMode: 'artist', queryParams: { artist }, filters: [] };
   } else {
     tagPayload = { label, sourceId: sourceSelectValue, filters: readVirtualTagFiltersFromUI() };
   }

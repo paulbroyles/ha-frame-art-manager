@@ -19,10 +19,11 @@ const CACHE_VERSION = 1;
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // In-memory state populated by ensureCache().
-let artworkIndex = null;  // Array of trimmed artwork records
-let curatedSet = null;    // Set of ObjectIDs flagged as curated (from Sanity)
+let artworkIndex = null;     // Array of trimmed artwork records
+let curatedSet = null;       // Set of ObjectIDs flagged as curated (from Sanity)
+let artistNameIndex = null;  // Array of { name, count } sorted by count desc
 let cacheLoadedAt = 0;
-let cachePromise = null;  // In-flight build to prevent concurrent rebuilds
+let cachePromise = null;     // In-flight build to prevent concurrent rebuilds
 
 // Classification values present in the GitHub dataset (used for filter UI).
 // Derived from the MoMA collection as of early 2026.
@@ -218,6 +219,20 @@ async function ensureCache() {
 
     artworkIndex = data.artworks;
     curatedSet   = new Set(data.curated || []);
+
+    // Build artist name index for autocomplete
+    const nameMap = new Map();
+    for (const rec of artworkIndex) {
+      for (const name of rec.a) {
+        const normalized = name.trim();
+        if (!normalized) continue;
+        nameMap.set(normalized, (nameMap.get(normalized) || 0) + 1);
+      }
+    }
+    artistNameIndex = Array.from(nameMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+
     cacheLoadedAt = now;
     cachePromise  = null;
   })();
@@ -304,6 +319,13 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   }
   if (excClsVals.size > 0) {
     pool = pool.filter(a => !excClsVals.has((a.cls || '').toLowerCase()));
+  }
+
+  // Artist filter — substring match on artist name fields only (more precise than keyword search).
+  const artistName = filters.find(f => f.type === 'artist' && f.mode === 'require')?.values?.[0];
+  if (artistName) {
+    const kw = artistName.toLowerCase();
+    pool = pool.filter(a => a.a.some(name => name.toLowerCase().includes(kw)));
   }
 
   // Keyword search filter — client-side substring match across title, artists, and medium.
@@ -428,12 +450,14 @@ async function fetchByIdentifier(identifier) {
  * MoMA always uses the local index; no API call is needed for selection.
  */
 function selectMode(filters = []) {
+  const hasArtist = filters.some(f => f.type === 'artist');
   const hasSearch = filters.some(f => f.type === 'search');
   const postFilters = filters.filter(f =>
     f.type === 'classification' || f.type === 'department' ||
-    f.type === 'curated' || f.type === 'on_view' || f.type === 'search'
+    f.type === 'curated' || f.type === 'on_view' || f.type === 'search' || f.type === 'artist'
   );
-  return { mode: hasSearch ? 'keyword_search' : 'index', apiFilters: [], postFilters };
+  const mode = hasArtist ? 'artist_filter' : hasSearch ? 'keyword_search' : 'index';
+  return { mode, apiFilters: [], postFilters };
 }
 
 function getFilterTypes() {
@@ -471,6 +495,15 @@ function getFilterTypes() {
       values: [{ value: 'on_view', label: 'On view only' }],
     },
     {
+      type: 'artist',
+      label: 'Artist',
+      description: 'Filter by artist name (matches against artist fields only, not title or medium).',
+      modes: ['require'],
+      multiValue: false,
+      values: [],
+      inputStyle: 'search',
+    },
+    {
       type: 'search',
       label: 'Search',
       description: 'Search by title, artist name, or medium.',
@@ -480,6 +513,36 @@ function getFilterTypes() {
       inputStyle: 'search',
     },
   ];
+}
+
+/**
+ * Suggest artist name candidates from the MoMA in-memory index.
+ * Prefix matches sort before substring-only matches; within each group, sorted by artwork count desc.
+ *
+ * @param {string} query
+ * @param {number} [limit=10]
+ * @returns {Promise<Array<{ name, count, source }>>}
+ */
+async function suggestArtists(query, limit = 10) {
+  await ensureCache();
+  const q = query.toLowerCase().trim();
+  if (!q) return [];
+
+  const prefix = [];
+  const substring = [];
+  for (const entry of artistNameIndex) {
+    const lower = entry.name.toLowerCase();
+    if (lower.startsWith(q)) {
+      prefix.push(entry);
+    } else if (lower.includes(q)) {
+      substring.push(entry);
+    }
+    if (prefix.length + substring.length >= limit * 4) break; // early exit for large indexes
+  }
+
+  return [...prefix, ...substring]
+    .slice(0, limit)
+    .map(e => ({ name: e.name, count: e.count, source: 'moma' }));
 }
 
 const settingsSchema = { fields: [] };
@@ -516,6 +579,7 @@ module.exports = {
   canHandleIdentifier,
   selectMode,
   getFilterTypes,
+  suggestArtists,
   settingsSchema,
   metadataFields,
   defaultMapping,

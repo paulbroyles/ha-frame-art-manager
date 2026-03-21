@@ -79,6 +79,16 @@ const COLLECTIONS = [
 // Used to compute maxPage so we never request a page past the end of results.
 const _countCache = new Map();
 
+// ── Artist slug cache ────────────────────────────────────────────────────────
+// Maps artist name (lowercased) → { slug, resolvedName, fetchedAt }.
+// Populated by resolveArtistSlug(). 24-hour TTL.
+const ARTIST_SLUG_TTL_MS = 24 * 60 * 60 * 1000;
+const _artistSlugCache = new Map();
+
+// Suggest cache: Maps query (lowercased) → { results, fetchedAt }. 1-hour TTL.
+const ARTIST_SUGGEST_TTL_MS = 60 * 60 * 1000;
+const _artistSuggestCache = new Map();
+
 function _countCacheKey(medium, collection, sort) {
   return `${medium || '*'}_${collection || '*'}_${sort}`;
 }
@@ -91,6 +101,50 @@ function _getCachedCount(medium, collection, sort) {
 
 function _setCachedCount(medium, collection, sort, total) {
   _countCache.set(_countCacheKey(medium, collection, sort), { total, fetchedAt: Date.now() });
+}
+
+// ── Artist slug resolution ───────────────────────────────────────────────────
+
+/**
+ * Resolve an artist name to an Artsy slug via searchConnection.
+ * Returns the slug string on success, or null if no match found.
+ * Results cached for 24 hours.
+ *
+ * Uses searchConnection(query:, entities:[ARTIST]) — the only working GraphQL
+ * path for artist name→slug resolution. (artistsConnection(keyword:) returns HTTP 400.)
+ */
+async function resolveArtistSlug(name) {
+  const key = name.toLowerCase().trim();
+  const cached = _artistSlugCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < ARTIST_SLUG_TTL_MS) {
+    return cached.slug;
+  }
+
+  let slug = null;
+  try {
+    const escaped = name.replace(/"/g, '\\"');
+    const result = await _graphql(`{
+      searchConnection(query: "${escaped}", first: 5, entities: [ARTIST]) {
+        edges { node { displayLabel ... on Artist { slug } } }
+      }
+    }`);
+    const edges = result?.data?.searchConnection?.edges || [];
+    // Prefer exact name match (case-insensitive); fall back to first result
+    const nameLower = name.toLowerCase();
+    const exactMatch = edges.find(e => (e.node?.displayLabel || '').toLowerCase() === nameLower);
+    const best = exactMatch || edges[0];
+    slug = best?.node?.slug || null;
+    if (slug) {
+      console.log(`[artsy] Resolved artist "${name}" → slug "${slug}" (${best.node.displayLabel})`);
+    } else {
+      console.warn(`[artsy] Could not resolve artist slug for "${name}"`);
+    }
+  } catch (err) {
+    console.warn(`[artsy] Artist slug resolution failed for "${name}": ${err.message}`);
+  }
+
+  _artistSlugCache.set(key, { slug, fetchedAt: Date.now() });
+  return slug;
 }
 
 // ── GraphQL helpers ──────────────────────────────────────────────────────────
@@ -108,7 +162,7 @@ async function _graphql(query) {
   return response.data;
 }
 
-function _buildArtworksQuery({ medium, collection, keyword, sort, page }) {
+function _buildArtworksQuery({ medium, collection, keyword, artistID, sort, page }) {
   const args = [
     `first: ${PAGE_SIZE}`,
     `page: ${page}`,
@@ -118,6 +172,7 @@ function _buildArtworksQuery({ medium, collection, keyword, sort, page }) {
   if (medium)     args.push(`medium: "${medium}"`);
   if (collection) args.push(`marketingCollectionID: "${collection}"`);
   if (keyword)    args.push(`keyword: "${keyword.replace(/"/g, '\\"')}"`);
+  if (artistID)   args.push(`artistID: "${artistID.replace(/"/g, '\\"')}"`);
 
   return `{
     artworksConnection(${args.join(', ')}) {
@@ -147,7 +202,8 @@ function _buildArtworksQuery({ medium, collection, keyword, sort, page }) {
  *   Supported filter types:
  *   - 'medium'     (require): restrict to specific medium types (e.g. 'painting', 'photography')
  *   - 'collection' (require): restrict to Artsy marketing collection slugs (e.g. 'contemporary')
- *   - 'keyword'    (require): search term; first value is used
+ *   - 'artist'     (require): filter by artist name; resolved to Artsy slug via searchConnection
+ *   - 'search'     (require): keyword search term; first value is used
  *   When multiple medium or collection values are selected, one is chosen randomly per fetch.
  *
  * @param {object} [options]
@@ -168,6 +224,13 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     .filter(f => f.type === 'search')
     .map(f => (f.values || [])[0])
     .find(Boolean) || null;
+
+  // Artist filter — resolve name to Artsy slug via searchConnection.
+  const artistName = filters.find(f => f.type === 'artist' && f.mode === 'require')?.values?.[0] || null;
+  const artistID = artistName ? await resolveArtistSlug(artistName) : null;
+  if (artistName && !artistID) {
+    console.warn(`[artsy] Artist "${artistName}" not found on Artsy; proceeding without artist filter`);
+  }
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     // Each attempt independently picks a medium, collection, and sort.
@@ -191,7 +254,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 
     let result;
     try {
-      result = await _graphql(_buildArtworksQuery({ medium, collection, keyword, sort, page }));
+      result = await _graphql(_buildArtworksQuery({ medium, collection, keyword, artistID, sort, page }));
     } catch (err) {
       console.warn(`[artsy] GraphQL fetch failed (attempt ${attempt + 1}): ${err.message}`);
       continue;
@@ -288,10 +351,12 @@ const defaultMapping = {
 // ── selectMode ───────────────────────────────────────────────────────────────
 
 function selectMode(filters = []) {
+  const hasArtist     = filters.some(f => f.type === 'artist');
   const hasMedium     = filters.some(f => f.type === 'medium');
   const hasCollection = filters.some(f => f.type === 'collection');
   const hasSearch     = filters.some(f => f.type === 'search');
-  const mode = hasSearch     ? 'keyword_search'
+  const mode = hasArtist     ? 'artist_search'
+             : hasSearch     ? 'keyword_search'
              : hasCollection ? 'collection_filter'
              : hasMedium     ? 'medium_filter'
              :                 'browse_all';
@@ -325,12 +390,22 @@ function getFilterTypes() {
       values: COLLECTIONS.map(c => ({ value: c.value, label: c.label })),
     },
     {
+      type: 'artist',
+      label: 'Artist',
+      description: 'Filter by artist name. Resolves to an Artsy artist slug via search for precise matching.',
+      modes: ['require'],
+      multiValue: false,
+      values: [],
+      inputStyle: 'search',
+    },
+    {
       type: 'search',
       label: 'Search',
       description: 'Search artworks by title, artist, or subject.',
       modes: ['require'],
       multiValue: false,
       values: [],
+      inputStyle: 'search',
     },
   ];
 }
@@ -403,6 +478,53 @@ async function fetchByIdentifier(identifier) {
   };
 }
 
+/**
+ * Suggest artist name candidates from Artsy's searchConnection API.
+ * Seeds _artistSlugCache as a side effect (slug is needed for subsequent artist queries).
+ *
+ * @param {string} query
+ * @param {number} [limit=5]
+ * @returns {Promise<Array<{ name, slug, source }>>}
+ */
+async function suggestArtists(query, limit = 5) {
+  const key = query.toLowerCase().trim();
+  const cached = _artistSuggestCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < ARTIST_SUGGEST_TTL_MS) {
+    return cached.results.slice(0, limit);
+  }
+
+  let results = [];
+  try {
+    const escaped = query.replace(/"/g, '\\"');
+    const result = await _graphql(`{
+      searchConnection(query: "${escaped}", first: ${Math.max(limit, 5)}, entities: [ARTIST]) {
+        edges { node { displayLabel ... on Artist { slug } } }
+      }
+    }`);
+    const edges = result?.data?.searchConnection?.edges || [];
+    results = edges
+      .filter(e => e.node?.displayLabel)
+      .map(e => ({
+        name:   e.node.displayLabel,
+        slug:   e.node.slug || null,
+        source: 'artsy',
+      }));
+
+    // Seed slug cache as side effect
+    for (const r of results) {
+      if (r.slug) {
+        const nameKey = r.name.toLowerCase().trim();
+        _artistSlugCache.set(nameKey, { slug: r.slug, fetchedAt: Date.now() });
+      }
+    }
+  } catch (err) {
+    console.warn(`[artsy] suggestArtists failed for "${query}": ${err.message}`);
+  }
+
+  _artistSuggestCache.set(key, { results, fetchedAt: Date.now() });
+  return results.slice(0, limit);
+}
+
 // ── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -411,6 +533,7 @@ module.exports = {
   canHandleIdentifier,
   selectMode,
   getFilterTypes,
+  suggestArtists,
   metadataFields,
   defaultMapping,
 };

@@ -192,8 +192,15 @@ function buildDateString(record) {
 async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
 
+  // Artist filter — passed as the q= parameter. Takes priority over keyword search,
+  // since artist names are typically more specific search terms.
+  const artistName = filters.find(f => f.type === 'artist' && f.mode === 'require')?.values?.[0] || null;
+
   // Keyword search filter — passed as the q= parameter to the Louvre search URL.
   const searchTerm = filters.find(f => f.type === 'search' && f.mode === 'require')?.values?.[0] || null;
+
+  // Artist takes priority over keyword search (both map to q=).
+  const effectiveSearchTerm = artistName || searchTerm || null;
 
   // Compute eligible categories (require intersection, then exclude union).
   const requireSets = filters
@@ -224,7 +231,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     : null;
 
   // Get (possibly cached) page count for this category + search combination.
-  const maxPages = await getMaxPages(typologyIds, searchTerm);
+  const maxPages = await getMaxPages(typologyIds, effectiveSearchTerm);
 
   const MAX_ATTEMPTS = 20;
   let arkIds = [];
@@ -234,7 +241,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     if (arkIds.length === 0) {
       const page = Math.floor(Math.random() * maxPages) + 1;
       try {
-        ({ arkIds } = await fetchSearchPage(page, typologyIds, searchTerm));
+        ({ arkIds } = await fetchSearchPage(page, typologyIds, effectiveSearchTerm));
       } catch (err) {
         console.warn(`[louvre] Failed to fetch search page ${page}: ${err.message}`);
         continue;
@@ -329,14 +336,16 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 
 function selectMode(filters = []) {
   const catFilters = filters.filter(f => f.type === 'category');
+  const hasArtist  = filters.some(f => f.type === 'artist');
   const hasSearch  = filters.some(f => f.type === 'search');
   const hasRequire = catFilters.some(f => f.mode === 'require');
   const hasExclude = catFilters.some(f => f.mode === 'exclude');
-  const mode = hasSearch  ? 'keyword_search'
+  const mode = hasArtist  ? 'artist_search'
+             : hasSearch  ? 'keyword_search'
              : hasRequire ? 'filtered_page'
              : hasExclude ? 'excluded_page'
              :              'random_page';
-  return { mode, apiFilters: [...catFilters, ...filters.filter(f => f.type === 'search')], postFilters: [] };
+  return { mode, apiFilters: [...catFilters, ...filters.filter(f => f.type === 'search' || f.type === 'artist')], postFilters: [] };
 }
 
 // ── Metadata schema ───────────────────────────────────────────────────────────
@@ -373,6 +382,15 @@ function getFilterTypes() {
       multiValue:  true,
       groups:      CATEGORY_GROUPS.map(g => ({ name: g.name, values: g.media })),
       values:      CATEGORY_TYPES.map(name => ({ value: name, label: name })),
+    },
+    {
+      type:        'artist',
+      label:       'Artist',
+      description: 'Search by artist name. Passed as a keyword query to the Louvre search API. Takes priority over the Search filter.',
+      modes:       ['require'],
+      multiValue:  false,
+      values:      [],
+      inputStyle:  'search',
     },
     {
       type:        'search',

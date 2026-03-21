@@ -87,9 +87,14 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
   let objectIDs;
 
-  // Keyword search filter — overrides the broad query when present.
+  // Artist filter — takes priority over keyword search. Uses artistOrCulture=true
+  // to restrict the Met API's q= parameter to artist/culture fields only.
+  const artistName = filters.find(f => f.type === 'artist' && f.mode === 'require')?.values?.[0] || null;
+
+  // Keyword search filter — overrides the broad query when present (artist takes priority).
   const searchTerm = filters.find(f => f.type === 'search' && f.mode === 'require')?.values?.[0] || null;
-  const q = searchTerm || BROAD_QUERY;
+  const q = artistName || searchTerm || BROAD_QUERY;
+  const artistOrCulture = !!artistName;
 
   // Apply media filters to the eligible category pool.
   // require: category must appear in ALL require sets (intersection).
@@ -121,11 +126,14 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     throw new Error('No categories eligible after applying filters');
   }
 
+  const baseParams = { q, hasImages: true };
+  if (artistOrCulture) baseParams.artistOrCulture = true;
+
   if (!classificationFilter) {
     // No filter: single search for all public-domain objects with images
     try {
       const response = await axios.get(`${BASE_URL}/search`, {
-        params: { q, hasImages: true },
+        params: baseParams,
         timeout: 15000,
       });
       objectIDs = response.data.objectIDs || [];
@@ -140,7 +148,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     for (const classification of classificationFilter) {
       try {
         const response = await axios.get(`${BASE_URL}/search`, {
-          params: { q, hasImages: true, medium: classification },
+          params: { ...baseParams, medium: classification },
           timeout: 15000,
         });
         (response.data.objectIDs || []).forEach(id => idSet.add(id));
@@ -260,10 +268,12 @@ const defaultMapping = {
  * @returns {{ mode: string, apiFilters: Array, postFilters: Array }}
  */
 function selectMode(filters = []) {
+  const hasArtist  = filters.some(f => f.type === 'artist');
   const hasSearch  = filters.some(f => f.type === 'search');
-  const apiFilters = filters.filter(f => f.type === 'media' || f.type === 'search');
+  const apiFilters = filters.filter(f => f.type === 'media' || f.type === 'search' || f.type === 'artist');
   const postFilters = [];
-  return { mode: hasSearch ? 'keyword_search' : 'search', apiFilters, postFilters };
+  const mode = hasArtist ? 'artist_search' : hasSearch ? 'keyword_search' : 'search';
+  return { mode, apiFilters, postFilters };
 }
 
 function getFilterTypes() {
@@ -276,6 +286,15 @@ function getFilterTypes() {
       multiValue: true,
       groups: MEDIUM_CATEGORIES.map(cat => ({ name: cat.name, values: cat.media })),
       values: MEDIUM_TYPES.map(name => ({ value: name, label: name })),
+    },
+    {
+      type: 'artist',
+      label: 'Artist',
+      description: 'Search by artist or culture name. Uses the Met API\'s artist/culture field restriction for precise matching.',
+      modes: ['require'],
+      multiValue: false,
+      values: [],
+      inputStyle: 'search',
     },
     {
       type: 'search',

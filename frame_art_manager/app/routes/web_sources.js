@@ -48,6 +48,13 @@ function getSearchCapableSources() {
   });
 }
 
+function getArtistCapableSources() {
+  return Object.keys(SOURCE_MODULES).filter(id => {
+    const filterTypes = SOURCE_FILTER_TYPES[id] || [];
+    return filterTypes.some(ft => ft.type === 'artist');
+  });
+}
+
 /**
  * Compute per-source metadata declarations (fields + default mapping) given stored source settings.
  * Sources that export getMetadataFields(settings) receive their stored settings so the field list
@@ -613,6 +620,7 @@ router.get('/config', async (req, res) => {
       sourceCapabilities,
       sourceMetadata: buildSourceMetadata(webSources),
       searchCapableSources: getSearchCapableSources(),
+      artistCapableSources: getArtistCapableSources(),
       imageProcessingSchema: IMAGE_PROCESSING_SCHEMA,
     });
   } catch (error) {
@@ -867,11 +875,11 @@ router.post('/virtual-tags', async (req, res) => {
     if (sourceId !== null && !BUILTIN_SOURCES[sourceId]) {
       return res.status(400).json({ error: `Unknown source: ${sourceId}` });
     }
-    if (sourceId === null && queryMode !== 'search') {
-      return res.status(400).json({ error: 'sourceId: null requires queryMode: "search"' });
+    if (sourceId === null && !['search', 'artist'].includes(queryMode)) {
+      return res.status(400).json({ error: 'sourceId: null requires queryMode: "search" or "artist"' });
     }
-    if (!['random', 'search'].includes(queryMode)) {
-      return res.status(400).json({ error: 'queryMode must be one of: random, search' });
+    if (!['random', 'search', 'artist'].includes(queryMode)) {
+      return res.status(400).json({ error: 'queryMode must be one of: random, search, artist' });
     }
     if (!Array.isArray(filters)) {
       return res.status(400).json({ error: 'filters must be an array' });
@@ -907,8 +915,8 @@ router.put('/virtual-tags/:id', async (req, res) => {
     if (sourceId !== undefined && sourceId !== null && !BUILTIN_SOURCES[sourceId]) {
       return res.status(400).json({ error: `Unknown source: ${sourceId}` });
     }
-    if (queryMode !== undefined && !['random', 'search'].includes(queryMode)) {
-      return res.status(400).json({ error: `queryMode must be one of: random` });
+    if (queryMode !== undefined && !['random', 'search', 'artist'].includes(queryMode)) {
+      return res.status(400).json({ error: 'queryMode must be one of: random, search, artist' });
     }
     if (filters !== undefined && !Array.isArray(filters)) {
       return res.status(400).json({ error: 'filters must be an array' });
@@ -1116,6 +1124,57 @@ async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio) {
     if (!chosenSourceId) {
       throw Object.assign(
         new Error(`Unified search for "${keyword}": no source returned results. Last error: ${lastErr?.message}`),
+        { statusCode: 503 }
+      );
+    }
+  } else if (!chosenSourceId && virtualTag.queryMode === 'artist') {
+    // ── Unified artist query ─────────────────────────────────────────────────
+    const artist = virtualTag.queryParams?.artist;
+    if (!artist) {
+      throw Object.assign(new Error('Unified artist virtual tag requires queryParams.artist'), { statusCode: 400 });
+    }
+
+    const pool = getArtistCapableSources()
+      .filter(id => BUILTIN_SOURCES[id])
+      .filter(id => isSourceCompatible(id, aspectRatio));
+
+    if (pool.length === 0) {
+      throw Object.assign(
+        new Error(`No artist-capable sources available for aspect ratio "${aspectRatio}"`),
+        { statusCode: 503 }
+      );
+    }
+
+    let lastErr;
+    const remaining = pool.slice();
+    while (remaining.length > 0) {
+      const idx = Math.floor(Math.random() * remaining.length);
+      const candidateId = remaining.splice(idx, 1)[0];
+      try {
+        const artistFilter = { type: 'artist', mode: 'require', values: [artist] };
+        const cFilters = mergeFilterCascade(
+          webSources.globalFilters || [],
+          webSources.sources[candidateId]?.filters || [],
+          virtualTag.filters || []
+        );
+        cFilters.push(artistFilter);
+        const cExtraOpts = SOURCE_MODULES[candidateId]?.getExtraOptions?.(
+          webSources.sources[candidateId]?.settings
+        ) || {};
+        fetchResult    = await SOURCE_FETCHERS[candidateId](cFilters, { aspectRatio, ...cExtraOpts });
+        chosenSourceId = candidateId;
+        mergedFilters  = cFilters;
+        extraOpts      = cExtraOpts;
+        break;
+      } catch (err) {
+        console.warn(`[web_sources] Unified artist "${artist}": ${candidateId} failed — ${err.message}`);
+        lastErr = err;
+      }
+    }
+
+    if (!chosenSourceId) {
+      throw Object.assign(
+        new Error(`Unified artist "${artist}": no source returned results. Last error: ${lastErr?.message}`),
         { statusCode: 503 }
       );
     }

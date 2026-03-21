@@ -463,6 +463,259 @@ async function seedCookies() {
   }
 }
 
+// --- Artist entity resolution ---
+
+// TTL for artist entity ID and count caches (24 hours).
+const ARTIST_ENTITY_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Maximum offset for artist entity browsing. API returns HTTP 500 at offsets >= 5000;
+// 1000 is a conservative cap that still allows wide sampling for large artists.
+const ARTIST_MAX_OFFSET = 1000;
+
+// in-memory cache: name.toLowerCase() → { entityId, resolvedName, fetchedAt }
+const _artistEntityCache = new Map();
+// in-memory cache: entityId → { count, fetchedAt }
+const _artistCountCache  = new Map();
+// suggest cache: query.toLowerCase() → { results, fetchedAt }. 1-hour TTL.
+const ARTIST_SUGGEST_TTL_MS = 60 * 60 * 1000;
+const _artistSuggestCache = new Map();
+
+/**
+ * Recursively extract artist entity cobjects from a parsed Google Arts API response.
+ *
+ * Artist cobjects share the stella.common.cobject structure with artwork cobjects but
+ * are distinguished by cobject[5] === 3 (typeCode for people/artists) and have a
+ * Google Knowledge Graph entity ID at cobject[24][0] (e.g. "/m/01xnj").
+ * Their cobject[4] link is an /entity/ path rather than /asset/.
+ */
+function extractArtistCobjects(obj, depth = 0) {
+  const results = [];
+  if (depth > 15 || !obj) return results;
+  if (Array.isArray(obj)) {
+    if (obj[0] === 'stella.common.cobject') {
+      if (obj[5] === 3 && Array.isArray(obj[24]) && obj[24][0]) {
+        results.push({ name: obj[1] || null, entityId: obj[24][0] });
+      }
+      // Don't descend into cobjects — nested items are unrelated data
+      return results;
+    }
+    for (const item of obj) {
+      results.push(...extractArtistCobjects(item, depth + 1));
+    }
+  }
+  return results;
+}
+
+/**
+ * Resolve an artist name to a Google Arts & Culture entity ID via /api/search.
+ * Picks the best match from typeCode=3 (artist/person) cobjects in the search response.
+ * Caches results for 24 hours. Returns null if no artist entity is found.
+ *
+ * IMPORTANT: Entity IDs come from Google Arts search, not external databases like
+ * Wikipedia/Freebase — the IDs differ and cross-source IDs will 404.
+ *
+ * @param {string} name - Artist name to resolve (e.g. "Claude Monet" or "Monet")
+ * @returns {string|null} Google Arts entity ID (e.g. "/m/01xnj"), or null if unresolved
+ */
+async function resolveArtistEntity(name) {
+  const key = name.toLowerCase().trim();
+  const cached = _artistEntityCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < ARTIST_ENTITY_TTL_MS) {
+    return cached.entityId;
+  }
+
+  await seedCookies();
+  let entityId = null;
+  let resolvedName = null;
+
+  try {
+    const response = await cookieClient.get(`${BASE_URL}/api/search`, {
+      params: { q: name, hl: 'en' },
+      headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
+      timeout: 15000,
+      responseType: 'text',
+    });
+    const parsed = parseApiResponse(response.data);
+    const candidates = extractArtistCobjects(parsed);
+    if (candidates.length > 0) {
+      // Prefer exact name match, then substring, then first result
+      const exact = candidates.find(c => (c.name || '').toLowerCase() === key);
+      const sub   = candidates.find(c => (c.name || '').toLowerCase().includes(key));
+      const best  = exact || sub || candidates[0];
+      entityId    = best.entityId;
+      resolvedName = best.name;
+      console.log(`[google_arts] Artist "${name}" resolved to "${resolvedName}" (${entityId})`);
+    } else {
+      console.warn(`[google_arts] No artist entity found in search results for "${name}"`);
+    }
+  } catch (err) {
+    console.warn(`[google_arts] Artist entity resolution failed for "${name}": ${err.message}`);
+  }
+
+  _artistEntityCache.set(key, { entityId, resolvedName, fetchedAt: Date.now() });
+  return entityId;
+}
+
+/**
+ * Fetch the total artwork count for a Google Arts entity from /api/entity.
+ * The count is at parsed[0][0][9][4] in the response. Cached for 24 hours.
+ *
+ * @param {string} entityId - Google Arts entity ID (e.g. "/m/01xnj")
+ * @returns {number} Artwork count, or 0 on failure
+ */
+async function getArtistEntityCount(entityId) {
+  const cached = _artistCountCache.get(entityId);
+  if (cached && Date.now() - cached.fetchedAt < ARTIST_ENTITY_TTL_MS) {
+    return cached.count;
+  }
+
+  let count = 0;
+  try {
+    const response = await cookieClient.get(`${BASE_URL}/api/entity`, {
+      params: { entityId, hl: 'en', rt: 'j' },
+      headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
+      timeout: 15000,
+      responseType: 'text',
+    });
+    const parsed = parseApiResponse(response.data);
+    const raw = parsed?.[0]?.[0]?.[9]?.[4];
+    if (typeof raw === 'number') {
+      count = raw;
+      console.log(`[google_arts] Artist entity ${entityId}: ${count} artworks total`);
+    }
+  } catch (err) {
+    console.warn(`[google_arts] Failed to fetch artwork count for entity ${entityId}: ${err.message}`);
+  }
+
+  _artistCountCache.set(entityId, { count, fetchedAt: Date.now() });
+  return count;
+}
+
+/**
+ * Fetch a random artwork from a specific Google Arts artist entity.
+ * Browses /api/entity/assets with categoryId=artist for paginated artist-scoped results.
+ *
+ * @param {string} entityId - Google Arts artist entity ID (e.g. "/m/01xnj")
+ * @param {number} count - Total artwork count reported by /api/entity
+ * @param {object} [options]
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all']
+ * @param {string[]} [options.excludedTypesLower=[]]
+ * @param {Set<string>[]} [options.requireMediaSets=[]]
+ * @param {Set<string>} [options.excludeMediaValues=new Set()]
+ * @returns {{ imageBuffer, contentType, metadata }}
+ */
+async function fetchFromArtistEntity(entityId, count, {
+  aspectRatio = 'all',
+  excludedTypesLower = [],
+  requireMediaSets = [],
+  excludeMediaValues = new Set(),
+} = {}) {
+  const maxOffset = Math.min(count > 0 ? count - 1 : 0, ARTIST_MAX_OFFSET);
+  const MAX_ATTEMPTS = 5;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const offset = maxOffset > 0 ? Math.floor(Math.random() * maxOffset) : 0;
+    const pt = buildPtToken(offset);
+
+    let parsed;
+    try {
+      const response = await cookieClient.get(`${BASE_URL}/api/entity/assets`, {
+        params: { entityId, categoryId: 'artist', s: 18, pt, hl: 'en', rt: 'j' },
+        headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
+        timeout: 15000,
+        responseType: 'text',
+      });
+      parsed = parseApiResponse(response.data);
+    } catch (err) {
+      console.warn(`[google_arts] Artist entity browse attempt ${attempt + 1} failed for ${entityId}: ${err.message}`);
+      continue;
+    }
+
+    let artworks = extractArtworks(parsed);
+    if (artworks.length === 0) {
+      console.warn(`[google_arts] Artist entity browse attempt ${attempt + 1}: no artworks at offset ${offset} for ${entityId}`);
+      continue;
+    }
+
+    // Filter by aspect ratio using pre-download ratio from cobject metadata.
+    if (aspectRatio !== 'all') {
+      artworks = artworks.filter(a => {
+        if (a.aspectRatio === null) return false;
+        if (aspectRatio === 'landscape') return a.aspectRatio > 1;
+        if (aspectRatio === 'portrait') return a.aspectRatio < 1;
+        return true;
+      });
+      if (artworks.length === 0) {
+        console.warn(`[google_arts] Artist entity browse attempt ${attempt + 1}: no ${aspectRatio} artworks at offset ${offset}`);
+        continue;
+      }
+    }
+
+    const artwork = artworks[Math.floor(Math.random() * artworks.length)];
+    const imageUrl = buildDownloadUrl(artwork.imageBase, artwork.aspectRatio);
+    const artworkUrl = `${BASE_URL}${artwork.link}`;
+
+    const detailsPromise = fetchAssetDetails(artwork.assetId);
+    if (excludedTypesLower.length > 0 || excludeMediaValues.size > 0) {
+      const earlyDetails = await detailsPromise;
+
+      if (excludedTypesLower.length > 0) {
+        const artworkType = (earlyDetails.type || '').toLowerCase();
+        if (excludedTypesLower.includes(artworkType)) {
+          console.warn(`[google_arts] Artist entity browse attempt ${attempt + 1}: skipping excluded type "${earlyDetails.type}" ("${artwork.title}")`);
+          continue;
+        }
+      }
+
+      if (excludeMediaValues.size > 0) {
+        const entityNames = (earlyDetails.mediumEntities || '').split('; ').filter(Boolean).map(n => n.toLowerCase());
+        if (entityNames.some(n => excludeMediaValues.has(n))) {
+          console.warn(`[google_arts] Artist entity browse attempt ${attempt + 1}: skipping "${artwork.title}" — medium entity matches exclude filter`);
+          continue;
+        }
+      }
+    }
+
+    const imageResponse = await axios.get(imageUrl, {
+      responseType: 'arraybuffer',
+      headers: HTTP_HEADERS,
+      timeout: 30000,
+    }).catch(err => { throw new Error(`Failed to download artist entity artwork: ${err.message}`); });
+
+    const details = await detailsPromise;
+    let imageBuffer = Buffer.from(imageResponse.data);
+    const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
+
+    const [targetW, targetH] = aspectRatio === 'portrait' ? [2160, 3840] : [3840, 2160];
+    const { width: dlW, height: dlH } = await sharp(imageBuffer).metadata();
+    if (dlW < targetW || dlH < targetH) {
+      console.log(`[google_arts] Artist entity image is ${dlW}×${dlH} (below ${targetW}×${targetH}); attempting dezoomify for ${artworkUrl}`);
+      const dezoomedBuffer = await dezoomify(artworkUrl, { maxWidth: 4801 });
+      if (dezoomedBuffer) {
+        imageBuffer = dezoomedBuffer;
+        console.log(`[google_arts] dezoomify succeeded for ${artworkUrl}`);
+      } else {
+        console.log(`[google_arts] dezoomify unavailable or failed; using ${dlW}×${dlH} image`);
+      }
+    }
+
+    return {
+      imageBuffer,
+      contentType,
+      metadata: {
+        ...mergePreferContent(
+          { title: artwork.title, creator: artwork.creator, repository: artwork.repository, color: artwork.color },
+          details,
+        ),
+        artworkUrl,
+        source: 'Google Arts & Culture',
+      },
+    };
+  }
+
+  throw new Error(`Could not find a${aspectRatio !== 'all' ? ` ${aspectRatio}` : 'n'} artwork from artist entity ${entityId} after ${MAX_ATTEMPTS} attempts`);
+}
+
 /**
  * Parse the Google Arts & Culture API response.
  * Responses start with )]}'\n (XSSI protection prefix).
@@ -861,6 +1114,24 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     : DEFAULT_EXCLUDED_TYPES;
   const excludedTypesLower = excludedTypes.map(t => t.toLowerCase());
 
+  // Artist mode: resolve artist name to a Google Arts entity, then browse by artist.
+  // Falls back to keyword search if entity resolution fails or returns no results.
+  const artistFilter = filters.find(f => f.type === 'artist' && f.mode === 'require' && f.values?.length > 0);
+  if (artistFilter) {
+    const artistName = artistFilter.values[0];
+    const entityId = await resolveArtistEntity(artistName);
+    if (entityId) {
+      const count = await getArtistEntityCount(entityId);
+      if (count > 0) {
+        return fetchFromArtistEntity(entityId, count, { aspectRatio, excludedTypesLower, requireMediaSets, excludeMediaValues });
+      }
+      console.warn(`[google_arts] Artist entity ${entityId} has count=0; falling back to search`);
+    } else {
+      console.warn(`[google_arts] Could not resolve artist "${artistName}" to entity; falling back to search`);
+    }
+    return fetchFromSearch(artistName, { aspectRatio, excludedTypesLower, requireMediaSets, excludeMediaValues });
+  }
+
   // Search mode: use /api/search instead of entity browsing.
   // Media filters are applied post-fetch against av[21] entity associations.
   const searchFilter = filters.find(f => f.type === 'search' && f.values?.length > 0);
@@ -1049,6 +1320,15 @@ const defaultMapping = Object.fromEntries(FIELD_DEFS.map(({ key, defaultMapHint 
  */
 function getFilterTypes() {
   return [
+    {
+      type: 'artist',
+      label: 'Artist',
+      description: 'Browse artworks by artist. Resolves the artist name to a Google Arts entity for precise browsing. Falls back to keyword search if the artist cannot be resolved.',
+      modes: ['require'],
+      multiValue: false,
+      values: [],
+      inputStyle: 'search',
+    },
     {
       type: 'search',
       label: 'Search',
@@ -1262,6 +1542,12 @@ async function fetchArtworkMetadata(identifier) {
  * @returns {{ mode: string, apiFilters: Array, postFilters: Array }}
  */
 function selectMode(filters = []) {
+  const artistFilter = filters.find(f => f.type === 'artist' && f.values?.length > 0);
+  if (artistFilter) {
+    const postFilters = filters.filter(f => f.type === 'objectType' || f.type === 'media');
+    return { mode: 'browse_artist', apiFilters: [artistFilter], postFilters };
+  }
+
   const searchFilter = filters.find(f => f.type === 'search' && f.values?.length > 0);
   if (searchFilter) {
     // In search mode, media filters are applied post-fetch against av[21] entity associations
@@ -1284,4 +1570,49 @@ function getDefaultFilters() {
   ];
 }
 
-module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, selectMode, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, DEFAULT_EXCLUDED_TYPES, getFilterTypes, getDefaultFilters, metadataFields, defaultMapping };
+/**
+ * Suggest artist name candidates from Google Arts & Culture search.
+ * Seeds _artistEntityCache as a side effect (entity IDs needed for subsequent queries).
+ *
+ * @param {string} query
+ * @param {number} [limit=5]
+ * @returns {Promise<Array<{ name, entityId, source }>>}
+ */
+async function suggestArtists(query, limit = 5) {
+  const key = query.toLowerCase().trim();
+  const cached = _artistSuggestCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < ARTIST_SUGGEST_TTL_MS) {
+    return cached.results.slice(0, limit);
+  }
+
+  await seedCookies();
+  let results = [];
+  try {
+    const response = await cookieClient.get(`${BASE_URL}/api/search`, {
+      params: { q: query, hl: 'en' },
+      headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
+      timeout: 15000,
+      responseType: 'text',
+    });
+    const parsed = parseApiResponse(response.data);
+    const candidates = extractArtistCobjects(parsed);
+
+    results = candidates
+      .filter(c => c.name && c.entityId)
+      .map(c => ({ name: c.name, entityId: c.entityId, source: 'google_arts' }));
+
+    // Seed entity cache as side effect
+    const now = Date.now();
+    for (const r of results) {
+      const nameKey = r.name.toLowerCase().trim();
+      _artistEntityCache.set(nameKey, { entityId: r.entityId, resolvedName: r.name, fetchedAt: now });
+    }
+  } catch (err) {
+    console.warn(`[google_arts] suggestArtists failed for "${query}": ${err.message}`);
+  }
+
+  _artistSuggestCache.set(key, { results, fetchedAt: Date.now() });
+  return results.slice(0, limit);
+}
+
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, selectMode, suggestArtists, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, DEFAULT_EXCLUDED_TYPES, getFilterTypes, getDefaultFilters, metadataFields, defaultMapping };
