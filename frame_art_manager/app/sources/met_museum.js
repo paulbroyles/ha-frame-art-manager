@@ -183,6 +183,17 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       continue;
     }
 
+    // The Met API does partial-word matching, so q=Van+Gogh can return artists like
+    // "Salomon van Ruysdael" (matches "van"). Verify the actual artist field.
+    if (artistName && obj.artistDisplayName) {
+      const nameLower = artistName.toLowerCase();
+      const artistLower = obj.artistDisplayName.toLowerCase();
+      if (!artistLower.includes(nameLower)) {
+        console.warn(`[met_museum] Object ${objectId} skipped: artist "${obj.artistDisplayName}" doesn't match query "${artistName}"`);
+        continue;
+      }
+    }
+
     let imageBuffer, contentType;
     try {
       const imageResponse = await axios.get(obj.primaryImage, {
