@@ -40,7 +40,9 @@ Full-text search. Returns a fixed first page of results (~50–150 artworks) wit
 
 **Result count**: Consistently returns the same ~56–144 artworks for any given query regardless of the actual total (which can exceed 66,000 for major mediums).
 
-**Workaround for diversity**: Appending subject/style/period modifiers (e.g., `"oil paint portrait"`, `"watercolor landscape"`) shifts the result set substantially — empirically ~90%+ unique artworks compared to the base query. This is useful but not true randomness.
+**Workaround for diversity**: Appending subject/style/period modifiers (e.g., `"oil paint portrait"`, `"watercolor landscape"`) shifts the result set substantially — empirically ~90%+ unique artworks compared to the base query. This is useful but not true randomness. Not currently implemented — the source uses the keyword as-is and shuffles within the fixed result pool on each call.
+
+**Implementation**: `fetchFromSearch` in `sources/google_arts.js`. Fetches the pool once (with up to 3 retries on network error), filters by aspect ratio, shuffles, then iterates through candidates applying post-fetch filters (objectType exclusion, medium entity matching). At most 5 candidates are tried when post-fetch filters are active; 1 otherwise.
 
 **Medium filtering in search mode**: The search endpoint has no medium filter parameter. Instead, medium filters are applied post-fetch by checking the artwork's `stella.av[21]` entity associations (see `ART_MEDIUM` entities under `/api/asset` → Entity associations). Require mode rejects artworks whose medium entities don't match (or that have no medium entities at all). Exclude mode rejects artworks that have a matching medium entity but allows artworks with no medium entities through.
 

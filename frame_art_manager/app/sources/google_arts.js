@@ -702,11 +702,11 @@ async function fetchAssetDetails(assetId) {
 async function fetchFromSearch(query, { aspectRatio = 'all', excludedTypesLower = [], requireMediaSets = [], excludeMediaValues = new Set() } = {}) {
   await seedCookies();
 
-  const hasMediaFilters = requireMediaSets.length > 0 || excludeMediaValues.size > 0;
-  const MAX_ATTEMPTS = hasMediaFilters ? 5 : 3;
-
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    let parsed;
+  // Fetch the result pool once. The search endpoint returns a fixed set of ~56–144 artworks
+  // for a given query regardless of how many times it is called, so there is no benefit
+  // in re-fetching on every retry — just fetch once and work within the pool.
+  let pool = null;
+  for (let apiAttempt = 0; apiAttempt < 3; apiAttempt++) {
     try {
       const response = await cookieClient.get(`${BASE_URL}/api/search`, {
         params: { q: query, hl: 'en' },
@@ -714,75 +714,81 @@ async function fetchFromSearch(query, { aspectRatio = 'all', excludedTypesLower 
         timeout: 15000,
         responseType: 'text',
       });
-      parsed = parseApiResponse(response.data);
-    } catch (err) {
-      console.warn(`[google_arts] Search attempt ${attempt + 1}: API error: ${err.message}`);
-      continue;
-    }
-
-    // Search results are in parsed[0][3] (stella.pr AssetsQuery).
-    // extractArtworks DFS finds all cobjects regardless of nesting.
-    let artworks = extractArtworks(parsed);
-    if (artworks.length === 0) {
-      console.warn(`[google_arts] Search attempt ${attempt + 1}: no artworks for query "${query}"`);
-      continue;
-    }
-
-    console.log(`[google_arts] Search for "${query}" returned ${artworks.length} artworks`);
-
-    // Filter by aspect ratio
-    if (aspectRatio !== 'all') {
-      artworks = artworks.filter(a => {
-        if (a.aspectRatio === null) return false;
-        if (aspectRatio === 'landscape') return a.aspectRatio > 1;
-        if (aspectRatio === 'portrait') return a.aspectRatio < 1;
-        return true;
-      });
-      if (artworks.length === 0) {
-        console.warn(`[google_arts] Search attempt ${attempt + 1}: no ${aspectRatio} artworks in results`);
-        continue;
+      const parsed = parseApiResponse(response.data);
+      const artworks = extractArtworks(parsed);
+      if (artworks.length > 0) {
+        pool = artworks;
+        break;
       }
+      console.warn(`[google_arts] Search: no artworks for "${query}" (API attempt ${apiAttempt + 1})`);
+    } catch (err) {
+      console.warn(`[google_arts] Search API error (attempt ${apiAttempt + 1}): ${err.message}`);
     }
+  }
+  if (!pool) throw new Error(`No artworks found via search for "${query}"`);
 
-    const artwork = artworks[Math.floor(Math.random() * artworks.length)];
+  console.log(`[google_arts] Search for "${query}" returned ${pool.length} artworks`);
+
+  // Filter by aspect ratio up front — no point trying artworks we know will fail.
+  if (aspectRatio !== 'all') {
+    pool = pool.filter(a => {
+      if (a.aspectRatio === null) return false;
+      if (aspectRatio === 'landscape') return a.aspectRatio > 1;
+      if (aspectRatio === 'portrait') return a.aspectRatio < 1;
+      return true;
+    });
+    if (pool.length === 0) {
+      throw new Error(`No ${aspectRatio} artworks in search results for "${query}"`);
+    }
+    console.log(`[google_arts] After aspect ratio filter: ${pool.length} ${aspectRatio} artworks`);
+  }
+
+  // Shuffle the pool so we try artworks in random order on each call.
+  pool = pool.slice().sort(() => Math.random() - 0.5);
+
+  // Iterate through candidates, applying post-fetch filters where needed.
+  const hasPostFilters = excludedTypesLower.length > 0 || requireMediaSets.length > 0 || excludeMediaValues.size > 0;
+  const MAX_CANDIDATES = hasPostFilters ? Math.min(pool.length, 5) : 1;
+
+  for (let i = 0; i < MAX_CANDIDATES; i++) {
+    const artwork = pool[i];
     const imageUrl = buildDownloadUrl(artwork.imageBase, artwork.aspectRatio);
     const artworkUrl = `${BASE_URL}${artwork.link}`;
 
     // Fetch details for post-fetch filtering (objectType exclusion + media entity matching).
-    // Always fetch details when any post-fetch filter is active.
     const detailsPromise = fetchAssetDetails(artwork.assetId);
-    if (excludedTypesLower.length > 0 || hasMediaFilters) {
+    if (hasPostFilters) {
       const earlyDetails = await detailsPromise;
 
       // objectType exclusion
       if (excludedTypesLower.length > 0) {
         const artworkType = (earlyDetails.type || '').toLowerCase();
         if (excludedTypesLower.includes(artworkType)) {
-          console.warn(`[google_arts] Search attempt ${attempt + 1}: skipping excluded type "${earlyDetails.type}" ("${artwork.title}")`);
+          console.warn(`[google_arts] Search candidate ${i + 1}: skipping excluded type "${earlyDetails.type}" ("${artwork.title}")`);
           continue;
         }
       }
 
       // Media entity filtering against av[21] controlled vocabulary
-      if (hasMediaFilters) {
+      if (requireMediaSets.length > 0 || excludeMediaValues.size > 0) {
         const entityNames = (earlyDetails.mediumEntities || '').split('; ').filter(Boolean).map(n => n.toLowerCase());
 
         // Require: artwork must have medium entities AND at least one must be in every require set
         if (requireMediaSets.length > 0) {
           if (entityNames.length === 0) {
-            console.warn(`[google_arts] Search attempt ${attempt + 1}: skipping "${artwork.title}" — no medium entities (require filter active)`);
+            console.warn(`[google_arts] Search candidate ${i + 1}: skipping "${artwork.title}" — no medium entities (require filter active)`);
             continue;
           }
           const matchesAll = requireMediaSets.every(s => entityNames.some(n => s.has(n)));
           if (!matchesAll) {
-            console.warn(`[google_arts] Search attempt ${attempt + 1}: skipping "${artwork.title}" — medium entities [${entityNames.join(', ')}] don't match require filter`);
+            console.warn(`[google_arts] Search candidate ${i + 1}: skipping "${artwork.title}" — medium entities [${entityNames.join(', ')}] don't match require filter`);
             continue;
           }
         }
 
         // Exclude: reject if any entity matches; empty entities pass through
         if (excludeMediaValues.size > 0 && entityNames.some(n => excludeMediaValues.has(n))) {
-          console.warn(`[google_arts] Search attempt ${attempt + 1}: skipping "${artwork.title}" — medium entity matches exclude filter`);
+          console.warn(`[google_arts] Search candidate ${i + 1}: skipping "${artwork.title}" — medium entity matches exclude filter`);
           continue;
         }
       }
@@ -828,7 +834,7 @@ async function fetchFromSearch(query, { aspectRatio = 'all', excludedTypesLower 
     };
   }
 
-  throw new Error(`Could not find an artwork via search "${query}" after ${MAX_ATTEMPTS} attempts`);
+  throw new Error(`Could not find a matching artwork via search "${query}" after trying ${MAX_CANDIDATES} candidates`);
 }
 
 async function fetchRandomArtwork(filters = [], options = {}) {

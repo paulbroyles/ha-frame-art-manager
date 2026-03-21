@@ -112,7 +112,7 @@ Evolve the web sources system to support multiple query modes per source, cascad
 5. **[x] Core filter select needs padding**: CSS rule `.ws-filter-entry-body > .ws-filter-core-value { margin: 12px 16px; display: block; }` already applied.
 
 ### Phase 4: Test panel rework [x] DONE
-### Phase 5: Google Arts search mode [ ] TODO
+### Phase 5: Google Arts search mode [x] DONE
 
 ---
 
