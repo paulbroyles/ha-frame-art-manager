@@ -137,7 +137,7 @@ class MetadataHelper {
         parsed.attributes = ['title', 'date', 'museum', 'medium', 'dimensions', 'description'];
         if (!parsed.entityTypes) parsed.entityTypes = [];
         if (!parsed.entityTypes.some(e => e.id === 'creator')) {
-          parsed.entityTypes.push({ id: 'creator', name: 'Creator', attributes: ['name', 'lifespan', 'nationality'] });
+          parsed.entityTypes.push({ id: 'creator', name: 'Creator', attributes: ['name', 'lifespan', 'nationality'], kind: 'artist' });
         }
         if (!parsed.entityInstances) parsed.entityInstances = {};
         if (!parsed.entityInstances.creator) parsed.entityInstances.creator = {};
@@ -718,11 +718,11 @@ class MetadataHelper {
   /**
    * Add a new entity type
    */
-  async addEntityType(name) {
+  async addEntityType(name, { kind = null } = {}) {
     const metadata = await this.readMetadata();
     if (!metadata.entityTypes) metadata.entityTypes = [];
     const id = this._uniqueEntityTypeId(name, metadata.entityTypes);
-    const entityType = { id, name, attributes: [] };
+    const entityType = { id, name, attributes: [], kind: kind || null };
     metadata.entityTypes.push(entityType);
     if (!metadata.customDataOrder) {
       metadata.customDataOrder = this._buildDefaultCustomDataOrder(metadata);
@@ -731,6 +731,65 @@ class MetadataHelper {
     }
     await this.writeMetadata(metadata);
     return { entityTypes: metadata.entityTypes, customDataOrder: metadata.customDataOrder };
+  }
+
+  /**
+   * Set or clear the `kind` field on an entity type.
+   * @param {string} entityId
+   * @param {string|null} kind  e.g. 'artist', or null to clear
+   */
+  async setEntityTypeKind(entityId, kind) {
+    const metadata = await this.readMetadata();
+    const entityType = (metadata.entityTypes || []).find(e => e.id === entityId);
+    if (!entityType) throw new Error(`Entity type ${entityId} not found`);
+    entityType.kind = kind || null;
+    await this.writeMetadata(metadata);
+    return entityType;
+  }
+
+  /**
+   * Get all entity types with kind === 'artist'.
+   */
+  async getArtistKindEntityTypes() {
+    const metadata = await this.readMetadata();
+    return (metadata.entityTypes || []).filter(e => e.kind === 'artist');
+  }
+
+  /**
+   * Find all image filenames whose creator-kind entity instance matches artistName.
+   * Scans all artist-kind entity types' instances for a case-insensitive name match,
+   * then returns filenames referencing those instances via entityRefs.
+   *
+   * @param {string} artistName
+   * @param {object} [metadata]  pre-loaded metadata (optional, avoids extra read)
+   * @returns {string[]} matching filenames
+   */
+  async getLocalArtistImages(artistName, metadata) {
+    if (!metadata) metadata = await this.readMetadata();
+    const nameLower = artistName.toLowerCase().trim();
+    const artistTypes = (metadata.entityTypes || []).filter(e => e.kind === 'artist');
+    if (artistTypes.length === 0) return [];
+
+    // Collect all matching instance keys per entity type
+    const matchingRefs = {}; // entityId → Set<key>
+    for (const et of artistTypes) {
+      const instances = (metadata.entityInstances || {})[et.id] || {};
+      const keyAttr = et.attributes[0];
+      if (!keyAttr) continue;
+      const matchingKeys = new Set(
+        Object.entries(instances)
+          .filter(([, inst]) => (inst[keyAttr] || '').toLowerCase() === nameLower)
+          .map(([key]) => key)
+      );
+      if (matchingKeys.size > 0) matchingRefs[et.id] = matchingKeys;
+    }
+
+    if (Object.keys(matchingRefs).length === 0) return [];
+
+    return Object.keys(metadata.images || {}).filter(filename => {
+      const refs = (metadata.images[filename].entityRefs || {});
+      return Object.entries(matchingRefs).some(([entityId, keys]) => keys.has(refs[entityId]));
+    });
   }
 
   /**
@@ -864,8 +923,17 @@ class MetadataHelper {
    * Create or update an entity instance.
    * The key is derived by slugifying the key attribute value (first attribute).
    * Returns { key, isNew, data }
+   *
+   * @param {string} entityId
+   * @param {object} data  Display attribute values (name, lifespan, nationality, etc.)
+   * @param {object} [options]
+   * @param {object|null|undefined} [options._links]
+   *   Cross-source external IDs: { wikidataId, artsySlug, googleEntityId }.
+   *   - Omit / undefined: preserve existing _links on the instance.
+   *   - null: explicitly remove _links from the instance.
+   *   - object: replace _links with these values.
    */
-  async upsertEntityInstance(entityId, data) {
+  async upsertEntityInstance(entityId, data, { _links } = {}) {
     const metadata = await this.readMetadata();
     const entityType = (metadata.entityTypes || []).find(e => e.id === entityId);
     if (!entityType) throw new Error(`Entity type ${entityId} not found`);
@@ -882,11 +950,21 @@ class MetadataHelper {
     if (!metadata.entityInstances[entityId]) metadata.entityInstances[entityId] = {};
 
     const isNew = !(key in metadata.entityInstances[entityId]);
+    const existing = metadata.entityInstances[entityId][key] || {};
 
     // Build instance data (only attributes defined in entity type)
     const instanceData = {};
     for (const attr of entityType.attributes) {
       instanceData[attr] = String(data[attr] ?? '');
+    }
+
+    // Handle _links: preserve existing if not specified, remove if null, replace if object
+    if (_links === null) {
+      // Explicit removal — don't carry forward
+    } else if (_links && typeof _links === 'object') {
+      instanceData._links = _links;
+    } else if (existing._links) {
+      instanceData._links = existing._links;
     }
 
     metadata.entityInstances[entityId][key] = instanceData;

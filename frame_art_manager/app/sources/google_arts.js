@@ -528,6 +528,7 @@ async function resolveArtistEntity(name) {
   let entityId = null;
   let resolvedName = null;
 
+  let apiResponded = false;
   try {
     const response = await cookieClient.get(`${BASE_URL}/api/search`, {
       params: { q: name, hl: 'en' },
@@ -548,11 +549,14 @@ async function resolveArtistEntity(name) {
     } else {
       console.warn(`[google_arts] No artist entity found in search results for "${name}"`);
     }
+    apiResponded = true;
   } catch (err) {
     console.warn(`[google_arts] Artist entity resolution failed for "${name}": ${err.message}`);
   }
 
-  _artistEntityCache.set(key, { entityId, resolvedName, fetchedAt: Date.now() });
+  if (apiResponded) {
+    _artistEntityCache.set(key, { entityId, resolvedName, fetchedAt: Date.now() });
+  }
   return entityId;
 }
 
@@ -570,6 +574,7 @@ async function getArtistEntityCount(entityId) {
   }
 
   let count = 0;
+  let apiResponded = false;
   try {
     const response = await cookieClient.get(`${BASE_URL}/api/entity`, {
       params: { entityId, hl: 'en', rt: 'j' },
@@ -583,11 +588,14 @@ async function getArtistEntityCount(entityId) {
       count = raw;
       console.log(`[google_arts] Artist entity ${entityId}: ${count} artworks total`);
     }
+    apiResponded = true;
   } catch (err) {
     console.warn(`[google_arts] Failed to fetch artwork count for entity ${entityId}: ${err.message}`);
   }
 
-  _artistCountCache.set(entityId, { count, fetchedAt: Date.now() });
+  if (apiResponded) {
+    _artistCountCache.set(entityId, { count, fetchedAt: Date.now() });
+  }
   return count;
 }
 
@@ -1605,6 +1613,7 @@ async function suggestArtists(query, limit = 5) {
 
   await seedCookies();
   let results = [];
+  let apiResponded = false;
   try {
     const response = await cookieClient.get(`${BASE_URL}/api/search`, {
       params: { q: query, hl: 'en' },
@@ -1625,11 +1634,14 @@ async function suggestArtists(query, limit = 5) {
       const nameKey = r.name.toLowerCase().trim();
       _artistEntityCache.set(nameKey, { entityId: r.entityId, resolvedName: r.name, fetchedAt: now });
     }
+    apiResponded = true;
   } catch (err) {
     console.warn(`[google_arts] suggestArtists failed for "${query}": ${err.message}`);
   }
 
-  _artistSuggestCache.set(key, { results, fetchedAt: Date.now() });
+  if (apiResponded) {
+    _artistSuggestCache.set(key, { results, fetchedAt: Date.now() });
+  }
   return results.slice(0, limit);
 }
 

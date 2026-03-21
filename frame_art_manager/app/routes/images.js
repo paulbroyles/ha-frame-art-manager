@@ -468,10 +468,12 @@ router.post('/upload', upload.single('image'), async (req, res) => {
           const parsedEntityData = JSON.parse(req.body.entityDataJson);
           if (parsedEntityData && typeof parsedEntityData === 'object') {
             const entityRefs = {};
-            for (const [entityId, data] of Object.entries(parsedEntityData)) {
-              if (!data || typeof data !== 'object') continue;
+            for (const [entityId, entry] of Object.entries(parsedEntityData)) {
+              if (!entry || typeof entry !== 'object') continue;
               try {
-                const result = await helper.upsertEntityInstance(entityId, data);
+                // entry may include a _links key alongside attribute data
+                const { _links, ...data } = entry;
+                const result = await helper.upsertEntityInstance(entityId, data, { _links });
                 entityRefs[entityId] = result.key;
               } catch (e) {
                 // skip invalid entity data (e.g. missing key attribute)

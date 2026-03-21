@@ -121,6 +121,7 @@ async function resolveArtistSlug(name) {
   }
 
   let slug = null;
+  let apiResponded = false;
   try {
     const escaped = name.replace(/"/g, '\\"');
     const result = await _graphql(`{
@@ -139,11 +140,14 @@ async function resolveArtistSlug(name) {
     } else {
       console.warn(`[artsy] Could not resolve artist slug for "${name}"`);
     }
+    apiResponded = true;
   } catch (err) {
     console.warn(`[artsy] Artist slug resolution failed for "${name}": ${err.message}`);
   }
 
-  _artistSlugCache.set(key, { slug, fetchedAt: Date.now() });
+  if (apiResponded) {
+    _artistSlugCache.set(key, { slug, fetchedAt: Date.now() });
+  }
   return slug;
 }
 
@@ -494,6 +498,7 @@ async function suggestArtists(query, limit = 5) {
   }
 
   let results = [];
+  let apiResponded = false;
   try {
     const escaped = query.replace(/"/g, '\\"');
     const result = await _graphql(`{
@@ -517,11 +522,14 @@ async function suggestArtists(query, limit = 5) {
         _artistSlugCache.set(nameKey, { slug: r.slug, fetchedAt: Date.now() });
       }
     }
+    apiResponded = true;
   } catch (err) {
     console.warn(`[artsy] suggestArtists failed for "${query}": ${err.message}`);
   }
 
-  _artistSuggestCache.set(key, { results, fetchedAt: Date.now() });
+  if (apiResponded) {
+    _artistSuggestCache.set(key, { results, fetchedAt: Date.now() });
+  }
   return results.slice(0, limit);
 }
 

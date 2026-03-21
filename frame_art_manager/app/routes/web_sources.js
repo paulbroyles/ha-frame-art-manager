@@ -56,6 +56,40 @@ function getArtistCapableSources() {
 }
 
 /**
+ * Fetch per-source artwork counts for a given artist name.
+ * All artist-capable sources are probed in parallel using their cached count functions.
+ * Cache hits are instant; misses probe the source API (usually <500ms).
+ *
+ * Portable: local gallery count is injected via `localCountFn` so this function
+ * has no direct dependency on MetadataHelper or the local gallery.
+ *
+ * @param {string} artistName
+ * @param {object} [options]
+ * @param {string} [options.aspectRatio='all']  Filter pool by aspect ratio compatibility
+ * @param {Function} [options.localCountFn]     async (artistName) => string[] of local filenames
+ * @returns {Promise<{ counts: Record<string, number|null>, localImages: string[] }>}
+ */
+async function getArtistCounts(artistName, { aspectRatio = 'all', localCountFn } = {}) {
+  const pool = getArtistCapableSources()
+    .filter(id => BUILTIN_SOURCES[id])
+    .filter(id => isSourceCompatible(id, aspectRatio));
+
+  const [sourceCounts, localImages] = await Promise.all([
+    Promise.all(pool.map(id =>
+      (SOURCE_MODULES[id].countArtistArtworks
+        ? SOURCE_MODULES[id].countArtistArtworks(artistName).catch(() => null)
+        : Promise.resolve(null))
+    )),
+    localCountFn ? localCountFn(artistName).catch(() => []) : Promise.resolve([]),
+  ]);
+
+  const counts = { local: localImages.length };
+  pool.forEach((id, i) => { counts[id] = sourceCounts[i]; });
+
+  return { counts, localImages };
+}
+
+/**
  * Compute per-source metadata declarations (fields + default mapping) given stored source settings.
  * Sources that export getMetadataFields(settings) receive their stored settings so the field list
  * can vary at runtime (e.g. google_art_wallpaper appends rich fields when fetchRichMetadata is on).
@@ -1145,11 +1179,16 @@ async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio) {
       );
     }
 
+    // If a preferred source was chosen upstream (count-weighted in shuffle.js), try it first.
+    // Fall back to the remaining pool in random order if the preferred source fails.
+    const preferred = virtualTag.preferredSourceId;
+    const others = pool.filter(id => id !== preferred);
+    const ordered = (preferred && pool.includes(preferred)) ? [preferred, ...others] : pool.slice();
+
     let lastErr;
-    const remaining = pool.slice();
-    while (remaining.length > 0) {
-      const idx = Math.floor(Math.random() * remaining.length);
-      const candidateId = remaining.splice(idx, 1)[0];
+    let tried = 0;
+    for (const candidateId of ordered) {
+      tried++;
       try {
         const artistFilter = { type: 'artist', mode: 'require', values: [artist] };
         const cFilters = mergeFilterCascade(
@@ -1169,6 +1208,13 @@ async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio) {
       } catch (err) {
         console.warn(`[web_sources] Unified artist "${artist}": ${candidateId} failed — ${err.message}`);
         lastErr = err;
+        // After preferred source fails, shuffle the remaining candidates for equal fallback probability
+        if (tried === 1 && preferred) {
+          for (let i = ordered.length - 1; i > 1; i--) {
+            const j = 1 + Math.floor(Math.random() * i);
+            [ordered[i], ordered[j]] = [ordered[j], ordered[i]];
+          }
+        }
       }
     }
 
@@ -1962,3 +2008,4 @@ module.exports = router;
 module.exports.clearCacheForDevice = clearCacheForDevice;
 module.exports.readWebSourcesConfig = readWebSourcesConfig;
 module.exports.writeWebSourcesConfig = writeWebSourcesConfig;
+module.exports.getArtistCounts = getArtistCounts;

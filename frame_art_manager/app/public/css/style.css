@@ -11842,6 +11842,50 @@ input[type="checkbox"]:checked + .toggle-text {
   color: #fff;
 }
 
+/* Linked sources badge shown below entity input box */
+.entity-linked-sources {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 6px 2px;
+  font-size: 11px;
+}
+
+.linked-sources-label {
+  color: var(--muted-text, #888);
+  font-size: 11px;
+  margin-right: 2px;
+}
+
+.linked-source-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #e8f4e8;
+  color: #3a7a3a;
+  border: 1px solid #b8d8b8;
+  white-space: nowrap;
+}
+
+.unlink-entity-btn {
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 1.4;
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 3px;
+  background: none;
+  color: var(--muted-text, #888);
+  cursor: pointer;
+}
+
+.unlink-entity-btn:hover {
+  background: #fee;
+  border-color: #f88;
+  color: #c33;
+}
+
 /* Wikidata-filled entity fields awaiting user confirmation */
 .entity-field-input.suggested {
   background: #f0f6ff;

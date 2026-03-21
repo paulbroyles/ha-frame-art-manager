@@ -44,6 +44,7 @@ async function suggestArtists(query, limit = 5) {
   }
 
   let results = [];
+  let apiResponded = false;
   try {
     const response = await axios.get(WIKIDATA_API, {
       params: {
@@ -69,11 +70,14 @@ async function suggestArtists(query, limit = 5) {
         description: h.description,
         source:      'wikidata',
       }));
+    apiResponded = true;
   } catch (err) {
     console.warn(`[wikidata] suggestArtists failed for "${query}": ${err.message}`);
   }
 
-  _suggestCache.set(key, { results, fetchedAt: Date.now() });
+  if (apiResponded) {
+    _suggestCache.set(key, { results, fetchedAt: Date.now() });
+  }
   return results;
 }
 
@@ -131,7 +135,9 @@ async function enrichArtist(wikidataId) {
     console.warn(`[wikidata] enrichArtist failed for "${wikidataId}": ${err.message}`);
   }
 
-  _enrichCache.set(wikidataId, { data, fetchedAt: Date.now() });
+  if (data !== null) {
+    _enrichCache.set(wikidataId, { data, fetchedAt: Date.now() });
+  }
   return data;
 }
 

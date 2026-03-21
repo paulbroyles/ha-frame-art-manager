@@ -11495,6 +11495,8 @@ async function loadCustomDataTab() {
   initNewEntityButton();
   document.getElementById('restore-custom-metadata-defaults-btn')
     ?.addEventListener('click', restoreCustomMetadataDefaults);
+  document.getElementById('review-unlinked-artists-btn')
+    ?.addEventListener('click', openReviewUnlinkedArtistsModal);
 }
 
 async function restoreCustomMetadataDefaults() {
@@ -11516,6 +11518,205 @@ async function restoreCustomMetadataDefaults() {
     console.error('Error restoring custom metadata defaults:', error);
     showToast(`Error: ${error.message}`, 'error');
   }
+}
+
+// ── Review Unlinked Artists modal ──────────────────────────────────────────
+
+async function openReviewUnlinkedArtistsModal() {
+  let instances = [];
+  try {
+    const resp = await fetch(`${API_BASE}/entities/unlinked-artists`);
+    if (!resp.ok) throw new Error('Failed to fetch unlinked artists');
+    const data = await resp.json();
+    instances = data.instances || [];
+  } catch (err) {
+    console.error('Error fetching unlinked artists:', err);
+    showToast('Error loading unlinked artists', 'error');
+    return;
+  }
+
+  if (instances.length === 0) {
+    showToast('No unlinked artists found');
+    return;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal active';
+  overlay.style.cssText = 'z-index:1100;';
+  overlay.innerHTML = `
+    <div class="modal-content" style="max-width:480px;width:92%;padding:0;">
+      <div class="modal-details" style="padding:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+          <h3 style="margin:0;">Review Unlinked Artists</h3>
+          <button id="rul-close" class="btn-icon" title="Close">&times;</button>
+        </div>
+        <div id="rul-progress" style="color:#888;font-size:12px;margin-bottom:10px;"></div>
+        <div id="rul-name" style="font-size:1.1em;font-weight:600;margin-bottom:4px;"></div>
+        <div id="rul-usage" style="color:#aaa;font-size:12px;margin-bottom:12px;"></div>
+        <div style="position:relative;">
+          <input id="rul-search" type="text" class="modal-attribute-input"
+                 style="width:100%;box-sizing:border-box;" placeholder="Search to find a match…" autocomplete="off" />
+          <div id="rul-dropdown" class="entity-autocomplete-dropdown" style="display:none;"></div>
+        </div>
+        <div id="rul-selected" style="min-height:20px;margin-top:8px;font-size:12px;color:#27ae60;"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+          <button id="rul-skip" class="btn-secondary">Skip</button>
+          <button id="rul-link" class="btn-primary" disabled>Link &amp; Next</button>
+          <button id="rul-done" class="btn-secondary">Done</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  let currentIndex = 0;
+  let pendingLinks = null;
+
+  const progressEl = overlay.querySelector('#rul-progress');
+  const nameEl     = overlay.querySelector('#rul-name');
+  const usageEl    = overlay.querySelector('#rul-usage');
+  const searchEl   = overlay.querySelector('#rul-search');
+  const dropdown   = overlay.querySelector('#rul-dropdown');
+  const selectedEl = overlay.querySelector('#rul-selected');
+  const linkBtn    = overlay.querySelector('#rul-link');
+
+  function renderCurrent() {
+    const item = instances[currentIndex];
+    const entityType = allEntityTypes.find(e => e.id === item.entityId);
+    const keyAttr = entityType?.attributes?.[0] || 'name';
+    const displayName = item.data[keyAttr] || item.key;
+
+    progressEl.textContent = `${currentIndex + 1} of ${instances.length}`;
+    nameEl.textContent = displayName;
+    usageEl.textContent = item.usageCount
+      ? `Used on ${item.usageCount} image${item.usageCount !== 1 ? 's' : ''}`
+      : 'Unused';
+    searchEl.value = displayName;
+    selectedEl.textContent = '';
+    linkBtn.disabled = true;
+    dropdown.style.display = 'none';
+    dropdown.innerHTML = '';
+    pendingLinks = null;
+
+    // Auto-search with the artist name
+    triggerSearch(displayName);
+  }
+
+  function setSelected(name, links) {
+    pendingLinks = links;
+    const sources = [
+      links.wikidataId    ? 'Wikidata'     : null,
+      links.artsySlug     ? 'Artsy'        : null,
+      links.googleEntityId ? 'Google Arts' : null,
+    ].filter(Boolean);
+    selectedEl.textContent = `Selected: ${name}${sources.length ? ` (${sources.join(', ')})` : ''}`;
+    linkBtn.disabled = false;
+    dropdown.style.display = 'none';
+    dropdown.innerHTML = '';
+  }
+
+  function showDropdown(suggestions) {
+    if (!suggestions || suggestions.length === 0) {
+      dropdown.style.display = 'none';
+      dropdown.innerHTML = '';
+      return;
+    }
+    const items = suggestions
+      .filter(s => (s.sources || []).some(src => src !== 'local'))
+      .map(s => {
+        const description = s.description
+          ? `<span class="artist-suggest-description">${escapeHtml(s.description)}</span>` : '';
+        const nonLocal = (s.sources || []).filter(src => src !== 'local');
+        const badges = nonLocal.map(src => `<span class="artist-suggest-badge">${escapeHtml(src)}</span>`).join('');
+        return `<div class="entity-autocomplete-item artist-suggest-item"
+            data-name="${escapeHtml(s.name)}"
+            data-wikidata-id="${escapeHtml(s.wikidataId || '')}"
+            data-artsy-slug="${escapeHtml(s.artsySlug || '')}"
+            data-google-entity-id="${escapeHtml(s.googleEntityId || '')}">
+          <div class="artist-suggest-main">
+            <span class="artist-suggest-name">${escapeHtml(s.name)}</span>
+            ${description}
+          </div>
+          ${badges ? `<div class="artist-suggest-sources">${badges}</div>` : ''}
+        </div>`;
+      });
+    if (items.length === 0) { dropdown.style.display = 'none'; return; }
+    dropdown.innerHTML = items.join('');
+    dropdown.style.display = '';
+    dropdown.querySelectorAll('.artist-suggest-item').forEach(item => {
+      item.addEventListener('mousedown', e => {
+        e.preventDefault();
+        const links = {};
+        if (item.dataset.wikidataId)    links.wikidataId    = item.dataset.wikidataId;
+        if (item.dataset.artsySlug)     links.artsySlug     = item.dataset.artsySlug;
+        if (item.dataset.googleEntityId) links.googleEntityId = item.dataset.googleEntityId;
+        if (Object.keys(links).length > 0) setSelected(item.dataset.name, links);
+      });
+    });
+  }
+
+  async function triggerSearch(q) {
+    if (!q || q.trim().length < 2) return;
+    const trimmed = q.trim();
+    const suggestions = await fetchArtistSuggestions(trimmed, 8);
+    // Discard if the query has changed since we started
+    if (searchEl.value.trim() !== trimmed) return;
+    showDropdown(suggestions);
+  }
+
+  let debounceTimer;
+  searchEl.addEventListener('input', () => {
+    pendingLinks = null;
+    linkBtn.disabled = true;
+    selectedEl.textContent = '';
+    const q = searchEl.value.trim();
+    if (q.length < 2) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => triggerSearch(q), 300);
+  });
+
+  searchEl.addEventListener('blur', () => {
+    setTimeout(() => { dropdown.style.display = 'none'; dropdown.innerHTML = ''; }, 200);
+  });
+
+  async function advance() {
+    currentIndex++;
+    if (currentIndex >= instances.length) {
+      closeModal();
+      showToast('All artists reviewed');
+      return;
+    }
+    renderCurrent();
+  }
+
+  overlay.querySelector('#rul-link').addEventListener('click', async () => {
+    if (!pendingLinks) return;
+    const item = instances[currentIndex];
+    try {
+      const resp = await fetch(`${API_BASE}/entities/${encodeURIComponent(item.entityId)}/instances`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: item.data, _links: pendingLinks }),
+      });
+      const result = await resp.json();
+      if (result.success) {
+        if (!allEntityInstances[item.entityId]) allEntityInstances[item.entityId] = {};
+        allEntityInstances[item.entityId][item.key] = result.data;
+      }
+    } catch (err) {
+      console.error('Error linking artist:', err);
+    }
+    advance();
+  });
+
+  function closeModal() { overlay.remove(); }
+
+  overlay.querySelector('#rul-skip').addEventListener('click', advance);
+  overlay.querySelector('#rul-done').addEventListener('click', closeModal);
+  overlay.querySelector('#rul-close').addEventListener('click', closeModal);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(); });
+
+  renderCurrent();
 }
 
 function renderAttributesTable() {
@@ -11720,6 +11921,8 @@ function entitySlugify(str) {
 
 // Build entity input box HTML (shared by upload and modal contexts)
 function renderEntityInputBox(entityType, instanceData, instanceKey) {
+  const links = (instanceData && instanceData._links) || null;
+  const badgeHtml = renderLinkedSourcesBadges(links);
   return `
     <div class="entity-input-box" data-entity-id="${escapeHtml(entityType.id)}" data-instance-key="${escapeHtml(instanceKey || '')}">
       <div class="entity-input-header">${escapeHtml(entityType.name)}</div>
@@ -11747,8 +11950,24 @@ function renderEntityInputBox(entityType, instanceData, instanceKey) {
           `;
         }).join('')}
       </div>
+      ${badgeHtml ? `<div class="entity-linked-sources">${badgeHtml}</div>` : ''}
     </div>
   `;
+}
+
+/**
+ * Render linked source badges for an entity instance.
+ * @param {object|null} links  e.g. { wikidataId, artsySlug, googleEntityId }
+ * @returns {string} HTML string, empty if no links
+ */
+function renderLinkedSourcesBadges(links) {
+  if (!links) return '';
+  const badges = [];
+  if (links.wikidataId)     badges.push(`<span class="linked-source-badge">Wikidata</span>`);
+  if (links.artsySlug)      badges.push(`<span class="linked-source-badge">Artsy</span>`);
+  if (links.googleEntityId) badges.push(`<span class="linked-source-badge">Google Arts</span>`);
+  if (badges.length === 0) return '';
+  return `<span class="linked-sources-label">Linked:</span>${badges.join('')}<button class="unlink-entity-btn" title="Remove source links">✕</button>`;
 }
 
 // Render entity input boxes in the upload form
@@ -11785,7 +12004,12 @@ function collectUploadEntities() {
     const entityType = allEntityTypes.find(e => e.id === entityId);
     const keyAttr = entityType && entityType.attributes[0];
     if (keyAttr && data[keyAttr] && data[keyAttr].trim()) {
-      result[entityId] = data;
+      const keyInput = box.querySelector('.entity-key-input');
+      // Include _links if autocomplete set them (undefined means not interacted — omit)
+      const entry = keyInput && keyInput._pendingLinks !== undefined
+        ? { ...data, _links: keyInput._pendingLinks }
+        : data;
+      result[entityId] = entry;
     }
   });
   return Object.keys(result).length > 0 ? result : null;
@@ -11826,6 +12050,35 @@ function renderModalEntities(imageData) {
         setTimeout(() => saveModalEntityBox(box), 150);
       });
     });
+    // Unlink button: remove _links from the instance
+    const unlinkBtn = box.querySelector('.unlink-entity-btn');
+    if (unlinkBtn) {
+      unlinkBtn.addEventListener('click', async () => {
+        const instanceKey = box.dataset.instanceKey;
+        if (!instanceKey) return;
+        const entityType = allEntityTypes.find(e => e.id === entityId);
+        if (!entityType) return;
+        const instance = (allEntityInstances[entityId] || {})[instanceKey] || {};
+        try {
+          const resp = await fetch(`${API_BASE}/entities/${encodeURIComponent(entityId)}/instances`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data: instance, _links: null })
+          });
+          const result = await resp.json();
+          if (result.success) {
+            if (!allEntityInstances[entityId]) allEntityInstances[entityId] = {};
+            allEntityInstances[entityId][instanceKey] = result.data;
+            // Re-render the badge area
+            const badgesContainer = box.querySelector('.entity-linked-sources');
+            if (badgesContainer) badgesContainer.remove();
+            if (keyInput) keyInput._pendingLinks = null;
+          }
+        } catch (e) {
+          console.error('Error unlinking entity:', e);
+        }
+      });
+    }
   });
 }
 
@@ -11839,7 +12092,7 @@ function initEntityKeyAutocomplete(keyInput, instances) {
   const dropdown = wrapper && wrapper.querySelector('.entity-autocomplete-dropdown');
   if (!dropdown) return;
 
-  const isCreator = entityId === 'creator';
+  const isCreator = entityType.kind === 'artist';
 
   function showDropdown(localMatches, remoteSuggestions = []) {
     const items = [];
@@ -11864,7 +12117,9 @@ function initEntityKeyAutocomplete(keyInput, instances) {
       items.push(`<div class="entity-autocomplete-item artist-suggest-item"
           data-suggest-type="external"
           data-name="${escapeHtml(s.name)}"
-          data-wikidata-id="${escapeHtml(s.wikidataId || '')}">
+          data-wikidata-id="${escapeHtml(s.wikidataId || '')}"
+          data-artsy-slug="${escapeHtml(s.artsySlug || '')}"
+          data-google-entity-id="${escapeHtml(s.googleEntityId || '')}">
         <div class="artist-suggest-main">
           <span class="artist-suggest-name">${escapeHtml(s.name)}</span>
           ${description}
@@ -11889,6 +12144,9 @@ function initEntityKeyAutocomplete(keyInput, instances) {
 
         if (item.dataset.suggestType === 'local') {
           selectEntityInstance(keyInput, instances, item.dataset.key, entityType);
+          // Preserve existing _links from the local instance
+          const instanceData = instances[item.dataset.key] || {};
+          keyInput._pendingLinks = instanceData._links || null;
         } else {
           // External suggestion: fill name immediately
           const name = item.dataset.name;
@@ -11897,8 +12155,17 @@ function initEntityKeyAutocomplete(keyInput, instances) {
           const box = keyInput.closest('.entity-input-box');
           if (box) box.querySelectorAll('.entity-field-input.suggested').forEach(f => f.classList.remove('suggested'));
 
-          // If wikidataId present, enrich and fill remaining fields
+          // Build _links from available source IDs
           const wikidataId = item.dataset.wikidataId;
+          const artsySlug = item.dataset.artsySlug;
+          const googleEntityId = item.dataset.googleEntityId;
+          const links = {};
+          if (wikidataId)      links.wikidataId = wikidataId;
+          if (artsySlug)       links.artsySlug = artsySlug;
+          if (googleEntityId)  links.googleEntityId = googleEntityId;
+          keyInput._pendingLinks = Object.keys(links).length > 0 ? links : null;
+
+          // If wikidataId present, enrich and fill remaining fields
           if (wikidataId && box) {
             try {
               const resp = await fetch(`${API_BASE}/artist-suggest/enrich?wikidataId=${encodeURIComponent(wikidataId)}`);
@@ -12096,10 +12363,16 @@ async function saveModalEntityBox(box) {
   }
 
   try {
+    const keyInput = box.querySelector('.entity-key-input');
+    // _pendingLinks: set by autocomplete selection, undefined if user didn't interact
+    // undefined → preserve existing; null → remove; object → replace
+    const linksPayload = keyInput && keyInput._pendingLinks !== undefined
+      ? { _links: keyInput._pendingLinks }
+      : {};
     const upsertResp = await fetch(`${API_BASE}/entities/${encodeURIComponent(entityId)}/instances`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data })
+      body: JSON.stringify({ data, ...linksPayload })
     });
     const upsertResult = await upsertResp.json();
     if (!upsertResult.success) {
@@ -12119,6 +12392,8 @@ async function saveModalEntityBox(box) {
       box.dataset.instanceKey = newKey;
       if (!allEntityInstances[entityId]) allEntityInstances[entityId] = {};
       allEntityInstances[entityId][newKey] = upsertResult.data;
+      // Reset _pendingLinks — links are now persisted
+      if (keyInput) keyInput._pendingLinks = undefined;
     }
   } catch (error) {
     console.error('Error saving entity data:', error);

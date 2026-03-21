@@ -6,7 +6,7 @@ const MetadataHelper = require('../metadata_helper');
 
 const DEFAULT_ATTRIBUTES = ['title', 'date', 'museum', 'medium'];
 const DEFAULT_ENTITY_TYPES = [
-  { id: 'creator', name: 'Creator', attributes: ['name', 'lifespan', 'nationality'] },
+  { id: 'creator', name: 'Creator', attributes: ['name', 'lifespan', 'nationality'], kind: 'artist' },
 ];
 
 // GET all entity types
@@ -74,16 +74,35 @@ router.put('/custom-data-order/display-role', async (req, res) => {
 // POST create new entity type
 router.post('/', async (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, kind } = req.body;
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Entity type name is required' });
     }
+    if (kind !== undefined && kind !== null && kind !== 'artist') {
+      return res.status(400).json({ error: 'kind must be "artist" or null' });
+    }
     const helper = new MetadataHelper(req.frameArtPath);
-    const result = await helper.addEntityType(name.trim());
+    const result = await helper.addEntityType(name.trim(), { kind: kind || null });
     res.json({ success: true, ...result });
   } catch (error) {
     console.error('Error adding entity type:', error);
     res.status(500).json({ error: 'Failed to add entity type' });
+  }
+});
+
+// PUT set/clear the kind on an entity type
+router.put('/:entityId/kind', async (req, res) => {
+  try {
+    const { kind } = req.body;
+    if (kind !== null && kind !== 'artist') {
+      return res.status(400).json({ error: 'kind must be "artist" or null' });
+    }
+    const helper = new MetadataHelper(req.frameArtPath);
+    const entityType = await helper.setEntityTypeKind(req.params.entityId, kind);
+    res.json({ success: true, entityType });
+  } catch (error) {
+    console.error('Error setting entity kind:', error);
+    res.status(500).json({ error: error.message || 'Failed to set entity kind' });
   }
 });
 
@@ -168,18 +187,48 @@ router.get('/:entityId/instances/:key/usage', async (req, res) => {
 });
 
 // POST create or update entity instance (key derived server-side from key attribute value)
+// Body: { data: { name, lifespan, ... }, _links?: { wikidataId, artsySlug, googleEntityId } | null }
+// _links omitted → preserve existing; null → remove; object → replace
 router.post('/:entityId/instances', async (req, res) => {
   try {
-    const { data } = req.body;
+    const { data, _links } = req.body;
     if (!data || typeof data !== 'object') {
       return res.status(400).json({ error: 'data object is required' });
     }
     const helper = new MetadataHelper(req.frameArtPath);
-    const result = await helper.upsertEntityInstance(req.params.entityId, data);
+    const result = await helper.upsertEntityInstance(req.params.entityId, data, { _links });
     res.json({ success: true, ...result });
   } catch (error) {
     console.error('Error upserting entity instance:', error);
     res.status(500).json({ error: error.message || 'Failed to save entity instance' });
+  }
+});
+
+// GET all unlinked artist-kind instances (for retroactive linking UI)
+// Returns { instances: [{ entityId, key, data }] }
+router.get('/unlinked-artists', async (req, res) => {
+  try {
+    const helper = new MetadataHelper(req.frameArtPath);
+    const metadata = await helper.readMetadata();
+    const artistTypes = (metadata.entityTypes || []).filter(e => e.kind === 'artist');
+    const result = [];
+    for (const et of artistTypes) {
+      const instances = (metadata.entityInstances || {})[et.id] || {};
+      for (const [key, inst] of Object.entries(instances)) {
+        if (!inst._links || Object.keys(inst._links).length === 0) {
+          const usage = Object.keys(metadata.images || {}).filter(f => {
+            return (metadata.images[f].entityRefs || {})[et.id] === key;
+          });
+          result.push({ entityId: et.id, key, data: inst, usageCount: usage.length });
+        }
+      }
+    }
+    // Sort by usage count desc (most-used unlinked artists first)
+    result.sort((a, b) => b.usageCount - a.usageCount);
+    res.json({ instances: result });
+  } catch (error) {
+    console.error('Error getting unlinked artists:', error);
+    res.status(500).json({ error: 'Failed to retrieve unlinked artists' });
   }
 });
 
@@ -202,8 +251,9 @@ router.post('/restore-defaults', async (req, res) => {
       if (existing) {
         existing.name = def.name;
         existing.attributes = [...def.attributes];
+        existing.kind = def.kind || null;
       } else {
-        metadata.entityTypes.push({ id: def.id, name: def.name, attributes: [...def.attributes] });
+        metadata.entityTypes.push({ id: def.id, name: def.name, attributes: [...def.attributes], kind: def.kind || null });
       }
       if (!metadata.entityInstances[def.id]) metadata.entityInstances[def.id] = {};
     }

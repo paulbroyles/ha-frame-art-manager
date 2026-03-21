@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const MetadataHelper = require('../metadata_helper');
 const { readTagsets } = require('./tagsets');
+const { readWebSourcesConfig, getArtistCounts } = require('./web_sources');
 
 // Virtual tag constants (mirrored from frame-art-shuffler)
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
@@ -85,6 +86,101 @@ function selectRandom(arr) {
 }
 
 /**
+ * For an artist-mode virtual tag: perform count-weighted local-vs-source selection.
+ *
+ * Returns null if the tag is not an artist virtual tag (caller uses normal web_source response).
+ * Returns { type: 'library', filename, ...imageData } if a local image was selected.
+ * Returns { preferredSourceId } if a web source was selected (add to web_source response).
+ *
+ * @param {string|null} virtualTagId
+ * @param {object} opts
+ * @param {string} opts.frameArtPath
+ * @param {object} opts.metadata  pre-loaded metadata
+ * @param {MetadataHelper} opts.helper
+ * @param {string|null} opts.currentImage
+ * @param {string[]} opts.recentImages
+ */
+async function resolveArtistVirtualTag(virtualTagId, { frameArtPath, metadata, helper, currentImage, recentImages }) {
+  if (!virtualTagId) return null;
+
+  let webSources;
+  try {
+    webSources = await readWebSourcesConfig(frameArtPath);
+  } catch {
+    return null;
+  }
+
+  const virtualTag = (webSources.virtualTags || []).find(vt => vt.id === virtualTagId);
+  if (!virtualTag || virtualTag.queryMode !== 'artist') return null;
+
+  const artistName = virtualTag.queryParams?.artist;
+  if (!artistName) return null;
+
+  let counts, localImages;
+  try {
+    ({ counts, localImages } = await getArtistCounts(artistName, {
+      aspectRatio: 'all', // aspect ratio handled later in fetchFromVirtualTag
+      localCountFn: name => helper.getLocalArtistImages(name, metadata),
+    }));
+  } catch {
+    return null;
+  }
+
+  // Build weighted pool (exclude null counts and zero counts)
+  const entries = Object.entries(counts).filter(([, c]) => c != null && c > 0);
+  if (entries.length === 0) return null; // no data — fall back to equal-weight dispatch
+
+  const totalWeight = entries.reduce((s, [, c]) => s + c, 0);
+  let roll = Math.random() * totalWeight;
+  let chosen = entries[entries.length - 1][0];
+  for (const [id, c] of entries) {
+    roll -= c;
+    if (roll <= 0) { chosen = id; break; }
+  }
+
+  if (chosen === 'local' && localImages.length > 0) {
+    // Select a local image respecting currentImage + recency preference
+    const withoutCurrent = localImages.filter(f => f !== currentImage);
+    const candidates = withoutCurrent.length > 0 ? withoutCurrent : localImages;
+    const { pool } = applyRecencyPreference(
+      candidates.map(f => ({ filename: f })),
+      recentImages
+    );
+    const selected = selectRandom(pool);
+    const imageData = selected ? ((metadata.images || {})[selected.filename] || {}) : {};
+    return { type: 'library', filename: selected?.filename, ...imageData };
+  }
+
+  if (chosen !== 'local') {
+    return { preferredSourceId: chosen };
+  }
+
+  return null; // local won but no local images — fall back
+}
+
+/**
+ * Build the response object for a virtual web source tag.
+ * For artist tags, performs count-weighted dispatch first:
+ *   - If a local image wins → returns library response
+ *   - If a web source wins → returns web_source response with preferredSourceId
+ * For non-artist tags → returns plain web_source response.
+ */
+async function makeWebSourceResponse(tag, { eligibleCount, freshCount, usedFallback, frameArtPath, metadata, helper, currentImage, recentImages }) {
+  const virtualTagId = getVirtualTagId(tag);
+  const artistResult = await resolveArtistVirtualTag(virtualTagId, { frameArtPath, metadata, helper, currentImage, recentImages }).catch(() => null);
+
+  if (artistResult) {
+    if (artistResult.type === 'library') {
+      return { ...artistResult, eligibleCount, selectedTag: tag, freshCount: freshCount || 0, usedFallback: usedFallback || false };
+    }
+    // preferredSourceId: attach to web_source response
+    return { type: 'web_source', virtualTagId, preferredSourceId: artistResult.preferredSourceId, eligibleCount, selectedTag: tag, freshCount: 0, usedFallback: false };
+  }
+
+  return { type: 'web_source', virtualTagId, eligibleCount, selectedTag: tag, freshCount: 0, usedFallback: false };
+}
+
+/**
  * POST /api/shuffle/select
  *
  * Selects a random image from the library (or a virtual web source tag)
@@ -151,14 +247,10 @@ router.post('/select', async (req, res) => {
     // Only virtual web tags — pick one weighted-randomly and return sentinel
     if (hasWebSources && libraryIncludeTags.length === 0) {
       const chosen = weightedRandomChoice(virtualWebTags, t => tagWeights[t] ?? 1.0);
-      return res.json({
-        type: 'web_source',
-        virtualTagId: getVirtualTagId(chosen),
-        eligibleCount: 1,
-        selectedTag: chosen,
-        freshCount: 0,
-        usedFallback: false,
-      });
+      return res.json(await makeWebSourceResponse(chosen, {
+        eligibleCount: 1, freshCount: 0, usedFallback: false,
+        frameArtPath: req.frameArtPath, metadata, helper, currentImage, recentImages,
+      }));
     }
 
     // No include tags = all images (flat image-weighted selection)
@@ -209,14 +301,10 @@ router.post('/select', async (req, res) => {
       // Roll for web source (proportional to effective share)
       if (hasWebSources && Math.random() < webEffective / eligibleCount) {
         const chosen = weightedRandomChoice(virtualWebTags, t => tagWeights[t] ?? 1.0);
-        return res.json({
-          type: 'web_source',
-          virtualTagId: getVirtualTagId(chosen),
-          eligibleCount,
-          selectedTag: chosen,
-          freshCount: 0,
-          usedFallback: false,
-        });
+        return res.json(await makeWebSourceResponse(chosen, {
+          eligibleCount, freshCount: 0, usedFallback: false,
+          frameArtPath: req.frameArtPath, metadata, helper, currentImage, recentImages,
+        }));
       }
 
       if (eligible.length === 0) return res.json({ type: 'none', eligibleCount });
@@ -226,14 +314,10 @@ router.post('/select', async (req, res) => {
         // No library candidates — fall back to web source if available
         if (hasWebSources) {
           const chosen = weightedRandomChoice(virtualWebTags, t => tagWeights[t] ?? 1.0);
-          return res.json({
-            type: 'web_source',
-            virtualTagId: getVirtualTagId(chosen),
-            eligibleCount,
-            selectedTag: chosen,
-            freshCount: 0,
-            usedFallback: false,
-          });
+          return res.json(await makeWebSourceResponse(chosen, {
+            eligibleCount, freshCount: 0, usedFallback: false,
+            frameArtPath: req.frameArtPath, metadata, helper, currentImage, recentImages,
+          }));
         }
         return res.json({ type: 'none', eligibleCount });
       }
@@ -270,14 +354,10 @@ router.post('/select', async (req, res) => {
       selectedTag = chosen;
 
       if (isVirtualWebTag(chosen)) {
-        return res.json({
-          type: 'web_source',
-          virtualTagId: getVirtualTagId(chosen),
-          eligibleCount,
-          selectedTag: chosen,
-          freshCount: 0,
-          usedFallback: false,
-        });
+        return res.json(await makeWebSourceResponse(chosen, {
+          eligibleCount, freshCount: 0, usedFallback: false,
+          frameArtPath: req.frameArtPath, metadata, helper, currentImage, recentImages,
+        }));
       }
 
       const pool = tagPools[chosen] || [];

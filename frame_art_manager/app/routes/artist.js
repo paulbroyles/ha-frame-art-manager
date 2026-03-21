@@ -68,7 +68,13 @@ router.get('/', async (req, res) => {
   try {
     const helper = new MetadataHelper(req.frameArtPath);
     const metadata = await helper.readMetadata();
-    const localInstances = (metadata.entityInstances || {}).creator || {};
+
+    // Collect instances from all artist-kind entity types (not just hardcoded 'creator')
+    const artistKindTypes = (metadata.entityTypes || []).filter(e => e.kind === 'artist');
+    const localInstances = {};
+    for (const et of artistKindTypes) {
+      Object.assign(localInstances, (metadata.entityInstances || {})[et.id] || {});
+    }
 
     const suggestions = await resolver.suggest(q, { localInstances, limit });
     res.json({ suggestions });
@@ -106,21 +112,19 @@ router.get('/enrich', async (req, res) => {
  *
  * Returns per-source artwork counts for a given artist name.
  * All capable sources are queried in parallel. Sources that don't support
- * counting (Artsy) return null.
+ * counting (Artsy) return null. Also includes a local gallery count.
  *
  * Response:
  * {
  *   "artist": "Van Gogh",
  *   "counts": {
+ *     "local":       3,      // images in local gallery by this artist
  *     "moma":        42,
  *     "met_museum":  8,      // raw API total — may include partial-word false matches
  *     "google_arts": 50,
  *     "louvre":      60,     // estimated artworks (pages × 20); null if probe failed
  *     "delart":      7,      // artworks in DelArt people directory
  *     "artsy":       null    // not countable without additional API calls
- *   },
- *   "units": {
- *     "louvre": "pages"      // all others default to "artworks"
  *   }
  * }
  */
@@ -130,17 +134,21 @@ router.get('/counts', async (req, res) => {
     return res.status(400).json({ error: 'artist must be at least 2 characters' });
   }
 
-  const [momaCount, metCount, googleCount, louvreCount, delartCount] = await Promise.all([
+  const helper = new MetadataHelper(req.frameArtPath);
+
+  const [momaCount, metCount, googleCount, louvreCount, delartCount, localImages] = await Promise.all([
     moma.countArtistArtworks(artist),
     metMuseum.countArtistArtworks(artist),
     googleArts.countArtistArtworks(artist),
     louvre.countArtistArtworks(artist),
     delart.countArtistArtworks(artist),
+    helper.getLocalArtistImages(artist),
   ]);
 
   res.json({
     artist,
     counts: {
+      local:       localImages.length,
       moma:        momaCount,
       met_museum:  metCount,
       google_arts: googleCount,
@@ -148,7 +156,6 @@ router.get('/counts', async (req, res) => {
       delart:      delartCount,
       artsy:       null,
     },
-    units: {},
   });
 });
 
