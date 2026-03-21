@@ -1039,6 +1039,103 @@ router.post('/sources/:sourceId/clear-cookies', async (req, res) => {
  */
 const MAX_RECENT_WEB_ARTWORKS = 30; // ring-buffer size for per-TV web source recency tracking
 
+/**
+ * Given a resolved virtual tag, fetch one artwork from the appropriate source.
+ *
+ * Handles two cases:
+ *   - Regular tag (virtualTag.sourceId is set): validate source, merge filter cascade, fetch.
+ *   - Unified search (virtualTag.sourceId is null, queryMode: 'search'): fan out to all
+ *     search-capable sources in random order, return result from the first that succeeds.
+ *
+ * @param {object} webSources  - Loaded web sources config
+ * @param {object} virtualTag  - The resolved virtual tag object
+ * @param {string} aspectRatio - Resolved aspect ratio ('all', 'landscape', 'portrait')
+ * @returns {{ chosenSourceId, fetchResult, mergedFilters, extraOpts }}
+ * @throws Errors annotated with .statusCode (400/503)
+ */
+async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio) {
+  let chosenSourceId = virtualTag.sourceId;
+  let mergedFilters, extraOpts, fetchResult;
+
+  if (!chosenSourceId && virtualTag.queryMode === 'search') {
+    // ── Unified keyword search ───────────────────────────────────────────────
+    const keyword = virtualTag.queryParams?.keyword;
+    if (!keyword) {
+      throw Object.assign(new Error('Unified search virtual tag requires queryParams.keyword'), { statusCode: 400 });
+    }
+
+    const candidates = getSearchCapableSources()
+      .filter(id => BUILTIN_SOURCES[id])
+      .filter(id => isSourceCompatible(id, aspectRatio))
+      .sort(() => Math.random() - 0.5);
+
+    if (candidates.length === 0) {
+      throw Object.assign(
+        new Error(`No search-capable sources available for aspect ratio "${aspectRatio}"`),
+        { statusCode: 503 }
+      );
+    }
+
+    let lastErr;
+    for (const candidateId of candidates) {
+      try {
+        const searchFilter = { type: 'search', mode: 'require', values: [keyword] };
+        const cFilters = mergeFilterCascade(
+          webSources.globalFilters || [],
+          webSources.sources[candidateId]?.filters || [],
+          virtualTag.filters || []
+        );
+        cFilters.push(searchFilter);
+        const cExtraOpts = SOURCE_MODULES[candidateId]?.getExtraOptions?.(
+          webSources.sources[candidateId]?.settings
+        ) || {};
+        fetchResult    = await SOURCE_FETCHERS[candidateId](cFilters, { aspectRatio, ...cExtraOpts });
+        chosenSourceId = candidateId;
+        mergedFilters  = cFilters;
+        extraOpts      = cExtraOpts;
+        break;
+      } catch (err) {
+        console.warn(`[web_sources] Unified search "${keyword}": ${candidateId} failed — ${err.message}`);
+        lastErr = err;
+      }
+    }
+
+    if (!chosenSourceId) {
+      throw Object.assign(
+        new Error(`Unified search for "${keyword}": no source returned results. Last error: ${lastErr?.message}`),
+        { statusCode: 503 }
+      );
+    }
+  } else {
+    // ── Regular virtual tag (fixed sourceId) ────────────────────────────────
+    if (!chosenSourceId) {
+      throw Object.assign(new Error('Virtual tag has no sourceId'), { statusCode: 400 });
+    }
+    if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
+      throw Object.assign(
+        new Error(`Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`),
+        { statusCode: 400 }
+      );
+    }
+    if (!BUILTIN_SOURCES[chosenSourceId]) {
+      throw Object.assign(new Error(`Unknown source: ${chosenSourceId}`), { statusCode: 400 });
+    }
+    const fetcher = SOURCE_FETCHERS[chosenSourceId];
+    if (!fetcher) {
+      throw Object.assign(new Error(`Source "${chosenSourceId}" is not yet implemented`), { statusCode: 400 });
+    }
+
+    const globalFilters = webSources.globalFilters || [];
+    const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
+    const tagFilters    = virtualTag.filters || [];
+    mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
+    extraOpts     = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
+    fetchResult   = await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
+  }
+
+  return { chosenSourceId, fetchResult, mergedFilters, extraOpts };
+}
+
 async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId }) {
   const webSources = await readWebSourcesConfig(req.frameArtPath);
   const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
@@ -1056,95 +1153,44 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
     chosenSourceId = virtualTag.sourceId;
   }
 
-  // ── Unified keyword search dispatch ─────────────────────────────────────────
-  // When virtualTag.sourceId is null with queryMode: 'search', fan out to all
-  // search-capable sources in random order and use the first one that succeeds.
-  // Stores prefetchedResult to avoid a redundant second fetch on attempt 0.
   let prefetchedResult = null;
-  let unifiedFilters    = null;
-  let unifiedExtraOpts  = null;
+  let mergedFilters, extraOpts;
 
-  if (!chosenSourceId && virtualTag?.queryMode === 'search') {
-    const keyword = virtualTag.queryParams?.keyword;
-    if (!keyword) {
-      const err = new Error('Unified search virtual tag requires queryParams.keyword');
+  if (virtualTagId) {
+    // Virtual tag dispatch — handles both regular and unified-search tags.
+    ({ chosenSourceId, fetchResult: prefetchedResult, mergedFilters, extraOpts }
+      = await fetchFromVirtualTag(webSources, virtualTag, aspectRatio));
+  } else {
+    // Direct source selection (no virtual tag).
+    if (!chosenSourceId) {
+      const err = new Error('Either virtualTagId or sourceId is required.');
       err.statusCode = 400;
       throw err;
     }
-
-    const candidates = getSearchCapableSources()
-      .filter(id => BUILTIN_SOURCES[id])
-      .filter(id => isSourceCompatible(id, aspectRatio))
-      .sort(() => Math.random() - 0.5);
-
-    if (candidates.length === 0) {
-      const err = new Error(`No search-capable sources are available for aspect ratio "${aspectRatio}"`);
-      err.statusCode = 503;
+    if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
+      const err = new Error(`Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`);
+      err.statusCode = 400;
       throw err;
     }
-
-    let lastErr;
-    for (const candidateId of candidates) {
-      try {
-        const searchFilter = { type: 'search', mode: 'require', values: [keyword] };
-        const cFilters = mergeFilterCascade(
-          webSources.globalFilters || [],
-          webSources.sources[candidateId]?.filters || [],
-          virtualTag.filters || []
-        );
-        cFilters.push(searchFilter);
-        const cExtraOpts = SOURCE_MODULES[candidateId]?.getExtraOptions?.(
-          webSources.sources[candidateId]?.settings
-        ) || {};
-        const result = await SOURCE_FETCHERS[candidateId](cFilters, { aspectRatio, ...cExtraOpts });
-        chosenSourceId   = candidateId;
-        prefetchedResult = result;
-        unifiedFilters   = cFilters;
-        unifiedExtraOpts = cExtraOpts;
-        break;
-      } catch (err) {
-        console.warn(`[web_sources] Unified search "${keyword}": ${candidateId} failed — ${err.message}`);
-        lastErr = err;
-      }
-    }
-
-    if (!chosenSourceId) {
-      const err = new Error(`Unified search for "${keyword}": no source returned results. Last error: ${lastErr?.message}`);
-      err.statusCode = 503;
+    if (!BUILTIN_SOURCES[chosenSourceId]) {
+      const err = new Error(`Unknown source: ${chosenSourceId}`);
+      err.statusCode = 400;
       throw err;
     }
-  }
-
-  if (!chosenSourceId) {
-    const err = new Error('Either virtualTagId or sourceId is required.');
-    err.statusCode = 400;
-    throw err;
-  } else if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
-    const err = new Error(`Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`);
-    err.statusCode = 400;
-    throw err;
-  }
-
-  if (!BUILTIN_SOURCES[chosenSourceId]) {
-    const err = new Error(`Unknown source: ${chosenSourceId}`);
-    err.statusCode = 400;
-    throw err;
+    if (!SOURCE_FETCHERS[chosenSourceId]) {
+      const err = new Error(`Source "${chosenSourceId}" is not yet implemented`);
+      err.statusCode = 400;
+      throw err;
+    }
+    mergedFilters = mergeFilterCascade(
+      webSources.globalFilters || [],
+      webSources.sources[chosenSourceId]?.filters || [],
+      []
+    );
+    extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
   }
 
   const fetcher = SOURCE_FETCHERS[chosenSourceId];
-  if (!fetcher) {
-    const err = new Error(`Source "${chosenSourceId}" is not yet implemented`);
-    err.statusCode = 400;
-    throw err;
-  }
-
-  // Merge filters across cascade levels: global → source → virtual tag.
-  // Use the unified dispatch's pre-computed filters when available.
-  const globalFilters = webSources.globalFilters || [];
-  const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
-  const tagFilters = virtualTag?.filters || [];
-  const mergedFilters = unifiedFilters || mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
-  const extraOpts = unifiedExtraOpts || SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
 
   // Fetch, with optional retry when the image is below the minimum resolution threshold
   // or has been recently shown on this TV (recency deduplication).
@@ -1153,8 +1199,8 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
   const MAX_FETCH_ATTEMPTS = 5;
   let fetchResult;
   for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt++) {
-    // On the first attempt of a unified search, reuse the already-fetched result
-    // to avoid a redundant round-trip to the source.
+    // On the first attempt for a virtual tag, reuse the result already fetched
+    // by fetchFromVirtualTag to avoid a redundant round-trip to the source.
     fetchResult = (attempt === 0 && prefetchedResult) ? prefetchedResult : await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
     const isLast = attempt === MAX_FETCH_ATTEMPTS - 1;
 
@@ -1532,84 +1578,31 @@ router.post('/test-fetch', async (req, res) => {
       const extraOpts = sourceModule?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
       ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(mergedFilters, { aspectRatio, ...extraOpts }));
     } else {
-      // Virtual tag determines source.
-      chosenSourceId = virtualTag?.sourceId || null;
-
-      if (!chosenSourceId && virtualTag?.queryMode === 'search') {
-        // Unified keyword search — fan out to all search-capable sources.
-        const keyword = virtualTag.queryParams?.keyword;
-        if (!keyword) {
-          return res.status(400).json({ error: 'Unified search virtual tag requires queryParams.keyword' });
-        }
-        const candidates = getSearchCapableSources()
-          .filter(id => BUILTIN_SOURCES[id])
-          .filter(id => isSourceCompatible(id, aspectRatio))
-          .sort(() => Math.random() - 0.5);
-        if (candidates.length === 0) {
-          return res.status(503).json({ error: `No search-capable sources available for aspect ratio "${aspectRatio}"` });
-        }
-        let lastErr;
-        for (const candidateId of candidates) {
-          try {
-            const searchFilter = { type: 'search', mode: 'require', values: [keyword] };
-            const cFilters = mergeFilterCascade(
-              webSources.globalFilters || [],
-              webSources.sources[candidateId]?.filters || [],
-              virtualTag.filters || []
-            );
-            cFilters.push(searchFilter);
-            const cExtraOpts = SOURCE_MODULES[candidateId]?.getExtraOptions?.(
-              webSources.sources[candidateId]?.settings
-            ) || {};
-            const result = await SOURCE_FETCHERS[candidateId](cFilters, { aspectRatio, ...cExtraOpts });
-            chosenSourceId = candidateId;
-            imageBuffer    = result.imageBuffer;
-            contentType    = result.contentType;
-            artMetadata    = result.metadata;
-            const modeInfo = SOURCE_MODULES[candidateId]?.selectMode?.(cFilters) || { mode: 'keyword_search' };
-            fetchTrace.path = 'unified-search';
-            fetchTrace.virtualTagId = virtualTagId;
-            fetchTrace.keyword = keyword;
-            fetchTrace.sourceId = candidateId;
-            fetchTrace.mode = modeInfo.mode;
-            fetchTrace.mergedFilters = cFilters;
-            break;
-          } catch (err) {
-            console.warn(`[web_sources] test-fetch unified search "${keyword}": ${candidateId} failed — ${err.message}`);
-            lastErr = err;
-          }
-        }
-        if (!chosenSourceId) {
-          return res.status(503).json({ error: `Unified search for "${keyword}": no source returned results. Last error: ${lastErr?.message}` });
-        }
+      // Virtual tag determines source — delegate to shared dispatch helper.
+      let vtFetch;
+      try {
+        vtFetch = await fetchFromVirtualTag(webSources, virtualTag, aspectRatio);
+      } catch (err) {
+        return res.status(err.statusCode || 500).json({ error: err.message });
+      }
+      chosenSourceId = vtFetch.chosenSourceId;
+      imageBuffer    = vtFetch.fetchResult.imageBuffer;
+      contentType    = vtFetch.fetchResult.contentType;
+      artMetadata    = vtFetch.fetchResult.metadata;
+      const modeInfo = SOURCE_MODULES[chosenSourceId]?.selectMode?.(vtFetch.mergedFilters) || { mode: 'unknown' };
+      fetchTrace.virtualTagId = virtualTagId;
+      fetchTrace.mode = modeInfo.mode;
+      if (!virtualTag.sourceId && virtualTag.queryMode === 'search') {
+        fetchTrace.path = 'unified-search';
+        fetchTrace.keyword = virtualTag.queryParams?.keyword;
+        fetchTrace.sourceId = chosenSourceId;
+        fetchTrace.mergedFilters = vtFetch.mergedFilters;
       } else {
-        if (!chosenSourceId) {
-          return res.status(400).json({
-            error: 'Select a virtual tag or source for random test fetches.',
-          });
-        }
-
-        const fetcher = SOURCE_FETCHERS[chosenSourceId];
-        if (!fetcher) {
-          return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
-        }
-
-        // Merge filters across cascade levels: global → source → virtual tag.
-        const globalFilters = webSources.globalFilters || [];
-        const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
-        const tagFilters = virtualTag?.filters || [];
-        const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
-        const sourceModule = SOURCE_MODULES[chosenSourceId];
-        const modeInfo = sourceModule?.selectMode?.(mergedFilters) || { mode: 'unknown' };
         fetchTrace.path = 'virtual-tag';
-        fetchTrace.virtualTagId = virtualTagId;
-        fetchTrace.mode = modeInfo.mode;
-        fetchTrace.globalFilters = globalFilters;
-        fetchTrace.sourceFilters = sourceFilters;
-        fetchTrace.tagFilters = tagFilters;
-        fetchTrace.mergedFilters = mergedFilters;
-        const extraOpts = sourceModule?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
-        ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(mergedFilters, { aspectRatio, ...extraOpts }));
+        fetchTrace.globalFilters = webSources.globalFilters || [];
+        fetchTrace.sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
+        fetchTrace.tagFilters = virtualTag?.filters || [];
+        fetchTrace.mergedFilters = vtFetch.mergedFilters;
       }
     }
 
