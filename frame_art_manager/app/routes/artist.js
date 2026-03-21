@@ -23,6 +23,8 @@ const moma = require('../sources/moma');
 const artsy = require('../sources/artsy');
 const googleArts = require('../sources/google_arts');
 const metMuseum = require('../sources/met_museum');
+const louvre = require('../sources/louvre');
+const delart = require('../sources/delart');
 
 // Wire the resolver once at module load time.
 // Source suggest functions are injected — the resolver has no direct dependency on these modules.
@@ -31,6 +33,7 @@ const resolver = createArtistResolver({
     { id: 'moma',        suggestArtists: moma.suggestArtists },
     { id: 'artsy',       suggestArtists: artsy.suggestArtists },
     { id: 'google_arts', suggestArtists: googleArts.suggestArtists },
+    { id: 'delart',      suggestArtists: delart.suggestArtists },
   ],
   wikidata,
   timeout: 800,
@@ -103,7 +106,7 @@ router.get('/enrich', async (req, res) => {
  *
  * Returns per-source artwork counts for a given artist name.
  * All capable sources are queried in parallel. Sources that don't support
- * counting (Artsy, Louvre, DelArt) return null.
+ * counting (Artsy) return null.
  *
  * Response:
  * {
@@ -112,7 +115,12 @@ router.get('/enrich', async (req, res) => {
  *     "moma":        42,
  *     "met_museum":  8,      // raw API total — may include partial-word false matches
  *     "google_arts": 50,
- *     "artsy":       null
+ *     "louvre":      3,      // result pages (~24 items each), not individual artworks
+ *     "delart":      7,      // artworks in DelArt people directory
+ *     "artsy":       null    // not countable without additional API calls
+ *   },
+ *   "units": {
+ *     "louvre": "pages"      // all others default to "artworks"
  *   }
  * }
  */
@@ -122,10 +130,12 @@ router.get('/counts', async (req, res) => {
     return res.status(400).json({ error: 'artist must be at least 2 characters' });
   }
 
-  const [momaCount, metCount, googleCount] = await Promise.all([
+  const [momaCount, metCount, googleCount, louvreCount, delartCount] = await Promise.all([
     moma.countArtistArtworks(artist),
     metMuseum.countArtistArtworks(artist),
     googleArts.countArtistArtworks(artist),
+    louvre.countArtistArtworks(artist),
+    delart.countArtistArtworks(artist),
   ]);
 
   res.json({
@@ -134,7 +144,12 @@ router.get('/counts', async (req, res) => {
       moma:        momaCount,
       met_museum:  metCount,
       google_arts: googleCount,
+      louvre:      louvreCount,
+      delart:      delartCount,
       artsy:       null,
+    },
+    units: {
+      louvre: 'pages',
     },
   });
 });

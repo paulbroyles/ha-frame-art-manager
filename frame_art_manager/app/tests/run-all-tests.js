@@ -31,7 +31,8 @@ const testSuites = [
   { name: 'Validation Tests', file: 'validation.test.js' },
   { name: 'Field Formatters Tests', file: 'field-formatters.test.js' },
   { name: 'Web Sources Route Tests', file: 'web-sources.test.js' },
-  { name: 'HA Route Template Tests', file: 'ha-route.test.js' }
+  { name: 'HA Route Template Tests', file: 'ha-route.test.js' },
+  { name: 'Artist Interface Tests',  file: 'artist.test.js' },
 ];
 
 // Results tracking

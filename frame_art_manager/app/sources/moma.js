@@ -523,14 +523,22 @@ function getFilterTypes() {
  * @param {number} [limit=10]
  * @returns {Promise<Array<{ name, count, source }>>}
  */
-async function suggestArtists(query, limit = 10) {
-  await ensureCache();
+/**
+ * Pure filter + sort over a pre-built artist name index.
+ * Extracted for testability; used by suggestArtists() and in unit tests.
+ *
+ * @param {Array<{ name: string, count: number }>} index - sorted by count desc
+ * @param {string} query
+ * @param {number} limit
+ * @returns {Array<{ name, count, source: 'moma' }>}
+ */
+function filterAndSortArtists(index, query, limit) {
   const q = query.toLowerCase().trim();
   if (!q) return [];
 
   const prefix = [];
   const substring = [];
-  for (const entry of artistNameIndex) {
+  for (const entry of index) {
     const lower = entry.name.toLowerCase();
     if (lower.startsWith(q)) {
       prefix.push(entry);
@@ -543,6 +551,11 @@ async function suggestArtists(query, limit = 10) {
   return [...prefix, ...substring]
     .slice(0, limit)
     .map(e => ({ name: e.name, count: e.count, source: 'moma' }));
+}
+
+async function suggestArtists(query, limit = 10) {
+  await ensureCache();
+  return filterAndSortArtists(artistNameIndex, query, limit);
 }
 
 /**
@@ -594,6 +607,7 @@ module.exports = {
   getFilterTypes,
   suggestArtists,
   countArtistArtworks,
+  filterAndSortArtists,   // exported for unit tests
   settingsSchema,
   metadataFields,
   defaultMapping,

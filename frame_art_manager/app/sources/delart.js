@@ -44,6 +44,15 @@ const CLASSIFICATION_TYPES = Object.keys(CLASSIFICATIONS);
 const _pageCountCache = new Map();
 const PAGE_COUNT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+// Artist suggest cache: query → [{ personId, slug, name, description, count }]
+// 1-hour TTL.
+const _artistSuggestCache = new Map();
+const ARTIST_SUGGEST_TTL_MS = 60 * 60 * 1000;
+
+// Artist person cache: artistName (lower) → { personId, slug } | null
+// Seeded by suggestArtists; used by fetchRandomArtwork to avoid re-resolving.
+const _artistPersonCache = new Map();
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
@@ -56,6 +65,54 @@ function buildBrowseUrl(page, classificationValue) {
     url += `&filter=classifications%3A${encodeURIComponent(classificationValue)}`;
   }
   return url;
+}
+
+/**
+ * Build the person-objects browse URL for an artist's works.
+ */
+function buildPersonObjectsUrl(personId, slug, page) {
+  return `${BASE_URL}/people/${personId}/${slug}/objects?page=${page}`;
+}
+
+/**
+ * Parse people search results from /search/{query}/people HTML.
+ * Returns [{ personId, slug, name, description, count }].
+ */
+function parsePeopleSearchResults(html) {
+  const results = [];
+  // Each person record follows the pattern:
+  //   href="/people/{id}/{slug};jsessionid=..." (text link)
+  //   <a ...>\nName\n</a>  (display name)
+  //   <div class="text-wrap">description</div>  (bio line)
+  //   list-link href="/people/{id}/{slug}.../objects">(N)</a>  (work count)
+  const linkRe = /href="\/people\/(\d+)\/([^;"/]+)[^"]*"\s*>\s*\n([^\n<]+)\n/g;
+  let m;
+  while ((m = linkRe.exec(html)) !== null) {
+    const personId = m[1];
+    const slug     = m[2];
+    const name     = m[3].trim();
+    if (!name || name === 'View All Works') continue;
+    // Find description line following this match
+    const tail = html.slice(m.index, m.index + 600);
+    const descM = tail.match(/class="text-wrap">([^<]{5,150})</);
+    const description = descM ? descM[1].trim() : null;
+    // Work count: (N) in list-link
+    const countM = tail.match(/\((\d+)\)/);
+    const count = countM ? parseInt(countM[1], 10) : null;
+    results.push({ personId, slug, name, description, count });
+  }
+  return results;
+}
+
+/**
+ * Returns true if all significant words in `query` (≥3 chars) appear in `name`.
+ * Used to post-filter people search results for false positives
+ * (e.g. "van gogh" matching "Rembrandt van Rijn" because of "van").
+ */
+function nameMatchesQuery(name, query) {
+  const nameLower  = name.toLowerCase();
+  const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 3);
+  return queryWords.every(w => nameLower.includes(w));
 }
 
 /**
@@ -130,6 +187,81 @@ async function getPageInfo(classificationValue) {
 }
 
 /**
+ * Search DelArt's people index for artists matching query.
+ * Hits /search/{query}/people, parses person records, and post-filters so that
+ * all significant words in the query (≥ 3 chars) appear in the person name.
+ *
+ * Returns [{ name, personId, slug, description, count, source: 'delart' }]
+ * Seeds _artistPersonCache as a side effect.
+ */
+async function suggestArtists(query, limit = 10) {
+  const key = query.trim().toLowerCase();
+  const cached = _artistSuggestCache.get(key);
+  if (cached && (Date.now() - cached.fetchedAt) < ARTIST_SUGGEST_TTL_MS) {
+    return cached.results.slice(0, limit);
+  }
+
+  let html;
+  try {
+    const url = `${BASE_URL}/search/${encodeURIComponent(query)}/people`;
+    const resp = await axios.get(url, { timeout: 10000, headers: HEADERS });
+    html = resp.data;
+  } catch (err) {
+    console.warn(`[delart] suggestArtists fetch failed: ${err.message}`);
+    return [];
+  }
+
+  const candidates = parsePeopleSearchResults(html);
+  const results = candidates
+    .filter(p => nameMatchesQuery(p.name, query))
+    .map(p => ({ name: p.name, personId: p.personId, slug: p.slug, description: p.description, count: p.count, source: 'delart' }));
+
+  // Seed person cache for faster resolution later.
+  for (const r of results) {
+    _artistPersonCache.set(r.name.toLowerCase(), { personId: r.personId, slug: r.slug });
+  }
+
+  _artistSuggestCache.set(key, { results, fetchedAt: Date.now() });
+  return results.slice(0, limit);
+}
+
+/**
+ * Return the number of artworks by this artist in DelArt's collection.
+ * Returns null if the artist is not found.
+ */
+async function countArtistArtworks(artistName) {
+  try {
+    const results = await suggestArtists(artistName, 5);
+    // Find the best name match (exact or closest).
+    const nameLower = artistName.toLowerCase();
+    const exact = results.find(r => r.name.toLowerCase() === nameLower);
+    const match = exact || results[0];
+    return match?.count ?? null;
+  } catch (err) {
+    console.warn(`[delart] countArtistArtworks failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Resolve an artist name to a DelArt person { personId, slug }.
+ * Checks cache first, then falls back to suggestArtists.
+ * Returns null if not found.
+ */
+async function resolveArtistPerson(artistName) {
+  const key = artistName.trim().toLowerCase();
+  const cached = _artistPersonCache.get(key);
+  if (cached !== undefined) return cached || null;
+
+  const results = await suggestArtists(artistName, 5);
+  const nameLower = key;
+  const exact = results.find(r => r.name.toLowerCase() === nameLower);
+  const person = exact || results[0] || null;
+  _artistPersonCache.set(key, person ? { personId: person.personId, slug: person.slug } : null);
+  return person ? { personId: person.personId, slug: person.slug } : null;
+}
+
+/**
  * Parse metadata fields and media ID from a detail page HTML.
  * eMuseum detail pages use .detailField.{fieldName} wrappers with .detailFieldValue spans.
  */
@@ -194,6 +326,114 @@ function stripHtml(s) {
  */
 async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
+
+  // ── Artist filter path ────────────────────────────────────────────────────
+  // When an artist filter is present, resolve the artist to a DelArt person
+  // and browse /people/{id}/{slug}/objects instead of the classification grid.
+  const artistFilter = filters.find(f => f.type === 'artist');
+  if (artistFilter) {
+    const artistName = (artistFilter.values || [])[0] || '';
+    if (!artistName) throw new Error('[delart] Artist filter has no name value');
+
+    const person = await resolveArtistPerson(artistName);
+    if (!person) {
+      throw new Error(`[delart] Artist not found in collection: ${artistName}`);
+    }
+
+    // Probe page 1 to get total count, then pick randomly.
+    const probeUrl = buildPersonObjectsUrl(person.personId, person.slug, 1);
+    let probeHtml;
+    try {
+      const resp = await axios.get(probeUrl, { timeout: 15000, headers: HEADERS });
+      probeHtml = resp.data;
+    } catch (err) {
+      throw new Error(`[delart] Failed to probe artist objects page: ${err.message}`);
+    }
+    const total = parseTotalCount(probeHtml) || ITEMS_PER_PAGE;
+    const maxPages = Math.ceil(total / ITEMS_PER_PAGE);
+
+    const MAX_ATTEMPTS = 10;
+    let items = parseGridItems(probeHtml); // use probe results on page 1
+    let loadedPage = 1;
+
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      if (items.length === 0) {
+        const page = Math.floor(Math.random() * maxPages) + 1;
+        if (page === loadedPage) continue;
+        loadedPage = page;
+        try {
+          const resp = await axios.get(buildPersonObjectsUrl(person.personId, person.slug, page), { timeout: 15000, headers: HEADERS });
+          items = parseGridItems(resp.data);
+        } catch (err) {
+          console.warn(`[delart] Failed to fetch artist page ${page}: ${err.message}`);
+          continue;
+        }
+        if (items.length === 0) continue;
+      }
+
+      const idx = Math.floor(Math.random() * items.length);
+      const { objectPath, mediaId: gridMediaId } = items.splice(idx, 1)[0];
+      // Strip session ID from path
+      const cleanPath = objectPath.replace(/;jsessionid=[^?#]*/i, '');
+      const objectUrl = `${BASE_URL}${cleanPath}`;
+
+      let detailHtml;
+      try {
+        const resp = await axios.get(objectUrl, { timeout: 15000, headers: HEADERS });
+        detailHtml = resp.data;
+      } catch (err) {
+        console.warn(`[delart] Failed to fetch artist detail ${cleanPath}: ${err.message}`);
+        continue;
+      }
+
+      const detail = parseDetailPage(detailHtml);
+      const mediaId = detail.mediaId || gridMediaId;
+      if (!mediaId) continue;
+
+      let imageBuffer = await dezoomify(objectUrl);
+      let contentType = 'image/jpeg';
+      if (!imageBuffer) {
+        const fallbackUrl = `${BASE_URL}/internal/media/dispatcher/${mediaId}/full`;
+        try {
+          const resp = await axios.get(fallbackUrl, { responseType: 'arraybuffer', timeout: 30000, headers: HEADERS });
+          imageBuffer = Buffer.from(resp.data);
+          contentType = resp.headers['content-type'] || 'image/jpeg';
+        } catch (err) {
+          console.warn(`[delart] Failed to download artist artwork image: ${err.message}`);
+          continue;
+        }
+      }
+
+      if (aspectRatio !== 'all') {
+        try {
+          const { width, height } = await sharp(imageBuffer).metadata();
+          const isLandscape = width > height;
+          if (aspectRatio === 'landscape' && !isLandscape) continue;
+          if (aspectRatio === 'portrait' && isLandscape) continue;
+        } catch (err) {
+          console.warn(`[delart] Could not read dimensions: ${err.message}`);
+          continue;
+        }
+      }
+
+      return {
+        imageBuffer,
+        contentType,
+        metadata: {
+          title:          detail.title,
+          creator:        detail.creator,
+          medium:         detail.medium,
+          dateCreated:    detail.dateCreated,
+          classification: detail.classification,
+          artworkUrl:     objectUrl,
+          source:         'Delaware Art Museum',
+        },
+      };
+    }
+    throw new Error(`Could not find a suitable Delaware Art Museum artwork by "${artistName}" after ${MAX_ATTEMPTS} attempts`);
+  }
+
+  // ── Classification filter path (original logic) ───────────────────────────
 
   // Compute eligible classifications.
   const requireSets = filters
@@ -392,6 +632,13 @@ function getFilterTypes() {
       multiValue:  true,
       values:      CLASSIFICATION_TYPES.map(name => ({ value: name, label: name })),
     },
+    {
+      type:        'artist',
+      label:       'Artist',
+      description: 'Filter by artist name. Resolves the artist via the DelArt people directory and browses their works directly.',
+      modes:       ['require'],
+      multiValue:  false,
+    },
   ];
 }
 
@@ -465,6 +712,10 @@ module.exports = {
   canHandleIdentifier,
   selectMode,
   getFilterTypes,
+  suggestArtists,
+  countArtistArtworks,
+  parsePeopleSearchResults,   // exported for unit tests
+  nameMatchesQuery,           // exported for unit tests
   metadataFields,
   defaultMapping,
   CLASSIFICATION_TYPES,

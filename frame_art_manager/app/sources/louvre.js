@@ -462,12 +462,29 @@ async function fetchByIdentifier(identifier) {
   };
 }
 
+/**
+ * Count result pages for a given artist name in the Louvre collection.
+ * The Louvre's search HTML shows page counts ("1 / 536") but not total item counts.
+ * Returns the number of result pages (each page holds ~24 items), or null on error.
+ *
+ * @param {string} artistName
+ * @returns {Promise<number|null>}
+ */
+async function countArtistArtworks(artistName) {
+  try {
+    return await getMaxPages([], artistName);
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   fetchRandomArtwork,
   fetchByIdentifier,
   canHandleIdentifier,
   selectMode,
   getFilterTypes,
+  countArtistArtworks,
   metadataFields,
   defaultMapping,
   CATEGORY_TYPES,
