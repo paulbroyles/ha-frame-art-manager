@@ -12348,13 +12348,18 @@ function renderCustomDataList() {
   const container = document.getElementById('custom-data-list-container');
   if (!container) return;
 
-  // Build ordered list
-  let order = allCustomDataOrder;
-  if (!order || order.length === 0) {
-    order = [
-      ...allAttributes.map(name => ({ type: 'attribute', name })),
-      ...allEntityTypes.map(e => ({ type: 'entity', id: e.id }))
-    ];
+  // Build ordered list, then append anything present in allAttributes/allEntityTypes
+  // but missing from customDataOrder so items are never silently invisible.
+  let order = allCustomDataOrder && allCustomDataOrder.length > 0
+    ? [...allCustomDataOrder]
+    : [];
+  const orderedAttrNames = new Set(order.filter(e => e.type === 'attribute').map(e => e.name));
+  const orderedEntityIds = new Set(order.filter(e => e.type === 'entity').map(e => e.id));
+  for (const name of (allAttributes || [])) {
+    if (!orderedAttrNames.has(name)) order.push({ type: 'attribute', name });
+  }
+  for (const et of (allEntityTypes || [])) {
+    if (!orderedEntityIds.has(et.id)) order.push({ type: 'entity', id: et.id });
   }
 
   if (order.length === 0) {
