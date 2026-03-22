@@ -140,6 +140,27 @@ class MetadataHelper {
         }
       }
 
+      // Reconcile customDataOrder: append any attributes or entity types that exist
+      // in the data but are missing from customDataOrder (e.g. added before this fix).
+      if (parsed.customDataOrder && (parsed.attributes || parsed.entityTypes)) {
+        const orderedAttrs = new Set(parsed.customDataOrder.filter(e => e.type === 'attribute').map(e => e.name));
+        const orderedEntities = new Set(parsed.customDataOrder.filter(e => e.type === 'entity').map(e => e.id));
+        let dirty = false;
+        for (const name of (parsed.attributes || [])) {
+          if (!orderedAttrs.has(name)) {
+            parsed.customDataOrder.push({ type: 'attribute', name });
+            dirty = true;
+          }
+        }
+        for (const et of (parsed.entityTypes || [])) {
+          if (!orderedEntities.has(et.id)) {
+            parsed.customDataOrder.push({ type: 'entity', id: et.id });
+            dirty = true;
+          }
+        }
+        if (dirty) await this.writeMetadata(parsed);
+      }
+
       // Seed default Custom Metadata fields if none have been defined yet.
       // Covers fresh installs and configs created before attributes existed.
       // Only runs when 'attributes' is absent (user has never touched Custom Metadata).
