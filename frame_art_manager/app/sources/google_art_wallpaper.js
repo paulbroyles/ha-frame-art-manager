@@ -1,21 +1,8 @@
 const axios = require('axios');
 
-const WALLPAPER_LIST_URL = 'https://www.gstatic.com/culturalinstitute/tabext/imax_2_2.json';
+const { mergePreferContent } = require('../utils/merge');
 
-/**
- * Merge metadata from multiple sources, preferring non-null values left-to-right.
- * The first source is the base/authoritative source; later sources fill in any
- * fields that the earlier sources leave null. Non-content never replaces content.
- */
-function mergePreferContent(...sources) {
-  const result = {};
-  for (const source of sources) {
-    for (const [k, v] of Object.entries(source || {})) {
-      if (result[k] == null && v != null) result[k] = v;
-    }
-  }
-  return result;
-}
+const WALLPAPER_LIST_URL = 'https://www.gstatic.com/culturalinstitute/tabext/imax_2_2.json';
 const BASE_URL = 'https://artsandculture.google.com';
 
 const HTTP_HEADERS = {

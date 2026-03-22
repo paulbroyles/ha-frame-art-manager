@@ -3,6 +3,7 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
 const MetadataHelper = require('../metadata_helper');
+const { enrichArtistInstance } = require('../utils/enrichers');
 
 const DEFAULT_ATTRIBUTES = ['title', 'date', 'museum', 'medium'];
 const DEFAULT_ENTITY_TYPES = [
@@ -197,6 +198,24 @@ router.post('/:entityId/instances', async (req, res) => {
     }
     const helper = new MetadataHelper(req.frameArtPath);
     const result = await helper.upsertEntityInstance(req.params.entityId, data, { _links });
+
+    // Auto-enrich when _links are explicitly set (linking just happened)
+    if (_links !== undefined && _links !== null && result.data._links) {
+      try {
+        const metadata = await helper.readMetadata();
+        const entityType = (metadata.entityTypes || []).find(e => e.id === req.params.entityId);
+        if (entityType) {
+          const enriched = await enrichArtistInstance(entityType, result.data);
+          if (enriched) {
+            const patched = await helper.patchEntityInstance(req.params.entityId, result.key, enriched);
+            if (patched) result.data = patched;
+          }
+        }
+      } catch (err) {
+        console.warn('[entities] Enrichment failed (non-fatal):', err.message);
+      }
+    }
+
     res.json({ success: true, ...result });
   } catch (error) {
     console.error('Error upserting entity instance:', error);

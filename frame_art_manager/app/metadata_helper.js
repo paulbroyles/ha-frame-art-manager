@@ -1078,6 +1078,30 @@ class MetadataHelper {
   }
 
   /**
+   * Patch an entity instance by filling only empty attribute fields.
+   * Used by enrichment — content wins, enrichment fills gaps.
+   * Returns the updated instance data, or null if the instance wasn't found.
+   */
+  async patchEntityInstance(entityId, key, partialData) {
+    const metadata = await this.readMetadata();
+    const entityType = (metadata.entityTypes || []).find(e => e.id === entityId);
+    if (!entityType) return null;
+    const instances = (metadata.entityInstances || {})[entityId] || {};
+    if (!(key in instances)) return null;
+
+    const instance = instances[key];
+    let changed = false;
+    for (const attr of entityType.attributes) {
+      if (partialData[attr] != null && !instance[attr]) {
+        instance[attr] = String(partialData[attr]);
+        changed = true;
+      }
+    }
+    if (changed) await this.writeMetadata(metadata);
+    return instance;
+  }
+
+  /**
    * Get filenames of images that reference a specific entity instance
    */
   async getEntityInstanceUsage(entityId, key) {
