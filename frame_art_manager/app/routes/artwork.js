@@ -175,7 +175,7 @@ const SOURCE_DISPLAY_NAMES = {
   moma:                'MoMA',
 };
 
-function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAttributes) {
+function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAttributes, { deviceId = null, sourceType = '', filename = null, addonHome = '' } = {}) {
   const primaryFields  = fields.filter(f => f.role === 'primary');
   const secondaryFields = fields.filter(f => f.role === 'secondary');
   const detailFields   = fields.filter(f => f.role === 'detail');
@@ -350,6 +350,27 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
       font-family: -apple-system, BlinkMacSystemFont, sans-serif;
       font-size: 11px; color: #3a3a3a; text-align: center; letter-spacing: 0.05em;
     }
+
+    /* Action buttons */
+    .actions { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 10px; }
+    .action-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 9px 16px; border-radius: 6px; cursor: pointer;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 13px; transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+      border: none; outline: none;
+    }
+    .action-btn:disabled { opacity: 0.45; cursor: default; }
+    .btn-blacklist {
+      background: transparent; color: #c0604a; border: 1px solid #5a2e25;
+    }
+    .btn-blacklist:hover:not(:disabled) { background: #2a1510; border-color: #8a3e2e; }
+    .btn-blacklist.done { color: #888; border-color: #333; }
+    .btn-add-library {
+      background: transparent; color: #5ca87a; border: 1px solid #2a5538;
+    }
+    .btn-add-library:hover:not(:disabled) { background: #0f2a1a; border-color: #3d7a54; }
+    .btn-add-library.done { color: #888; border-color: #333; }
   </style>
 </head>
 <body>
@@ -379,6 +400,8 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
 
       ${sourceLinkHtml ? `<div class="links">${sourceLinkHtml}</div>` : ''}
 
+      <div class="actions" id="actions"></div>
+
     </div>
 
     <div class="footer">Currently on ${escapeHtml(tvName)}</div>
@@ -402,6 +425,73 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') overlay.classList.remove('active');
     });
+
+    // Action buttons
+    const BASE = ${JSON.stringify(addonHome)};
+    const SOURCE_TYPE = ${JSON.stringify(sourceType)};
+    const DEVICE_ID   = ${JSON.stringify(deviceId)};
+    const ARTWORK_URL = ${JSON.stringify(artworkUrl)};
+    const FILENAME    = ${JSON.stringify(filename)};
+
+    const actionsEl = document.getElementById('actions');
+
+    function makeBtn(cls, label, onClick) {
+      const btn = document.createElement('button');
+      btn.className = 'action-btn ' + cls;
+      btn.textContent = label;
+      btn.addEventListener('click', () => onClick(btn));
+      return btn;
+    }
+
+    async function apiPost(path, body) {
+      const r = await fetch(BASE + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || r.statusText); }
+      return r.json();
+    }
+
+    // Blacklist button — always shown
+    const isWebSource = SOURCE_TYPE === 'web-source' || SOURCE_TYPE === 'web_source';
+    const blacklistType = isWebSource ? 'web' : 'local';
+    const blacklistId   = isWebSource ? ARTWORK_URL : FILENAME;
+
+    if (blacklistId) {
+      const blBtn = makeBtn('btn-blacklist', '✕ Blacklist', async (btn) => {
+        btn.disabled = true;
+        btn.textContent = 'Adding to blacklist…';
+        try {
+          await apiPost('/api/blacklist', { type: blacklistType, identifier: blacklistId });
+          btn.textContent = 'Blacklisted';
+          btn.classList.add('done');
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = '✕ Blacklist';
+          alert('Failed: ' + e.message);
+        }
+      });
+      actionsEl.appendChild(blBtn);
+    }
+
+    // Add to Library button — web sources only
+    if (isWebSource && DEVICE_ID) {
+      const libBtn = makeBtn('btn-add-library', '+ Add to Library', async (btn) => {
+        btn.disabled = true;
+        btn.textContent = 'Adding to library…';
+        try {
+          await apiPost('/api/web-sources/cache/' + encodeURIComponent(DEVICE_ID) + '/add-to-library', {});
+          btn.textContent = 'Added to library';
+          btn.classList.add('done');
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = '+ Add to Library';
+          alert('Failed: ' + e.message);
+        }
+      });
+      actionsEl.appendChild(libBtn);
+    }
   </script>
 </body>
 </html>`;
@@ -497,10 +587,18 @@ router.get('/:tvId', async (req, res) => {
       }
     }
 
+    // Collect local filename for blacklist (local source only)
+    const localFilename = (sourceType === 'local')
+      ? (sensor.filename || sensor.attributes?.filename || null)
+      : null;
+
     const fields = buildDisplayFields(customDataOrder, attributeValues, entitySnapshot, entityTypes, entityInstances);
     const imageUrl = `/${req.params.tvId}/image`;
 
-    const html = renderArtworkPage(tvName, fields, `/artwork${imageUrl}`, artworkUrl, sourceId, attributeValues);
+    const html = renderArtworkPage(
+      tvName, fields, `/artwork${imageUrl}`, artworkUrl, sourceId, attributeValues,
+      { deviceId, sourceType, filename: localFilename, addonHome: req.app.locals.addonHome || '' }
+    );
     res.send(html);
   } catch (error) {
     console.error('[artwork] Error rendering artwork page:', error);

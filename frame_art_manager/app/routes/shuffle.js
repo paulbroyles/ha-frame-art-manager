@@ -233,6 +233,15 @@ router.post('/select', async (req, res) => {
 
     const helper = new MetadataHelper(req.frameArtPath);
     const metadata = await helper.readMetadata();
+
+    // Filter out locally-blacklisted images before any selection logic
+    const blacklist = await helper.readBlacklist().catch(() => ({ local: [], web: [] }));
+    const blacklistedLocal = new Set(blacklist.local || []);
+    if (blacklistedLocal.size > 0) {
+      metadata.images = Object.fromEntries(
+        Object.entries(metadata.images || {}).filter(([f]) => !blacklistedLocal.has(f))
+      );
+    }
     const images = metadata.images || {};
 
     if (Object.keys(images).length === 0) {

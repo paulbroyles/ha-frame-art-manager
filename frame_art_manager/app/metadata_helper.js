@@ -22,6 +22,7 @@ class MetadataHelper {
     this.metadataPath = path.join(frameArtPath, 'metadata.json'); // legacy path (for migration)
     this.galleryPath = path.join(frameArtPath, 'gallery.json');
     this.customMetadataPath = path.join(frameArtPath, 'custom_metadata.json');
+    this.blacklistPath = path.join(frameArtPath, 'blacklist.json');
     this.libraryPath = path.join(frameArtPath, 'library');
     this.thumbsPath = path.join(frameArtPath, 'thumbs');
     this.originalsPath = path.join(frameArtPath, 'originals');
@@ -1250,6 +1251,46 @@ class MetadataHelper {
     }
 
     return { updated, errors };
+  }
+  // ============================================================
+  // Blacklist
+  // ============================================================
+
+  async readBlacklist() {
+    try {
+      const raw = await fs.readFile(this.blacklistPath, 'utf8');
+      return JSON.parse(raw);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      return { local: [], web: [] };
+    }
+  }
+
+  async writeBlacklist(blacklist) {
+    await fs.writeFile(this.blacklistPath, JSON.stringify(blacklist, null, 2));
+  }
+
+  async addToBlacklist(type, identifier) {
+    const blacklist = await this.readBlacklist();
+    if (!blacklist[type]) blacklist[type] = [];
+    if (!blacklist[type].includes(identifier)) {
+      blacklist[type].push(identifier);
+      await this.writeBlacklist(blacklist);
+    }
+    return blacklist;
+  }
+
+  async removeFromBlacklist(type, identifier) {
+    const blacklist = await this.readBlacklist();
+    if (!blacklist[type]) return blacklist;
+    blacklist[type] = blacklist[type].filter(id => id !== identifier);
+    await this.writeBlacklist(blacklist);
+    return blacklist;
+  }
+
+  async isBlacklisted(type, identifier) {
+    const blacklist = await this.readBlacklist();
+    return (blacklist[type] || []).includes(identifier);
   }
 }
 

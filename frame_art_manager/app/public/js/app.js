@@ -1025,6 +1025,8 @@ function switchToAdvancedSubTab(tabName) {
     loadWebSourcesTab();
   } else if (targetTab === 'recency') {
     loadRecencyTab();
+  } else if (targetTab === 'blacklist') {
+    loadBlacklistTab();
   }
 }
 
@@ -8538,6 +8540,87 @@ async function loadSyncLogs() {
     console.error('Error loading sync logs:', error);
     container.innerHTML = `<div class="error">Failed to load sync history: ${escapeHtml(error.message || 'Unknown error')}</div>`;
     container.dataset.loaded = 'true';
+  }
+}
+
+async function loadBlacklistTab() {
+  const loadingEl = document.getElementById('blacklist-loading');
+  const emptyEl   = document.getElementById('blacklist-empty');
+  const webSection   = document.getElementById('blacklist-section-web');
+  const localSection = document.getElementById('blacklist-section-local');
+  const webList   = document.getElementById('blacklist-list-web');
+  const localList = document.getElementById('blacklist-list-local');
+  if (!loadingEl) return;
+
+  loadingEl.style.display = '';
+  emptyEl.style.display = 'none';
+  webSection.style.display = 'none';
+  localSection.style.display = 'none';
+
+  try {
+    const resp = await fetch(`${API_BASE}/blacklist`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    loadingEl.style.display = 'none';
+
+    const webItems   = data.web   || [];
+    const localItems = data.local || [];
+
+    if (webItems.length === 0 && localItems.length === 0) {
+      emptyEl.style.display = '';
+      return;
+    }
+
+    function renderList(listEl, items, type) {
+      listEl.innerHTML = '';
+      items.forEach(id => {
+        const li = document.createElement('li');
+        li.className = 'blacklist-item';
+        const span = document.createElement('span');
+        span.className = 'blacklist-item-id';
+        span.title = id;
+        span.textContent = id.length > 80 ? id.slice(0, 80) + '…' : id;
+        const btn = document.createElement('button');
+        btn.className = 'blacklist-remove-btn';
+        btn.textContent = 'Remove';
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          try {
+            const r = await fetch(`${API_BASE}/blacklist`, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ type, identifier: id }),
+            });
+            if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+            li.remove();
+            // If list is now empty, hide section and check overall emptiness
+            if (!listEl.querySelector('.blacklist-item')) {
+              listEl.closest('[id^="blacklist-section"]').style.display = 'none';
+              const anyVisible = document.getElementById('blacklist-section-web').style.display !== 'none'
+                || document.getElementById('blacklist-section-local').style.display !== 'none';
+              if (!anyVisible) emptyEl.style.display = '';
+            }
+          } catch (e) {
+            btn.disabled = false;
+            alert('Failed to remove: ' + e.message);
+          }
+        });
+        li.appendChild(span);
+        li.appendChild(btn);
+        listEl.appendChild(li);
+      });
+    }
+
+    if (webItems.length > 0) {
+      renderList(webList, webItems, 'web');
+      webSection.style.display = '';
+    }
+    if (localItems.length > 0) {
+      renderList(localList, localItems, 'local');
+      localSection.style.display = '';
+    }
+  } catch (err) {
+    loadingEl.textContent = 'Failed to load blacklist: ' + (err.message || err);
   }
 }
 

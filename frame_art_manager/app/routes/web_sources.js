@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
+const crypto = require('crypto');
 const axios = require('axios');
 const sharp = require('sharp');
 const { processWebSourceImage, solidBorderStrip, runPipeline, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA, PROCESSORS } = require('../utils/imageProcessor');
@@ -1414,11 +1415,23 @@ router.post('/fetch-and-send', async (req, res) => {
   }
 
   try {
+    const MAX_BLACKLIST_RETRIES = 5;
+    let fetchResult;
+    const helper = new MetadataHelper(req.frameArtPath);
+    for (let attempt = 0; attempt < MAX_BLACKLIST_RETRIES; attempt++) {
+      fetchResult = await fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId });
+      const artworkUrl = fetchResult.artMetadata?.artworkUrl;
+      if (!artworkUrl || !(await helper.isBlacklisted('web', artworkUrl))) break;
+      console.log(`[fetch-and-send] Skipping blacklisted artwork (attempt ${attempt + 1}): ${artworkUrl}`);
+      if (attempt === MAX_BLACKLIST_RETRIES - 1) {
+        return res.status(503).json({ error: 'All fetched artworks are blacklisted; try again later' });
+      }
+    }
     const {
       processedBuffer, imageBuffer, ext, artMetadata,
       attributeSnapshot, entitySnapshot, chosenSourceId,
       virtualTagId: resolvedVirtualTagId, webSources,
-    } = await fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId });
+    } = fetchResult;
 
     const cacheDir = cacheDirFor(req.frameArtPath);
     await fs.mkdir(cacheDir, { recursive: true });
@@ -1503,7 +1516,6 @@ router.post('/fetch-and-send', async (req, res) => {
     // All failures are non-fatal.
     if (Object.keys(entitySnapshot).length > 0) {
       try {
-        const helper = new MetadataHelper(req.frameArtPath);
         const metadata = await helper.readMetadata();
         for (const [entityId, snapshotAttrs] of Object.entries(entitySnapshot)) {
           const entityType = (metadata.entityTypes || []).find(e => e.id === entityId);
@@ -1617,6 +1629,90 @@ router.post('/cache/:deviceId/promote', async (req, res) => {
   } catch (error) {
     console.error('Error promoting staged cache:', error);
     res.status(500).json({ error: 'Failed to promote staged cache' });
+  }
+});
+
+// POST /api/web-sources/cache/:deviceId/add-to-library
+// Copies the current web source cache entry (cropped + original) into the local library.
+// Body: { title? } — optional custom title for the filename base.
+router.post('/cache/:deviceId/add-to-library', async (req, res) => {
+  const { deviceId } = req.params;
+  const { title } = req.body || {};
+
+  try {
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+    const cacheEntry = webSources.perTvCache?.[deviceId] || webSources.stagedCache?.[deviceId];
+
+    if (!cacheEntry) {
+      return res.status(404).json({ error: 'No cached web source image for this device' });
+    }
+
+    const ext = path.extname(cacheEntry.filename).slice(1) || 'jpg';
+    const croppedSrc = cacheFileFor(req.frameArtPath, deviceId, ext);
+    const originalSrc = cacheFileFor(req.frameArtPath, deviceId, ext, '_original');
+
+    // Build a filesystem-safe base name from the title or a fallback
+    const rawBase = (title || cacheEntry.metadata?.title || 'web-source')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'web-source';
+    const uuid = crypto.randomUUID().split('-')[0];
+    const filename = `${rawBase}-${uuid}.${ext}`;
+
+    const libraryPath = path.join(req.frameArtPath, 'library');
+    const originalsPath = path.join(req.frameArtPath, 'originals');
+    await fs.mkdir(libraryPath, { recursive: true });
+    await fs.mkdir(originalsPath, { recursive: true });
+
+    await fs.copyFile(croppedSrc, path.join(libraryPath, filename));
+    // Original may not exist (e.g. no processing applied) — non-fatal
+    await fs.copyFile(originalSrc, path.join(originalsPath, filename)).catch(() => {});
+
+    const helper = new MetadataHelper(req.frameArtPath);
+    const imageData = await helper.addImage(filename);
+
+    // Apply attribute snapshot
+    if (cacheEntry.attributeSnapshot && Object.keys(cacheEntry.attributeSnapshot).length > 0) {
+      const attrs = Object.fromEntries(
+        Object.entries(cacheEntry.attributeSnapshot).map(([k, v]) => [k, String(v ?? '')])
+      );
+      await helper.updateImage(filename, { attributes: attrs });
+      imageData.attributes = { ...(imageData.attributes || {}), ...attrs };
+    }
+
+    // Preserve artwork URL as a first-class field for future provenance
+    if (cacheEntry.artworkUrl) {
+      await helper.updateImage(filename, { artworkUrl: cacheEntry.artworkUrl });
+      imageData.artworkUrl = cacheEntry.artworkUrl;
+    }
+
+    // Apply entity snapshot — upsert instances and link to the image
+    if (cacheEntry.entitySnapshot && Object.keys(cacheEntry.entitySnapshot).length > 0) {
+      const entityRefs = {};
+      for (const [entityId, snapshotAttrs] of Object.entries(cacheEntry.entitySnapshot)) {
+        try {
+          const result = await helper.upsertEntityInstance(entityId, snapshotAttrs);
+          entityRefs[entityId] = result.key;
+        } catch (e) {
+          // skip invalid entity data
+        }
+      }
+      if (Object.keys(entityRefs).length > 0) {
+        await helper.updateImage(filename, { entityRefs });
+        imageData.entityRefs = { ...(imageData.entityRefs || {}), ...entityRefs };
+      }
+    }
+
+    // Generate thumbnail (best-effort)
+    await helper.generateThumbnail(filename).catch(err => {
+      console.warn('[add-to-library] Thumbnail generation failed:', err.message);
+    });
+
+    res.json({ success: true, filename, data: imageData });
+  } catch (error) {
+    console.error('[add-to-library] Error:', error.message);
+    res.status(500).json({ error: 'Failed to add image to library' });
   }
 });
 
