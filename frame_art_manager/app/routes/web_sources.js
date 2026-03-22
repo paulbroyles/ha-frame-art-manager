@@ -6,6 +6,8 @@ const axios = require('axios');
 const sharp = require('sharp');
 const { processWebSourceImage, solidBorderStrip, runPipeline, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA, PROCESSORS } = require('../utils/imageProcessor');
 const { applyFieldFormat } = require('../utils/fieldFormatters');
+const MetadataHelper = require('../metadata_helper');
+const { autoLinkArtistFromWebSource } = require('../utils/enrichers');
 
 // Source modules — each must export fetchRandomArtwork, selectMode, metadataFields, and defaultMapping.
 // Optional: settingsSchema, getExtraOptions, getFilterTypes, getMetadataFields, alreadyProcessed.
@@ -1494,6 +1496,33 @@ router.post('/fetch-and-send', async (req, res) => {
       webSources.stagedCache[deviceId] = cacheEntry;
     }
     await writeWebSourcesConfig(req.frameArtPath, webSources);
+
+    // Best-effort: enrich entity instances with data from the web source.
+    // Existing instances: patch empty fields only (content wins).
+    // Unknown artists: fire-and-forget Wikidata auto-link with lifespan validation.
+    // All failures are non-fatal.
+    if (Object.keys(entitySnapshot).length > 0) {
+      try {
+        const helper = new MetadataHelper(req.frameArtPath);
+        const metadata = await helper.readMetadata();
+        for (const [entityId, snapshotAttrs] of Object.entries(entitySnapshot)) {
+          const entityType = (metadata.entityTypes || []).find(e => e.id === entityId);
+          if (!entityType || !entityType.attributes.length) continue;
+          const keyAttr = entityType.attributes[0];
+          const keyValue = String(snapshotAttrs[keyAttr] || '').trim();
+          if (!keyValue) continue;
+          const key = helper.slugify(keyValue);
+          if ((metadata.entityInstances?.[entityId] || {})[key]) {
+            await helper.patchEntityInstance(entityId, key, snapshotAttrs);
+          } else if (entityType.kind === 'artist') {
+            autoLinkArtistFromWebSource(helper, entityId, entityType, snapshotAttrs)
+              .catch(err => console.warn('[fetch-and-send] Auto-link failed (non-fatal):', err.message));
+          }
+        }
+      } catch (err) {
+        console.warn('[fetch-and-send] Entity enrichment failed (non-fatal):', err.message);
+      }
+    }
 
     res.json({
       success: true,

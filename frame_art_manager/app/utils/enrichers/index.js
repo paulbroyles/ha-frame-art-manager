@@ -1,5 +1,6 @@
 const wikidataArtist = require('./wikidata_artist');
 const { mergePreferContent } = require('../merge');
+const { suggestArtists, enrichArtist } = require('../wikidata');
 
 /**
  * Enrich an artist-kind entity instance using all applicable enrichers.
@@ -24,4 +25,61 @@ async function enrichArtistInstance(entityType, instance) {
   return changed ? merged : null;
 }
 
-module.exports = { enrichArtistInstance };
+/**
+ * Extract all 4-digit years from a lifespan string.
+ * e.g. "1606 - 1669" → { birth: 1606, death: 1669 }
+ *      "b. 1452"     → { birth: 1452, death: null }
+ */
+function extractYears(lifespan) {
+  if (!lifespan) return { birth: null, death: null };
+  const years = (String(lifespan).match(/\b\d{4}\b/g) || []).map(Number);
+  return { birth: years[0] || null, death: years[1] || null };
+}
+
+/**
+ * Returns true if both lifespans provide a birth or death year that disagrees.
+ * If either string is absent/empty, no conflict can be detected → returns false.
+ */
+function lifespanConflict(sourceLifespan, wikidataLifespan) {
+  if (!sourceLifespan || !wikidataLifespan) return false;
+  const src = extractYears(sourceLifespan);
+  const wd  = extractYears(wikidataLifespan);
+  if (src.birth && wd.birth && src.birth !== wd.birth) return true;
+  if (src.death && wd.death && src.death !== wd.death) return true;
+  return false;
+}
+
+/**
+ * Fire-and-forget: auto-create an entity instance for a web-source artist not yet
+ * in the local library. Searches Wikidata by name, validates identity against
+ * lifespan years if the source provides them, then creates the instance with
+ * _links.wikidataId so it survives orphan cleanup.
+ *
+ * @param {MetadataHelper} helper
+ * @param {string}         entityId
+ * @param {object}         entityType
+ * @param {object}         snapshotAttrs  - display attrs from the web source (name, lifespan, …)
+ */
+async function autoLinkArtistFromWebSource(helper, entityId, entityType, snapshotAttrs) {
+  if (entityType.kind !== 'artist') return;
+  const keyAttr = entityType.attributes[0];
+  const name = snapshotAttrs[keyAttr];
+  if (!name) return;
+
+  const candidates = await suggestArtists(name, 3);
+  for (const candidate of candidates) {
+    if (!candidate.wikidataId) continue;
+    const wikidataData = await enrichArtist(candidate.wikidataId);
+    if (!wikidataData) continue;
+    if (lifespanConflict(snapshotAttrs.lifespan, wikidataData.lifespan)) continue;
+
+    // Compatible match — merge source attrs (win) with Wikidata, then create instance
+    const merged = mergePreferContent(snapshotAttrs, wikidataData);
+    await helper.upsertEntityInstance(entityId, merged, {
+      _links: { wikidataId: candidate.wikidataId },
+    });
+    return;
+  }
+}
+
+module.exports = { enrichArtistInstance, autoLinkArtistFromWebSource };
