@@ -67,8 +67,8 @@ router.get('/:attributeName/usage', async (req, res) => {
 router.put('/:attributeName/type', async (req, res) => {
   try {
     const { type } = req.body;
-    if (type !== 'url' && type !== 'text' && type !== null) {
-      return res.status(400).json({ error: 'type must be "url", "text", or null' });
+    if (type !== 'url' && type !== 'text' && type !== 'multiline' && type !== null) {
+      return res.status(400).json({ error: 'type must be "url", "text", "multiline", or null' });
     }
     const helper = new MetadataHelper(req.frameArtPath);
     const attributeTypes = await helper.setAttributeType(req.params.attributeName, type);

@@ -11910,6 +11910,17 @@ input[type="checkbox"]:checked + .toggle-text {
   color: var(--accent-color, #4a90d9);
 }
 
+.attr-type-multiline {
+  background: #f0f8e8;
+  border-color: #a0cc80;
+  color: #4a7a30;
+  font-weight: 600;
+}
+
+.attr-type-multiline:hover {
+  background: #e4f2d8;
+}
+
 .attr-type-url {
   background: #e8f4fd;
   border-color: #90c8f0;
@@ -11951,6 +11962,15 @@ input[type="checkbox"]:checked + .toggle-text {
 
 .attr-url-open.hidden {
   display: none;
+}
+
+/* Multiline attribute textarea in the image modal */
+.modal-attribute-textarea {
+  resize: vertical;
+  min-height: 60px;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.4;
 }
 
 /* Wikidata-filled entity fields awaiting user confirmation */

@@ -8354,16 +8354,22 @@ function renderModalAttributes(imageAttributes) {
 
   container.innerHTML = allAttributes.map(attrName => {
     const value = String((imageAttributes && imageAttributes[attrName]) || '');
-    const isUrl = (allAttributeTypes[attrName] === 'url');
+    const type = allAttributeTypes[attrName] || 'text';
     const escapedValue = escapeHtml(value);
-    const input = `<input type="text" class="modal-attribute-input" data-attribute="${escapeHtml(attrName)}" value="${escapedValue}" placeholder="" />`;
-    const linkIcon = isUrl
-      ? `<a class="attr-url-open${value ? '' : ' hidden'}" href="${escapedValue}" target="_blank" rel="noopener" title="Open URL">↗</a>`
-      : '';
+    let field;
+    if (type === 'multiline') {
+      field = `<textarea class="modal-attribute-input modal-attribute-textarea" data-attribute="${escapeHtml(attrName)}" rows="3">${escapedValue}</textarea>`;
+    } else if (type === 'url') {
+      const input = `<input type="text" class="modal-attribute-input" data-attribute="${escapeHtml(attrName)}" value="${escapedValue}" placeholder="" />`;
+      const linkIcon = `<a class="attr-url-open${value ? '' : ' hidden'}" href="${escapedValue}" target="_blank" rel="noopener" title="Open URL">↗</a>`;
+      field = `<div class="attr-url-wrap">${input}${linkIcon}</div>`;
+    } else {
+      field = `<input type="text" class="modal-attribute-input" data-attribute="${escapeHtml(attrName)}" value="${escapedValue}" placeholder="" />`;
+    }
     return `
       <div class="modal-attribute-row">
         <label class="modal-attribute-label">${escapeHtml(attrName)}:</label>
-        ${isUrl ? `<div class="attr-url-wrap">${input}${linkIcon}</div>` : input}
+        ${field}
       </div>
     `;
   }).join('');
@@ -11791,7 +11797,7 @@ async function promptNewAttribute() {
 
 async function toggleAttributeType(attributeName) {
   const current = allAttributeTypes[attributeName] || 'text';
-  const next = current === 'url' ? 'text' : 'url';
+  const next = current === 'text' ? 'multiline' : current === 'multiline' ? 'url' : 'text';
   try {
     const resp = await fetch(`${API_BASE}/attributes/${encodeURIComponent(attributeName)}/type`, {
       method: 'PUT',
@@ -12381,7 +12387,9 @@ function renderCustomDataList() {
       const attrType = allAttributeTypes[item.name] || 'text';
       const typeBadge = attrType === 'url'
         ? `<button class="attr-type-btn attr-type-url" data-attribute="${escapeHtml(item.name)}" title="Type: URL — click to set to Text">URL</button>`
-        : `<button class="attr-type-btn attr-type-text" data-attribute="${escapeHtml(item.name)}" title="Type: Text — click to set to URL">Text</button>`;
+        : attrType === 'multiline'
+        ? `<button class="attr-type-btn attr-type-multiline" data-attribute="${escapeHtml(item.name)}" title="Type: Multiline — click to set to URL">Multi</button>`
+        : `<button class="attr-type-btn attr-type-text" data-attribute="${escapeHtml(item.name)}" title="Type: Text — click to set to Multiline">Text</button>`;
       html += `
         <div class="custom-data-item item-attribute" draggable="true" data-type="attribute" data-name="${escapeHtml(item.name)}" data-display-role="${escapeHtml(role)}">
           <span class="drag-handle" title="Drag to reorder">⠿</span>
