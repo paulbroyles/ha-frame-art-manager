@@ -653,6 +653,12 @@ class MetadataHelper {
           metadata.images[filename].attributes[attributeName] = '';
         }
       }
+      // Append to customDataOrder so it appears in the unified list
+      if (!metadata.customDataOrder) {
+        metadata.customDataOrder = this._buildDefaultCustomDataOrder(metadata);
+      } else {
+        metadata.customDataOrder.push({ type: 'attribute', name: attributeName });
+      }
       await this.writeMetadata(metadata);
     }
 
@@ -671,6 +677,12 @@ class MetadataHelper {
       if (metadata.images[filename].attributes) {
         delete metadata.images[filename].attributes[attributeName];
       }
+    }
+
+    if (metadata.customDataOrder) {
+      metadata.customDataOrder = metadata.customDataOrder.filter(
+        item => !(item.type === 'attribute' && item.name === attributeName)
+      );
     }
 
     await this.writeMetadata(metadata);
