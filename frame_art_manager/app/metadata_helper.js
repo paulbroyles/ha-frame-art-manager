@@ -161,6 +161,28 @@ class MetadataHelper {
         if (dirty) await this.writeMetadata(parsed);
       }
 
+      // Cleanup: remove entity instances with no image refs and no _links.
+      // Runs on every read but is a no-op once all orphans are gone.
+      if (parsed.entityInstances && parsed.images) {
+        const referencedKeys = {}; // entityId → Set<key>
+        for (const img of Object.values(parsed.images)) {
+          for (const [entityId, key] of Object.entries(img.entityRefs || {})) {
+            if (!key) continue;
+            if (!referencedKeys[entityId]) referencedKeys[entityId] = new Set();
+            referencedKeys[entityId].add(key);
+          }
+        }
+        let pruned = false;
+        for (const [entityId, instances] of Object.entries(parsed.entityInstances)) {
+          for (const [key, instance] of Object.entries(instances)) {
+            const hasLinks = instance._links && Object.keys(instance._links).length > 0;
+            const isReferenced = (referencedKeys[entityId] || new Set()).has(key);
+            if (!hasLinks && !isReferenced) { delete instances[key]; pruned = true; }
+          }
+        }
+        if (pruned) await this.writeMetadata(parsed);
+      }
+
       // Seed default Custom Metadata fields if none have been defined yet.
       // Covers fresh installs and configs created before attributes existed.
       // Only runs when 'attributes' is absent (user has never touched Custom Metadata).
@@ -312,9 +334,10 @@ class MetadataHelper {
     }
 
     // Handle entityRefs update: merge into existing refs rather than replace
+    let oldEntityRefs = null;
     if (sanitizedUpdates.entityRefs && typeof sanitizedUpdates.entityRefs === 'object') {
-      const existingRefs = metadata.images[filename].entityRefs || {};
-      sanitizedUpdates.entityRefs = { ...existingRefs, ...sanitizedUpdates.entityRefs };
+      oldEntityRefs = metadata.images[filename].entityRefs || {};
+      sanitizedUpdates.entityRefs = { ...oldEntityRefs, ...sanitizedUpdates.entityRefs };
     }
 
     metadata.images[filename] = {
@@ -322,6 +345,15 @@ class MetadataHelper {
       ...sanitizedUpdates,
       updated: new Date().toISOString()
     };
+
+    // Clean up entity instances that lost their last image reference
+    if (oldEntityRefs) {
+      const newEntityRefs = metadata.images[filename].entityRefs || {};
+      for (const [entityId, oldKey] of Object.entries(oldEntityRefs)) {
+        if (!oldKey || oldKey === newEntityRefs[entityId]) continue;
+        this._pruneOrphanedInstance(metadata, entityId, oldKey);
+      }
+    }
 
     // Auto-add any new tags to the global tag library
     if (updates.tags && Array.isArray(updates.tags)) {
@@ -433,7 +465,13 @@ class MetadataHelper {
       throw new Error(`Image ${filename} not found in metadata`);
     }
 
+    const deletedRefs = metadata.images[filename].entityRefs || {};
     delete metadata.images[filename];
+
+    // Clean up entity instances that are now unreferenced
+    for (const [entityId, key] of Object.entries(deletedRefs)) {
+      if (key) this._pruneOrphanedInstance(metadata, entityId, key);
+    }
 
     // Clean up unused tags from global list
     await this.cleanupUnusedTags(metadata);
@@ -1087,6 +1125,22 @@ class MetadataHelper {
     const removedCount = originalLength - metadata.tags.length;
     if (removedCount > 0) {
       console.log(`[CLEANUP] Removed ${removedCount} unused tag(s) from global list`);
+    }
+  }
+
+  /**
+   * Delete an entity instance if it is no longer referenced by any image and has no _links.
+   * Linked instances are preserved — they participate in virtual tag / web source dispatch.
+   * Note: modifies metadata in-place; caller must write.
+   */
+  _pruneOrphanedInstance(metadata, entityId, key) {
+    const instance = ((metadata.entityInstances || {})[entityId] || {})[key];
+    if (!instance) return;
+    if (instance._links && Object.keys(instance._links).length > 0) return;
+    const stillUsed = Object.values(metadata.images || {})
+      .some(img => (img.entityRefs || {})[entityId] === key);
+    if (!stillUsed) {
+      delete metadata.entityInstances[entityId][key];
     }
   }
 
