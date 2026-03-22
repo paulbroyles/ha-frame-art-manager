@@ -299,6 +299,7 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
       font-size: 22px; font-weight: 700; letter-spacing: 0.08em;
       text-transform: uppercase; color: #fff; line-height: 1.3;
       overflow-wrap: break-word; word-break: break-word;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
     }
     /* Scale down long names — letter-spacing shrinks proportionally to avoid excessive width */
     .artist-name.name-long { font-size: 18px; letter-spacing: 0.05em; }
