@@ -2,12 +2,15 @@ const express = require('express');
 const router = express.Router();
 const MetadataHelper = require('../metadata_helper');
 
-// GET all attributes
+// GET all attributes + type map
 router.get('/', async (req, res) => {
   try {
     const helper = new MetadataHelper(req.frameArtPath);
-    const attributes = await helper.getAllAttributes();
-    res.json(attributes);
+    const [attributes, attributeTypes] = await Promise.all([
+      helper.getAllAttributes(),
+      helper.getAttributeTypes(),
+    ]);
+    res.json({ attributes, attributeTypes });
   } catch (error) {
     console.error('Error getting attributes:', error);
     res.status(500).json({ error: 'Failed to retrieve attributes' });
@@ -57,6 +60,22 @@ router.get('/:attributeName/usage', async (req, res) => {
   } catch (error) {
     console.error('Error checking attribute usage:', error);
     res.status(500).json({ error: 'Failed to check attribute usage' });
+  }
+});
+
+// PUT set attribute type ('url' | 'text')
+router.put('/:attributeName/type', async (req, res) => {
+  try {
+    const { type } = req.body;
+    if (type !== 'url' && type !== 'text' && type !== null) {
+      return res.status(400).json({ error: 'type must be "url", "text", or null' });
+    }
+    const helper = new MetadataHelper(req.frameArtPath);
+    const attributeTypes = await helper.setAttributeType(req.params.attributeName, type);
+    res.json({ success: true, attributeTypes });
+  } catch (error) {
+    console.error('Error setting attribute type:', error);
+    res.status(500).json({ error: 'Failed to set attribute type' });
   }
 });
 

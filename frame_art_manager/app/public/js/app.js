@@ -87,6 +87,7 @@ let allTags = [];
 let allTVs = [];
 let allGlobalTagsets = {}; // Global tagsets (name -> {tags, exclude_tags})
 let allAttributes = []; // Global custom attribute names
+let allAttributeTypes = {}; // { attributeName: 'url' } — only non-text types stored
 let allEntityTypes = []; // Global entity type definitions
 let allEntityInstances = {}; // entityId → { instanceKey → { attrName: value } }
 let allCustomDataOrder = []; // [{type:'attribute',name:str}|{type:'entity',id:str}]
@@ -5176,7 +5177,9 @@ async function loadTags() {
 async function loadAttributes() {
   try {
     const response = await fetch(`${API_BASE}/attributes`);
-    allAttributes = await response.json();
+    const data = await response.json();
+    allAttributes = data.attributes || [];
+    allAttributeTypes = data.attributeTypes || {};
     renderUploadAttributes();
   } catch (error) {
     console.error('Error loading attributes:', error);
@@ -8350,17 +8353,32 @@ function renderModalAttributes(imageAttributes) {
   section.style.display = '';
 
   container.innerHTML = allAttributes.map(attrName => {
-    const value = escapeHtml(String((imageAttributes && imageAttributes[attrName]) || ''));
+    const value = String((imageAttributes && imageAttributes[attrName]) || '');
+    const isUrl = (allAttributeTypes[attrName] === 'url');
+    const escapedValue = escapeHtml(value);
+    const input = `<input type="text" class="modal-attribute-input" data-attribute="${escapeHtml(attrName)}" value="${escapedValue}" placeholder="" />`;
+    const linkIcon = isUrl
+      ? `<a class="attr-url-open${value ? '' : ' hidden'}" href="${escapedValue}" target="_blank" rel="noopener" title="Open URL">↗</a>`
+      : '';
     return `
       <div class="modal-attribute-row">
         <label class="modal-attribute-label">${escapeHtml(attrName)}:</label>
-        <input type="text" class="modal-attribute-input" data-attribute="${escapeHtml(attrName)}" value="${value}" placeholder="" />
+        ${isUrl ? `<div class="attr-url-wrap">${input}${linkIcon}</div>` : input}
       </div>
     `;
   }).join('');
 
   container.querySelectorAll('.modal-attribute-input').forEach(input => {
     input.addEventListener('change', () => saveImageAttribute(input.dataset.attribute, input.value));
+    if (allAttributeTypes[input.dataset.attribute] === 'url') {
+      input.addEventListener('input', () => {
+        const link = input.closest('.attr-url-wrap')?.querySelector('.attr-url-open');
+        if (link) {
+          link.href = input.value;
+          link.classList.toggle('hidden', !input.value.trim());
+        }
+      });
+    }
   });
 }
 
@@ -11741,11 +11759,16 @@ function renderAttributesTable() {
   `;
 
   for (const attrName of allAttributes) {
+    const type = allAttributeTypes[attrName] || 'text';
+    const typeBadge = type === 'url'
+      ? `<button class="attr-type-btn attr-type-url" data-attribute="${escapeHtml(attrName)}" title="Type: URL — click to set to Text">URL</button>`
+      : `<button class="attr-type-btn attr-type-text" data-attribute="${escapeHtml(attrName)}" title="Type: Text — click to set to URL">Text</button>`;
     html += `
       <tr draggable="true" data-attribute="${escapeHtml(attrName)}">
         <td class="td-drag"><span class="drag-handle" title="Drag to reorder">⠿</span></td>
         <td>${escapeHtml(attrName)}</td>
         <td class="td-actions">
+          ${typeBadge}
           <button class="btn-icon btn-danger-icon delete-attribute-btn" data-attribute="${escapeHtml(attrName)}" title="Delete attribute">✕</button>
         </td>
       </tr>
@@ -11757,6 +11780,9 @@ function renderAttributesTable() {
 
   container.querySelectorAll('.delete-attribute-btn').forEach(btn => {
     btn.addEventListener('click', () => deleteAttribute(btn.dataset.attribute));
+  });
+  container.querySelectorAll('.attr-type-btn').forEach(btn => {
+    btn.addEventListener('click', () => toggleAttributeType(btn.dataset.attribute));
   });
 
   initAttributesDragAndDrop(container.querySelector('#attributes-tbody'));
@@ -11869,6 +11895,25 @@ async function promptNewAttribute() {
   }
 }
 
+async function toggleAttributeType(attributeName) {
+  const current = allAttributeTypes[attributeName] || 'text';
+  const next = current === 'url' ? 'text' : 'url';
+  try {
+    const resp = await fetch(`${API_BASE}/attributes/${encodeURIComponent(attributeName)}/type`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: next }),
+    });
+    const result = await resp.json();
+    if (result.success) {
+      allAttributeTypes = result.attributeTypes;
+      renderCustomDataList();
+    }
+  } catch (err) {
+    console.error('Error setting attribute type:', err);
+  }
+}
+
 async function deleteAttribute(attributeName) {
   try {
     // Check if any images have a non-empty value for this attribute
@@ -11887,6 +11932,7 @@ async function deleteAttribute(attributeName) {
     const result = await response.json();
     if (result.success) {
       allAttributes = result.attributes;
+      delete allAttributeTypes[attributeName];
       // Update local image cache to remove this attribute
       for (const imageData of Object.values(allImages)) {
         if (imageData.attributes) {

@@ -609,6 +609,30 @@ class MetadataHelper {
   }
 
   /**
+   * Get attribute type map { attributeName: 'url' | 'text' }.
+   * Only non-default (non-text) types are stored; absence means 'text'.
+   */
+  async getAttributeTypes() {
+    const metadata = await this.readMetadata();
+    return metadata.attributeTypes || {};
+  }
+
+  /**
+   * Set the type for an attribute. Pass type='text' or null to remove (revert to default).
+   */
+  async setAttributeType(name, type) {
+    const metadata = await this.readMetadata();
+    if (!metadata.attributeTypes) metadata.attributeTypes = {};
+    if (!type || type === 'text') {
+      delete metadata.attributeTypes[name];
+    } else {
+      metadata.attributeTypes[name] = type;
+    }
+    await this.writeMetadata(metadata);
+    return metadata.attributeTypes;
+  }
+
+  /**
    * Add a custom attribute to the library and initialize it (empty) on all images
    */
   async addAttribute(attributeName) {

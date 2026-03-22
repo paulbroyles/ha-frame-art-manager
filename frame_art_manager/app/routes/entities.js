@@ -240,8 +240,9 @@ router.post('/restore-defaults', async (req, res) => {
     const helper = new MetadataHelper(req.frameArtPath);
     const metadata = await helper.readMetadata();
 
-    // Replace attributes with defaults
+    // Replace attributes with defaults, clear any type overrides
     metadata.attributes = [...DEFAULT_ATTRIBUTES];
+    delete metadata.attributeTypes;
 
     // Seed default entity types (add if missing, update attributes if present)
     if (!metadata.entityTypes) metadata.entityTypes = [];

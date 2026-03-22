@@ -11886,6 +11886,73 @@ input[type="checkbox"]:checked + .toggle-text {
   color: #c33;
 }
 
+/* ── Attribute types ──────────────────────────────────────────────────────── */
+
+/* Type toggle button in the Custom Metadata attribute table */
+.attr-type-btn {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.attr-type-text {
+  background: transparent;
+  border-color: var(--border-color, #ddd);
+  color: var(--muted-text, #aaa);
+}
+
+.attr-type-text:hover {
+  border-color: var(--accent-color, #4a90d9);
+  color: var(--accent-color, #4a90d9);
+}
+
+.attr-type-url {
+  background: #e8f4fd;
+  border-color: #90c8f0;
+  color: #2980b9;
+  font-weight: 600;
+}
+
+.attr-type-url:hover {
+  background: #d0eaf8;
+}
+
+/* URL attribute in the image modal */
+.attr-url-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.attr-url-wrap .modal-attribute-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.attr-url-open {
+  flex-shrink: 0;
+  font-size: 14px;
+  color: var(--accent-color, #4a90d9);
+  text-decoration: none;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 3px;
+}
+
+.attr-url-open:hover {
+  background: var(--hover-bg, #e8f0fb);
+}
+
+.attr-url-open.hidden {
+  display: none;
+}
+
 /* Wikidata-filled entity fields awaiting user confirmation */
 .entity-field-input.suggested {
   background: #f0f6ff;
