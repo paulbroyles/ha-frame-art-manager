@@ -204,13 +204,15 @@ async function resolveArtistLifespan(contributors) {
  * @returns {{ url: string, isPortrait: boolean }|null}
  */
 function extractImageInfo(masterImages) {
-  const sizes = masterImages?.sizes;
+  // master_images is an array; use the first (primary) entry.
+  const img = Array.isArray(masterImages) ? masterImages[0] : masterImages;
+  const sizes = img?.sizes;
   if (!Array.isArray(sizes) || sizes.length === 0) return null;
   const largest = sizes[sizes.length - 1];
   const imageUrl = largest[2];
   if (!imageUrl) return null;
   // height_ratio = (height / width) * 100; >100 means portrait
-  const heightRatio = masterImages.height_ratio || 100;
+  const heightRatio = img.height_ratio || 100;
   const isPortrait = heightRatio > 100;
   return { url: imageUrl, isPortrait };
 }

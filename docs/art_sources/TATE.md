@@ -62,13 +62,13 @@ Images are served from Azure Blob Storage at `media.tate.org.uk`:
 https://media.tate.org.uk/art/images/work/{L1}/{L1+digits}/{ACNO}_{N}.jpg
 ```
 
-**Always use `master_images.sizes[-1][2]`** (last entry in the sizes array) — do not assume the `_10` suffix exists. Some works have only 3 size variants; the largest may be `_9` (~730px).
+**`master_images` is an array** — use `master_images[0]` for the primary image. **Always use `master_images[0].sizes[-1][2]`** (last entry) — do not assume the `_10` suffix exists. Some works have only 3 size variants; the largest may be `_9` (~730px).
 
 Maximum resolution is ~1536px wide for most works. The Frame TV target is 3840px, so images will be upscaled; this is handled by the TV/pipeline. Dezoomify is not applicable (Tate does not expose tiled/zoomable images).
 
 ### Aspect ratio (pre-download)
 
-`master_images.height_ratio` = `(height / width) × 100`:
+`master_images[0].height_ratio` = `(height / width) × 100`:
 - `> 100` → portrait
 - `< 100` → landscape
 - `= 100` → square (treated as landscape)
