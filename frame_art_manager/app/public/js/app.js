@@ -11737,112 +11737,6 @@ async function openReviewUnlinkedArtistsModal() {
   renderCurrent();
 }
 
-function renderAttributesTable() {
-  const container = document.getElementById('attributes-table-container');
-  if (!container) return;
-
-  if (!allAttributes || allAttributes.length === 0) {
-    container.innerHTML = '<p class="empty-state">No attributes defined. Click "+ New Attribute" to create one.</p>';
-    return;
-  }
-
-  let html = `
-    <table class="tagsets-table attributes-table">
-      <thead>
-        <tr>
-          <th class="th-drag"></th>
-          <th>Attribute Name</th>
-          <th class="th-actions"></th>
-        </tr>
-      </thead>
-      <tbody id="attributes-tbody">
-  `;
-
-  for (const attrName of allAttributes) {
-    const type = allAttributeTypes[attrName] || 'text';
-    const typeBadge = type === 'url'
-      ? `<button class="attr-type-btn attr-type-url" data-attribute="${escapeHtml(attrName)}" title="Type: URL — click to set to Text">URL</button>`
-      : `<button class="attr-type-btn attr-type-text" data-attribute="${escapeHtml(attrName)}" title="Type: Text — click to set to URL">Text</button>`;
-    html += `
-      <tr draggable="true" data-attribute="${escapeHtml(attrName)}">
-        <td class="td-drag"><span class="drag-handle" title="Drag to reorder">⠿</span></td>
-        <td>${escapeHtml(attrName)}</td>
-        <td class="td-actions">
-          ${typeBadge}
-          <button class="btn-icon btn-danger-icon delete-attribute-btn" data-attribute="${escapeHtml(attrName)}" title="Delete attribute">✕</button>
-        </td>
-      </tr>
-    `;
-  }
-
-  html += '</tbody></table>';
-  container.innerHTML = html;
-
-  container.querySelectorAll('.delete-attribute-btn').forEach(btn => {
-    btn.addEventListener('click', () => deleteAttribute(btn.dataset.attribute));
-  });
-  container.querySelectorAll('.attr-type-btn').forEach(btn => {
-    btn.addEventListener('click', () => toggleAttributeType(btn.dataset.attribute));
-  });
-
-  initAttributesDragAndDrop(container.querySelector('#attributes-tbody'));
-}
-
-function initAttributesDragAndDrop(tbody) {
-  if (!tbody) return;
-  let dragSrc = null;
-
-  tbody.addEventListener('dragstart', e => {
-    const row = e.target.closest('tr');
-    if (!row) return;
-    dragSrc = row;
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', row.dataset.attribute);
-    row.classList.add('dragging');
-  });
-
-  tbody.addEventListener('dragend', e => {
-    const row = e.target.closest('tr');
-    if (row) row.classList.remove('dragging');
-    tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over'));
-    dragSrc = null;
-  });
-
-  tbody.addEventListener('dragover', e => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    const row = e.target.closest('tr');
-    if (!row || row === dragSrc) return;
-    tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over'));
-    row.classList.add('drag-over');
-  });
-
-  tbody.addEventListener('dragleave', e => {
-    const row = e.target.closest('tr');
-    if (row) row.classList.remove('drag-over');
-  });
-
-  tbody.addEventListener('drop', e => {
-    e.preventDefault();
-    const target = e.target.closest('tr');
-    if (!target || !dragSrc || target === dragSrc) return;
-    tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over'));
-
-    // Reorder DOM
-    const rows = [...tbody.querySelectorAll('tr')];
-    const srcIdx = rows.indexOf(dragSrc);
-    const tgtIdx = rows.indexOf(target);
-    if (srcIdx < tgtIdx) {
-      target.after(dragSrc);
-    } else {
-      target.before(dragSrc);
-    }
-
-    // Sync allAttributes to new DOM order and persist
-    allAttributes = [...tbody.querySelectorAll('tr')].map(r => r.dataset.attribute);
-    saveAttributeOrder();
-  });
-}
 
 async function saveAttributeOrder() {
   try {
@@ -12479,11 +12373,16 @@ function renderCustomDataList() {
   for (const item of order) {
     if (item.type === 'attribute' && allAttributes.includes(item.name)) {
       const role = item.displayRole || '';
+      const attrType = allAttributeTypes[item.name] || 'text';
+      const typeBadge = attrType === 'url'
+        ? `<button class="attr-type-btn attr-type-url" data-attribute="${escapeHtml(item.name)}" title="Type: URL — click to set to Text">URL</button>`
+        : `<button class="attr-type-btn attr-type-text" data-attribute="${escapeHtml(item.name)}" title="Type: Text — click to set to URL">Text</button>`;
       html += `
         <div class="custom-data-item item-attribute" draggable="true" data-type="attribute" data-name="${escapeHtml(item.name)}" data-display-role="${escapeHtml(role)}">
           <span class="drag-handle" title="Drag to reorder">⠿</span>
           <span class="item-label item-attribute-name">${escapeHtml(item.name)}</span>
           <div class="item-actions">
+            ${typeBadge}
             <button class="btn-icon display-role-btn${role ? ' role-active' : ''}" data-type="attribute" data-name-or-id="${escapeHtml(item.name)}" title="Gallery page display role: ${role || 'detail'}">${role === 'primary' ? '①' : role === 'secondary' ? '②' : '·'}</button>
             <button class="btn-icon btn-danger-icon delete-attribute-btn" data-attribute="${escapeHtml(item.name)}" title="Delete attribute">✕</button>
           </div>
@@ -12547,6 +12446,9 @@ function renderCustomDataList() {
   });
   container.querySelectorAll('.display-role-btn').forEach(btn => {
     btn.addEventListener('click', () => cycleDisplayRole(btn));
+  });
+  container.querySelectorAll('.attr-type-btn').forEach(btn => {
+    btn.addEventListener('click', () => toggleAttributeType(btn.dataset.attribute));
   });
 
   initCustomDataDragAndDrop(list);
