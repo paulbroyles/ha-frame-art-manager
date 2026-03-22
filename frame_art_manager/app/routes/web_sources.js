@@ -21,6 +21,7 @@ const SOURCE_MODULES = {
   louvre: require('../sources/louvre'),
   artsy: require('../sources/artsy'),
   delart: require('../sources/delart'),
+  tate:   require('../sources/tate'),
 };
 
 const SOURCE_FETCHERS = Object.fromEntries(
@@ -222,6 +223,12 @@ const BUILTIN_SOURCES = {
     name: 'Delaware Art Museum',
     description: 'American paintings, Pre-Raphaelite works, illustrations, and more from the Delaware Art Museum\'s collection of ~12,800 objects',
     type: 'delart',
+  },
+  tate: {
+    id: 'tate',
+    name: 'Tate',
+    description: 'British and international artworks from the Tate collection (~66,700 works with cleared images), including Turner\'s bequest, modern and contemporary works',
+    type: 'tate',
   },
 };
 
