@@ -19,7 +19,8 @@
       "fontSize": 30,
       "color": "black",
       "marginTop": 10,
-      "zone": "top"
+      "zone": "top",
+      "maxLines": 2
     },
     {
       "id": "nationality",

@@ -181,39 +181,75 @@ async function layoutPlacard(template, metadata, display, refreshType) {
 
     const rawValue  = metadata[slot.field] || '';
     const text      = applyTransforms(rawValue, slot);
-    const fontSize  = slot.fontSize || 20;
     const fontFile  = resolveFont(slot.font, template.fonts);
     const color     = resolveColor(slot.color, refreshType);
     const slotContentWidth = slot.maxWidth || contentWidth;
+    const maxLines  = slot.maxLines || Infinity;
 
     cursorY += slot.marginTop || 0;
 
-    // Measure text to determine if wrapping is needed.
-    const textWidth = await measureText(fontFile, text, fontSize);
-    const lineH     = await getLineHeight(fontFile, fontSize);
+    // Determine final font size, respecting maxLines if set.
+    // Try font sizes from configured down to minFontSize in steps of 2,
+    // stopping as soon as the text fits in maxLines (or minFontSize is reached).
+    let fontSize = slot.fontSize || 20;
+    let lines    = null;
 
-    if (textWidth <= slotContentWidth) {
-      // Single line.
+    if (isFinite(maxLines)) {
+      const minFontSize = slot.minFontSize || Math.max(10, Math.floor(fontSize * 0.55));
+      for (let fs = fontSize; fs >= minFontSize; fs -= 2) {
+        const w = await measureText(fontFile, text, fs);
+        if (w <= slotContentWidth) {
+          // Fits on one line — always within maxLines.
+          fontSize = fs;
+          lines = [text];
+          break;
+        }
+        const wrapped = await wrapText(fontFile, text, fs, slotContentWidth);
+        if (wrapped.length <= maxLines) {
+          fontSize = fs;
+          lines = wrapped;
+          break;
+        }
+        if (fs - 2 < minFontSize) {
+          // Exhausted range — use minFontSize with truncation.
+          fontSize = minFontSize;
+          const capped = wrapped.slice(0, maxLines);
+          const lastLine = capped[capped.length - 1].replace(/\s*\S+$/, '…');
+          lines = [...capped.slice(0, -1), lastLine];
+          break;
+        }
+      }
+    }
+
+    if (lines === null) {
+      // No maxLines constraint — measure normally.
+      const textWidth = await measureText(fontFile, text, fontSize);
+      if (textWidth <= slotContentWidth) {
+        lines = [text];
+      } else {
+        lines = await wrapText(fontFile, text, fontSize, slotContentWidth);
+      }
+    }
+
+    const lineH       = await getLineHeight(fontFile, fontSize);
+    const customLineH = slot.lineHeight || lineH;
+    const spacing     = Math.max(0, customLineH - lineH);
+    const displayText = lines.join(' ');
+
+    if (lines.length === 1) {
       payload.push({
         type: 'text',
-        value: text,
+        value: displayText,
         x: margin,
         y: cursorY,
         size: fontSize,
         font: fontFile,
         color,
       });
-      cursorY += lineH;
     } else {
-      // Wrapped. Use OEL text with max_width; also word-wrap locally to count lines.
-      const lines = await wrapText(fontFile, text, fontSize, slotContentWidth);
-      const customLineH = slot.lineHeight || lineH;
-      // OEL spacing = extra gap between lines (on top of font's natural height).
-      const spacing = Math.max(0, customLineH - lineH);
-
       payload.push({
         type: 'text',
-        value: text,
+        value: displayText,
         x: margin,
         y: cursorY,
         size: fontSize,
@@ -222,8 +258,8 @@ async function layoutPlacard(template, metadata, display, refreshType) {
         max_width: slotContentWidth,
         spacing,
       });
-      cursorY += lines.length * customLineH;
     }
+    cursorY += lines.length * customLineH;
 
     debug.slotsRendered++;
   }

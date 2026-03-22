@@ -180,15 +180,10 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
   const secondaryFields = fields.filter(f => f.role === 'secondary');
   const detailFields   = fields.filter(f => f.role === 'detail');
 
-  // Artist / primary heading — scale font based on name length
+  // Artist / primary heading
   const artistField = primaryFields[0];
-  const artistNameLen = (artistField?.value || '').length;
-  const artistNameClass = artistNameLen > 40 ? 'name-xxl'
-    : artistNameLen > 30 ? 'name-xl'
-    : artistNameLen > 22 ? 'name-long'
-    : '';
   const artistHtml = artistField
-    ? `<h1 class="artist-name${artistNameClass ? ' ' + artistNameClass : ''}">${escapeHtml(artistField.value)}</h1>`
+    ? `<h1 class="artist-name">${escapeHtml(artistField.value)}</h1>`
     : '';
 
   // Byline: extra attrs on the primary entity (lifespan, nationality) + any secondary fields.
@@ -297,18 +292,11 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
     /* Artist block */
     .artist-name {
       font-size: 22px; font-weight: 700; letter-spacing: 0.08em;
-      text-transform: uppercase; color: #fff; line-height: 1.3;
-      overflow-wrap: break-word; word-break: break-word;
-      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+      text-transform: uppercase; color: #fff; line-height: 1.2;
     }
-    /* Scale down long names — letter-spacing shrinks proportionally to avoid excessive width */
-    .artist-name.name-long { font-size: 18px; letter-spacing: 0.05em; }
-    .artist-name.name-xl   { font-size: 15px; letter-spacing: 0.04em; }
-    .artist-name.name-xxl  { font-size: 13px; letter-spacing: 0.03em; }
     .artist-byline {
-      margin-top: 6px; font-size: 14px; color: #888;
+      margin-top: 5px; font-size: 14px; color: #888;
       font-style: italic; letter-spacing: 0.02em;
-      overflow-wrap: break-word;
     }
     .bio-extra { color: #666; }
     .bio-sep   { color: #555; margin: 0 2px; }
@@ -317,8 +305,7 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
     .title-block { margin-top: 20px; padding-top: 20px; border-top: 1px solid #262626; }
     .artwork-title {
       font-size: 26px; font-weight: 400; font-style: italic;
-      color: #fff; line-height: 1.3;
-      overflow-wrap: break-word; word-break: break-word;
+      color: #fff; line-height: 1.25;
     }
     .artwork-date {
       display: inline-block; margin-top: 6px;
@@ -329,7 +316,7 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
     .details { margin-top: 24px; }
     .detail-row {
       display: flex; justify-content: space-between; align-items: baseline;
-      flex-wrap: wrap; gap: 4px 16px; padding: 9px 0; border-bottom: 1px solid #1f1f1f;
+      gap: 16px; padding: 9px 0; border-bottom: 1px solid #1f1f1f;
     }
     .detail-label {
       flex-shrink: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -337,7 +324,6 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
     }
     .detail-value {
       font-size: 15px; color: #c8c8c8; text-align: right; font-family: Georgia, serif;
-      min-width: 0; overflow-wrap: break-word; word-break: break-word;
     }
 
     /* Description */
