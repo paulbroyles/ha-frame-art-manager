@@ -338,7 +338,9 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     }
 
     const creatorLifespan = await resolveArtistLifespan(obj.contributors).catch(() => null);
-    const artworkUrl = obj.url ? `https://www.tate.org.uk${obj.url}` : null;
+    const artworkUrl = obj.url
+      ? (obj.url.startsWith('http') ? obj.url : `https://www.tate.org.uk${obj.url}`)
+      : null;
 
     return {
       imageBuffer,

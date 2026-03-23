@@ -113,7 +113,7 @@ Lookups use `?acno={ACNO}` directly — no HTML scraping needed.
 | `dimensions` | `dimensions` | Physical dimensions string |
 | `creditLine` | `creditLine` | Acquisition credit |
 | `gallery` | `display_gallery_name` | Gallery within Tate |
-| `artworkUrl` | `url` (prepend `https://www.tate.org.uk`) | Canonical page URL |
+| `artworkUrl` | `url` (full URL from API) | Canonical page URL |
 | `source` | — | Always `"Tate"` |
 
 ## Known limitations
