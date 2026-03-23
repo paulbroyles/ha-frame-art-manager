@@ -306,8 +306,8 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       }
     }
 
-    // Download image at full resolution
-    const imageUrl = `${iiifServiceUrl}/full/max/0/default.jpg`;
+    // Download image — slightly oversized to allow pipeline cropping headroom
+    const imageUrl = `${iiifServiceUrl}/full/!4800,4800/0/default.jpg`;
     let imageBuffer;
     try {
       const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 60000 });
@@ -389,7 +389,7 @@ async function fetchByIdentifier(identifier, options = {}) {
     }
   }
 
-  const imageUrl = `${iiifServiceUrl}/full/max/0/default.jpg`;
+  const imageUrl = `${iiifServiceUrl}/full/!4800,4800/0/default.jpg`;
   let imageBuffer;
   try {
     const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 60000 });

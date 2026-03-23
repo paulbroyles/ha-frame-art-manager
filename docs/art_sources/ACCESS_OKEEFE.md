@@ -44,9 +44,9 @@ representation[0].digitally_shown_by[0].digitally_available_via[0].access_point[
 → https://iiif.okeeffemuseum.org/image/iiif/2/{imageId}
 ```
 
-Full-resolution download: `{serviceUrl}/full/max/0/default.jpg`
+Download URL: `{serviceUrl}/full/!4800,4800/0/default.jpg`
 
-IIIF Level 2 compliance; typical max resolution ~3800px on the long side. `dezoomify` is not used — IIIF `full/max` already delivers the maximum available resolution.
+IIIF Level 2 compliance; typical max resolution ~3800px on the long side. The `!4800,4800` size cap requests slightly larger than 4K (matching the `dezoomify` overshoot of 4801px) to allow the pipeline border/frame cropping headroom. `dezoomify` is not used — IIIF serves the full image in a single request.
 
 ### Aspect ratio (pre-download)
 
