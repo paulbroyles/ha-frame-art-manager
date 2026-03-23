@@ -28,7 +28,7 @@ No authentication required. No published rate limit; be polite.
 - Object type not matching filters (before image download)
 - Aspect ratio not matching filters (from IIIF info.json, before image download)
 
-`MAX_ATTEMPTS = 15`. The range is dense enough that 404s are infrequent.
+`MAX_ATTEMPTS = 40`. Higher than other sources because the collection contains many non-artwork objects (art supplies, personal belongings) that won't match type filters. The extra headroom ensures type-filtered fetches succeed reliably.
 
 **Note**: Repository IDs (in the URL) are distinct from Catalogue Raisonné numbers (CRN), which are stored in the `identified_by` array under the "catalogue raisonnée number" classification.
 

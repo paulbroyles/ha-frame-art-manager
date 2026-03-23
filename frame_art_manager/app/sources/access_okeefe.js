@@ -18,7 +18,9 @@ const IIIF_BASE  = 'https://iiif.okeeffemuseum.org/image/iiif/2';
 const DATA_URL   = `${BASE_URL}/data/object`;
 
 const REPO_MAX    = 2000;
-const MAX_ATTEMPTS = 15;
+// Higher than other sources because the collection has many non-artwork objects
+// (art supplies, personal belongings) mixed in; type filters need more probe attempts.
+const MAX_ATTEMPTS = 40;
 
 // ── Getty AAT URIs for identification ────────────────────────────────────────
 
@@ -286,27 +288,29 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       if (!types.some(t => eligibleTypes.has(t))) continue;
     }
 
-    // Aspect ratio check via IIIF info.json (pre-download)
-    let iiifWidth = null, iiifHeight = null;
-    try {
-      const infoResp = await axios.get(`${iiifServiceUrl}/info.json`, { timeout: 10000 });
-      iiifWidth  = infoResp.data.width;
-      iiifHeight = infoResp.data.height;
-    } catch {
-      // Proceed without dimension info; aspect ratio check skipped
-    }
-
-    if (aspectRatio !== 'all' && iiifWidth && iiifHeight) {
-      const isLandscape = iiifWidth >= iiifHeight;
-      if (aspectRatio === 'landscape' && !isLandscape) continue;
-      if (aspectRatio === 'portrait'  &&  isLandscape) continue;
+    // Aspect ratio check via IIIF info.json (only when filtering is active — skip the
+    // extra round trip when aspectRatio is 'all')
+    if (aspectRatio !== 'all') {
+      let iiifWidth = null, iiifHeight = null;
+      try {
+        const infoResp = await axios.get(`${iiifServiceUrl}/info.json`, { timeout: 10000 });
+        iiifWidth  = infoResp.data.width;
+        iiifHeight = infoResp.data.height;
+      } catch {
+        // Proceed without dimension info; aspect ratio check skipped
+      }
+      if (iiifWidth && iiifHeight) {
+        const isLandscape = iiifWidth >= iiifHeight;
+        if (aspectRatio === 'landscape' && !isLandscape) continue;
+        if (aspectRatio === 'portrait'  &&  isLandscape) continue;
+      }
     }
 
     // Download image at full resolution
     const imageUrl = `${iiifServiceUrl}/full/max/0/default.jpg`;
     let imageBuffer;
     try {
-      const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+      const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 60000 });
       imageBuffer = Buffer.from(imgResp.data);
     } catch (e) {
       if (e.response?.status === 404) continue;
@@ -388,7 +392,7 @@ async function fetchByIdentifier(identifier, options = {}) {
   const imageUrl = `${iiifServiceUrl}/full/max/0/default.jpg`;
   let imageBuffer;
   try {
-    const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+    const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 60000 });
     imageBuffer = Buffer.from(imgResp.data);
   } catch (e) {
     throw new Error(`Failed to download image for object ${repoId}: ${e.message}`);
