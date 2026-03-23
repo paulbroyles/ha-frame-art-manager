@@ -274,18 +274,21 @@ Similarly for a portrait-only source: fast-fail on `'landscape'` and set `aspect
 
 ---
 
-## Registering in web_sources.js
+## Registering a new source
 
-### 1. Add to SOURCE_MODULES
+Two files need editing. No other files require changes — artist suggest, counts,
+filter types, and metadata declarations are all derived automatically from these registries.
+
+### 1. Add to `sources/index.js`
 
 ```js
-const SOURCE_MODULES = {
+module.exports = {
   // ...existing...
-  my_source: require('../sources/my_source'),
+  my_source: require('./my_source'),
 };
 ```
 
-### 2. Add to BUILTIN_SOURCES
+### 2. Add to `BUILTIN_SOURCES` in `web_sources.js`
 
 ```js
 const BUILTIN_SOURCES = {
@@ -301,7 +304,12 @@ const BUILTIN_SOURCES = {
 };
 ```
 
-The `id` and `type` must match the key in `SOURCE_MODULES`. The `description` appears in the source card.
+The `id` and `type` must match the key in `sources/index.js`. The `description` appears in the source card.
+
+**Artist suggest and counts** are derived automatically from `sources/index.js`:
+- Sources that export `suggestArtists` are included in the autocomplete resolver.
+- Sources that export `countArtistArtworks` are included in the counts breakdown.
+- The display label in the counts UI is in `SOURCE_LABELS` in `app.js` — add an entry there if the source supports artist search.
 
 ---
 
