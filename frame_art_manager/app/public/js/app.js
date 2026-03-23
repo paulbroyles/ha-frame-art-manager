@@ -17993,7 +17993,7 @@ async function updateArtistSourceCounts(tagId) {
     if (!resp.ok) throw new Error('Request failed');
     const { counts, units } = await resp.json();
 
-    const SOURCE_LABELS = { moma: 'MoMA', met_museum: 'Met', google_arts: 'Google Arts', louvre: 'Louvre', artsy: 'Artsy', delart: 'DelArt' };
+    const SOURCE_LABELS = { moma: 'MoMA', met_museum: 'Met', google_arts: 'Google Arts', louvre: 'Louvre', artsy: 'Artsy', delart: 'DelArt', tate: 'Tate', access_okeefe: "Access O'Keeffe" };
     const parts = Object.entries(counts).map(([id, count]) => {
       const label = SOURCE_LABELS[id] || id;
       if (count === null) return `${label}: <span style="color:var(--text-muted,#999);">—</span>`;

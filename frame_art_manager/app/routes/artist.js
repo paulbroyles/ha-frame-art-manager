@@ -25,15 +25,19 @@ const googleArts = require('../sources/google_arts');
 const metMuseum = require('../sources/met_museum');
 const louvre = require('../sources/louvre');
 const delart = require('../sources/delart');
+const tate = require('../sources/tate');
+const accessOkeefe = require('../sources/access_okeefe');
 
 // Wire the resolver once at module load time.
 // Source suggest functions are injected — the resolver has no direct dependency on these modules.
 const resolver = createArtistResolver({
   sources: [
-    { id: 'moma',        suggestArtists: moma.suggestArtists },
-    { id: 'artsy',       suggestArtists: artsy.suggestArtists },
-    { id: 'google_arts', suggestArtists: googleArts.suggestArtists },
-    { id: 'delart',      suggestArtists: delart.suggestArtists },
+    { id: 'moma',          suggestArtists: moma.suggestArtists },
+    { id: 'artsy',         suggestArtists: artsy.suggestArtists },
+    { id: 'google_arts',   suggestArtists: googleArts.suggestArtists },
+    { id: 'delart',        suggestArtists: delart.suggestArtists },
+    { id: 'tate',          suggestArtists: tate.suggestArtists },
+    { id: 'access_okeefe', suggestArtists: accessOkeefe.suggestArtists },
   ],
   wikidata,
   timeout: 1500,
@@ -136,25 +140,29 @@ router.get('/counts', async (req, res) => {
 
   const helper = new MetadataHelper(req.frameArtPath);
 
-  const [momaCount, metCount, googleCount, louvreCount, delartCount, localImages] = await Promise.all([
+  const [momaCount, metCount, googleCount, louvreCount, delartCount, tateCount, okeefeCount, localImages] = await Promise.all([
     moma.countArtistArtworks(artist),
     metMuseum.countArtistArtworks(artist),
     googleArts.countArtistArtworks(artist),
     louvre.countArtistArtworks(artist),
     delart.countArtistArtworks(artist),
+    tate.countArtistArtworks(artist),
+    accessOkeefe.countArtistArtworks(artist),
     helper.getLocalArtistImages(artist),
   ]);
 
   res.json({
     artist,
     counts: {
-      local:       localImages.length,
-      moma:        momaCount,
-      met_museum:  metCount,
-      google_arts: googleCount,
-      louvre:      louvreCount,
-      delart:      delartCount,
-      artsy:       null,
+      local:         localImages.length,
+      moma:          momaCount,
+      met_museum:    metCount,
+      google_arts:   googleCount,
+      louvre:        louvreCount,
+      delart:        delartCount,
+      tate:          tateCount,
+      access_okeefe: okeefeCount,
+      artsy:         null,
     },
   });
 });
