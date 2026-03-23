@@ -16571,9 +16571,49 @@ function addFilterTextTag(section, value) {
 }
 
 /**
+ * Update the summary span in a filter entry from its current DOM state.
+ * Called when collapsing so the summary reflects checkbox changes made since render.
+ *
+ * @param {HTMLElement} entry - .ws-filter-entry element
+ * @param {string} sourceId
+ */
+function updateFilterEntrySummary(entry, sourceId) {
+  const section = entry.querySelector('.ws-filter-section');
+  if (!section) return; // search filters update live via their own handler
+  const filterType = section.dataset.filterType;
+  const filterTypeDef = (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType);
+  if (!filterTypeDef) return;
+
+  const entryMode = entry.dataset.filterMode;
+  const modeRadio = section.querySelector('.ws-filter-mode-radio:checked');
+  const mode = entryMode || modeRadio?.value || filterTypeDef.modes?.[0] || 'require';
+
+  const allValues = [];
+  const checkedValues = [];
+  section.querySelectorAll('.ws-filter-value-checkbox:not(:disabled)').forEach(cb => {
+    allValues.push(cb.dataset.value);
+    if (cb.checked) checkedValues.push(cb.dataset.value);
+  });
+
+  const isSingleValueToggle = allValues.length === 1;
+  const effectiveValues = (mode === 'require' && !isSingleValueToggle && checkedValues.length === allValues.length)
+    ? [] // all checked = no restriction
+    : checkedValues;
+
+  const summaryEl = entry.querySelector('.ws-filter-entry-summary');
+  if (!summaryEl) return;
+
+  if (mode === 'require' && effectiveValues.length === 0 && !isSingleValueToggle && allValues.length > 0) {
+    summaryEl.textContent = 'All included';
+  } else {
+    summaryEl.textContent = generateFilterSummary(filterTypeDef, { mode, values: effectiveValues });
+  }
+}
+
+/**
  * Attach event handlers for the unified filter list component (add/remove/core-value).
  * @param {HTMLElement} container - The container element holding the filter list
- * @param {object} callbacks - { onAdd(filterType), onRemove(filterType), onCoreValueChange(filterType, value) }
+ * @param {object} callbacks - { onAdd(filterType), onRemove(filterType), onCoreValueChange(filterType, value), onBeforeCollapse(entry) }
  */
 /**
  * Re-render the filter list inside the source settings modal and re-init interactions.
@@ -16600,6 +16640,7 @@ function reRenderSourceFilters(sourceId, currentFilters, expandedTypes) {
       const filters = readFiltersFromUI(sourceId).filter(f => !(f.type === filterType && (!filterMode || f.mode === filterMode)));
       reRenderSourceFilters(sourceId, filters);
     },
+    onBeforeCollapse: (entry) => updateFilterEntrySummary(entry, sourceId),
   });
   initArtistAutocompletes(body);
 }
@@ -16662,6 +16703,7 @@ function initFilterListInteractions(container, callbacks = {}) {
       if (e.target.closest('.ws-filter-entry-remove')) return;
       const entry = header.closest('.ws-filter-entry');
       const isCollapsed = entry.dataset.collapsed === 'true';
+      if (!isCollapsed) callbacks.onBeforeCollapse?.(entry);
       entry.dataset.collapsed = isCollapsed ? 'false' : 'true';
     });
   });
@@ -16826,6 +16868,7 @@ function openWebSourceSettings(sourceId) {
       const currentFilters = readFiltersFromUI(sourceId).filter(f => !(f.type === filterType && (!filterMode || f.mode === filterMode)));
       reRenderSourceFilters(sourceId, currentFilters);
     },
+    onBeforeCollapse: (entry) => updateFilterEntrySummary(entry, sourceId),
   });
 
   // Bind reset mapping button
