@@ -8783,6 +8783,11 @@ function formatSyncLogTimestamp(timestamp) {
   });
 }
 
+function formatDuration(ms) {
+  if (ms == null) return '';
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+}
+
 function escapeHtml(untrustedValue) {
   if (untrustedValue === null || untrustedValue === undefined) return '';
   return String(untrustedValue)
@@ -17707,9 +17712,15 @@ function renderWebSourcesTestSection() {
       </div>` : '';
 
     const ts = Date.now();
+    const fetchTimeLabel = testCache.timings?.fetchMs != null
+      ? ` <span style="font-weight:400;color:var(--text-muted,#666);">— ${formatDuration(testCache.timings.fetchMs)}</span>`
+      : '';
+    const processTimeLabel = testCache.timings?.processMs != null
+      ? ` <span style="font-weight:400;color:var(--text-muted,#666);">— ${formatDuration(testCache.timings.processMs)}</span>`
+      : '';
     const rawImg = testCache.rawFilename
       ? `<div style="flex:1;min-width:0;">
-           <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Original</div>
+           <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Original${fetchTimeLabel}</div>
            <img src="${API_BASE}/web-sources/test-cache/raw-image?t=${ts}" alt="Original artwork"
                 style="max-width:100%;max-height:300px;display:block;border-radius:4px;cursor:zoom-in;"
                 onclick="showImageLightbox(this.src,'Original artwork')"
@@ -17764,13 +17775,18 @@ function renderWebSourcesTestSection() {
                 onerror="this.style.display='none'">
          </div>`
       : '';
-    const processedImg = `<div style="flex:1;min-width:0;">
-      <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Cropped for TV</div>
-      <img src="${API_BASE}/web-sources/test-cache/image?t=${ts}" alt="Cropped artwork"
-           style="max-width:100%;max-height:300px;display:block;border-radius:4px;cursor:zoom-in;"
-           onclick="showImageLightbox(this.src,'Cropped for TV')"
-           onerror="this.style.display='none'">
-    </div>`;
+    const processedImg = testCache.filename
+      ? `<div style="flex:1;min-width:0;">
+           <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Cropped for TV${processTimeLabel}</div>
+           <img src="${API_BASE}/web-sources/test-cache/image?t=${ts}" alt="Cropped artwork"
+                style="max-width:100%;max-height:300px;display:block;border-radius:4px;cursor:zoom-in;"
+                onclick="showImageLightbox(this.src,'Cropped for TV')"
+                onerror="this.style.display='none'">
+         </div>`
+      : `<div style="flex:1;min-width:0;">
+           <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted,#666);">Cropped for TV</div>
+           <div style="max-height:300px;min-height:80px;display:flex;align-items:center;justify-content:center;color:var(--text-muted,#666);font-size:13px;border:1px dashed var(--border-color,#ddd);border-radius:4px;padding:16px;">Processing…</div>
+         </div>`;
 
     // Fetch trace section
     const ft = testCache.fetchTrace;
@@ -18033,22 +18049,29 @@ async function fetchTestWebSource() {
       body.virtualTagId = webSourceTestVirtualTagId;
     }
 
-    const response = await fetch(`${API_BASE}/web-sources/test-fetch`, {
+    // Phase 1: fetch image only — show raw immediately
+    const rawResp = await fetch(`${API_BASE}/web-sources/test-fetch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, rawOnly: true }),
     });
-    const data = await response.json();
-    if (!data.success) throw new Error(data.error || 'Failed to fetch test image');
-    if (webSourcesConfig) webSourcesConfig.testCache = data.testCache;
-    // Preserve ad-hoc filters across re-render
-    if (webSourceTestMode === 'ad-hoc') {
-      webSourceTestAdHocFilters = readTestAdHocFiltersFromUI();
-    }
+    const rawData = await rawResp.json();
+    if (!rawData.success) throw new Error(rawData.error || 'Failed to fetch test image');
+    if (webSourcesConfig) webSourcesConfig.testCache = rawData.testCache;
+    if (webSourceTestMode === 'ad-hoc') webSourceTestAdHocFilters = readTestAdHocFiltersFromUI();
+    renderWebSourcesTestSection();
+
+    // Phase 2: process the downloaded image
+    if (btn) btn.textContent = 'Processing…';
+    const processResp = await fetch(`${API_BASE}/web-sources/test-reprocess`, { method: 'POST' });
+    const processData = await processResp.json();
+    if (!processData.success) throw new Error(processData.error || 'Failed to process test image');
+    if (webSourcesConfig) webSourcesConfig.testCache = processData.testCache;
     renderWebSourcesTestSection();
   } catch (error) {
     console.error('Error fetching test image:', error);
     showToast(`Error: ${error.message}`, 'error');
+  } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Fetch Test Image'; }
   }
 }

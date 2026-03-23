@@ -1778,7 +1778,7 @@ async function fetchSpecificImage(specificImage, { tvOrientation, webSources } =
 // - tvOrientation: used when orientation filter is 'match_tv'. Defaults to 'landscape'.
 router.post('/test-fetch', async (req, res) => {
   try {
-    const { tvOrientation, specificImage, virtualTagId, sourceId: adHocSourceId, filters: adHocFilters } = req.body || {};
+    const { tvOrientation, specificImage, virtualTagId, sourceId: adHocSourceId, filters: adHocFilters, rawOnly } = req.body || {};
     const webSources = await readWebSourcesConfig(req.frameArtPath);
     const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
 
@@ -1791,6 +1791,7 @@ router.post('/test-fetch', async (req, res) => {
       }
     }
 
+    const fetchStart = Date.now();
     let chosenSourceId, imageBuffer, contentType, artMetadata;
     const fetchTrace = { aspectRatio };
 
@@ -1854,11 +1855,49 @@ router.post('/test-fetch', async (req, res) => {
       }
     }
 
+    const fetchMs = Date.now() - fetchStart;
     const orientation = tvOrientation || 'landscape';
+
+    // rawOnly: save raw image and return immediately — caller will invoke test-reprocess next.
+    if (rawOnly) {
+      const ext = contentType.includes('png') ? 'png' : 'jpg';
+      const cacheDir = cacheDirFor(req.frameArtPath);
+      await fs.mkdir(cacheDir, { recursive: true });
+      await clearTestCacheFile(req.frameArtPath);
+      const rawFilename = `_test_raw.${ext}`;
+      await fs.writeFile(path.join(cacheDir, rawFilename), imageBuffer);
+      const rawUserMapping = webSources.sources[chosenSourceId]?.userMapping || {};
+      const rawSourceSettings = webSources.sources?.[chosenSourceId]?.settings;
+      const rawEffectiveMapping = getEffectiveMapping(chosenSourceId, rawUserMapping, rawSourceSettings);
+      const rawSourceMod = SOURCE_MODULES[chosenSourceId];
+      const rawFieldDefs = rawSourceMod?.getMetadataFields
+        ? rawSourceMod.getMetadataFields(rawSourceSettings)
+        : (rawSourceMod?.metadataFields || []);
+      const { attributeSnapshot: rawAttrSnap, entitySnapshot: rawEntitySnap } = buildWebSourceSnapshot(
+        artMetadata, rawEffectiveMapping,
+        { fieldDefs: rawFieldDefs, applyFormatting: webSources.formatDates !== false }
+      );
+      webSources.testCache = {
+        rawFilename,
+        sourceId: chosenSourceId,
+        orientation,
+        artworkUrl: artMetadata.artworkUrl,
+        metadata: artMetadata,
+        ...(Object.keys(rawAttrSnap).length > 0 && { attributeSnapshot: rawAttrSnap }),
+        ...(Object.keys(rawEntitySnap).length > 0 && { entitySnapshot: rawEntitySnap }),
+        fetchedAt: new Date().toISOString(),
+        fetchTrace,
+        timings: { fetchMs },
+      };
+      await writeWebSourcesConfig(req.frameArtPath, webSources);
+      return res.json({ success: true, testCache: webSources.testCache });
+    }
+
     const { pipeline, unifiedProcessor, unifiedProcessorOptions = {},
             preProcessor, cropEngine, preProcessorOptions = {}, cropEngineOptions = {} } = webSources.imageProcessing;
     const alreadyProcessed = !!SOURCE_MODULES[chosenSourceId]?.alreadyProcessed;
 
+    const processStart = Date.now();
     let processedBuffer;
     let preprocessedBuffer = null;
     let preprocessedFilename = null;
@@ -1939,6 +1978,7 @@ router.post('/test-fetch', async (req, res) => {
       fetchedAt: new Date().toISOString(),
       ...(processingInfo && { processingInfo }),
       fetchTrace,
+      timings: { fetchMs, processMs: Date.now() - processStart },
     };
     await writeWebSourcesConfig(req.frameArtPath, webSources);
 
@@ -1969,6 +2009,7 @@ router.post('/test-reprocess', async (req, res) => {
     const alreadyProcessed = !!SOURCE_MODULES[testCache.sourceId]?.alreadyProcessed;
     const orientation = testCache.orientation || 'landscape';
 
+    const processStart = Date.now();
     let processedBuffer;
     let preprocessedBuffer = null;
     let preprocessedFilename = null;
@@ -2032,7 +2073,7 @@ router.post('/test-reprocess', async (req, res) => {
       { fieldDefs: remapFieldDefs, applyFormatting: webSources.formatDates !== false }
     );
 
-    webSources.testCache = { ...testCache, filename: testFilename };
+    webSources.testCache = { ...testCache, filename: testFilename, timings: { ...(testCache.timings || {}), processMs: Date.now() - processStart } };
     if (preprocessedFilename) {
       webSources.testCache.preprocessedFilename = preprocessedFilename;
     } else {
