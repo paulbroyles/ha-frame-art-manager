@@ -17358,6 +17358,7 @@ function initVirtualTagFilterList(container, sourceId, currentFilters, skipRende
       const filters = readVirtualTagFiltersFromUI().filter(f => !(f.type === filterType && (!filterMode || f.mode === filterMode)));
       initVirtualTagFilterList(container, sourceId, filters);
     },
+    onBeforeCollapse: (entry) => updateFilterEntrySummary(entry, sourceId),
   });
   initArtistAutocompletes(container);
 }
@@ -17893,6 +17894,7 @@ function renderTestAdHocFilters(expandedTypes) {
       webSourceTestAdHocFilters = readTestAdHocFiltersFromUI().filter(f => !(f.type === filterType && (!filterMode || f.mode === filterMode)));
       renderTestAdHocFilters();
     },
+    onBeforeCollapse: (entry) => updateFilterEntrySummary(entry, sourceId),
   });
 }
 
