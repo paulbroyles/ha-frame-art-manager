@@ -909,7 +909,7 @@ function getSimilarBreakpointCounts() {
 }
 
 const ADVANCED_TAB_DEFAULT = 'tags';
-const VALID_ADVANCED_TABS = new Set(['tags', 'custom-data', 'web-sources', 'recency', 'settings', 'metadata', 'sync']);
+const VALID_ADVANCED_TABS = new Set(['tags', 'custom-data', 'web-sources', 'recency', 'settings', 'metadata', 'sync', 'blacklist']);
 
 function normalizeEditingFilterName(name) {
   if (!name) return 'none';
