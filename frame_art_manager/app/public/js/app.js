@@ -16578,6 +16578,19 @@ function addFilterTextTag(section, value) {
  * @param {string} sourceId
  */
 function updateFilterEntrySummary(entry, sourceId) {
+  const summaryEl = entry.querySelector('.ws-filter-entry-summary');
+  if (!summaryEl) return;
+
+  // Core single-value filter (select directly in entry-body, no .ws-filter-section wrapper)
+  const coreSelect = entry.querySelector('.ws-filter-entry-body .ws-filter-core-value');
+  if (coreSelect) {
+    const filterTypeDef =
+      (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === coreSelect.dataset.filterType) ||
+      (webSourceCoreFilterTypes || []).find(ft => ft.type === coreSelect.dataset.filterType);
+    if (filterTypeDef) summaryEl.textContent = generateFilterSummary(filterTypeDef, { values: [coreSelect.value] });
+    return;
+  }
+
   const section = entry.querySelector('.ws-filter-section');
   if (!section) return; // search filters update live via their own handler
   const filterType = section.dataset.filterType;
@@ -16585,17 +16598,6 @@ function updateFilterEntrySummary(entry, sourceId) {
     (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType) ||
     (webSourceCoreFilterTypes || []).find(ft => ft.type === filterType);
   if (!filterTypeDef) return;
-
-  const summaryEl = entry.querySelector('.ws-filter-entry-summary');
-  if (!summaryEl) return;
-
-  // Core single-value filter (e.g. orientation) — read from select
-  if (filterTypeDef.core && !filterTypeDef.multiValue) {
-    const sel = section.querySelector('.ws-filter-core-value');
-    const val = sel?.value || '';
-    summaryEl.textContent = generateFilterSummary(filterTypeDef, { values: [val] });
-    return;
-  }
 
   const entryMode = entry.dataset.filterMode;
   const modeRadio = section.querySelector('.ws-filter-mode-radio:checked');
