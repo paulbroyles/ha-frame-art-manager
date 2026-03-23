@@ -167,6 +167,37 @@ function extractMetadata(obj, repoId) {
   };
 }
 
+// ── Artist support ────────────────────────────────────────────────────────────
+
+// The collection is named after Georgia O'Keeffe and is primarily her work.
+// We support artist search for her name only; other artists cannot be filtered.
+const OKEEFE_NAME       = "Georgia O'Keeffe";
+const OKEEFE_NAME_LOWER = OKEEFE_NAME.toLowerCase();
+// Estimated number of O'Keeffe works in the collection (for count display).
+const OKEEFE_COUNT_ESTIMATE = 1800;
+
+/**
+ * Suggest artist names matching the query string.
+ * Returns only Georgia O'Keeffe (the collection's primary artist).
+ */
+async function suggestArtists(query, limit = 10) {
+  const q = query.toLowerCase().trim();
+  if (!q) return [];
+  if (OKEEFE_NAME_LOWER.includes(q)) {
+    return [{ name: OKEEFE_NAME, count: OKEEFE_COUNT_ESTIMATE, source: 'access_okeefe' }];
+  }
+  return [];
+}
+
+/**
+ * Returns the estimated artwork count for an artist in this collection.
+ * Only O'Keeffe is supported; all other names return 0.
+ */
+async function countArtistArtworks(artistName) {
+  const q = (artistName || '').toLowerCase().trim();
+  return OKEEFE_NAME_LOWER.includes(q) || q.includes('keeffe') ? OKEEFE_COUNT_ESTIMATE : 0;
+}
+
 // ── Filter helpers ────────────────────────────────────────────────────────────
 
 /**
@@ -217,6 +248,19 @@ function resolveTypeFilter(filters) {
  */
 async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
+
+  // Artist filter: this collection is primarily Georgia O'Keeffe.
+  // Reject requests for other artists immediately.
+  const artistFilter = filters.find(f => f.type === 'artist' && f.mode === 'require');
+  if (artistFilter) {
+    const requested = (artistFilter.values?.[0] || '').toLowerCase().trim();
+    if (!OKEEFE_NAME_LOWER.includes(requested) && !requested.includes('keeffe')) {
+      throw new Error(
+        `Access O'Keeffe only contains works by ${OKEEFE_NAME}; no results for "${artistFilter.values?.[0]}"`
+      );
+    }
+  }
+
   const eligibleTypes = resolveTypeFilter(filters);
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -380,6 +424,15 @@ function getFilterTypes() {
       modeDetermining: false,
       values: OBJECT_TYPE_NAMES.map(name => ({ value: name, label: name })),
     },
+    {
+      type: 'artist',
+      label: 'Artist',
+      description: `Restrict to works by a specific artist. Only ${OKEEFE_NAME} is supported.`,
+      modes: ['require'],
+      multiValue: false,
+      values: [],
+      inputStyle: 'search',
+    },
   ];
 }
 
@@ -415,6 +468,8 @@ module.exports = {
   canHandleIdentifier,
   selectMode,
   getFilterTypes,
+  suggestArtists,
+  countArtistArtworks,
   metadataFields,
   defaultMapping,
 };
