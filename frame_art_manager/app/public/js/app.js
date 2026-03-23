@@ -909,7 +909,11 @@ function getSimilarBreakpointCounts() {
 }
 
 const ADVANCED_TAB_DEFAULT = 'tags';
-const VALID_ADVANCED_TABS = new Set(['tags', 'custom-data', 'web-sources', 'recency', 'settings', 'metadata', 'sync', 'blacklist']);
+// Derived from data-tab attributes on .advanced-tab-btn buttons in index.html.
+// No need to maintain this manually — adding a tab to the HTML is sufficient.
+const VALID_ADVANCED_TABS = new Set(
+  [...document.querySelectorAll('.advanced-tab-btn')].map(b => b.dataset.tab).filter(Boolean)
+);
 
 function normalizeEditingFilterName(name) {
   if (!name) return 'none';
