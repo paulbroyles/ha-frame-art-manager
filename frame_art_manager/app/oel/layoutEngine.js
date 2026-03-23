@@ -171,7 +171,29 @@ async function layoutPlacard(template, metadata, display, refreshType) {
     }
   }
 
-  // ── 3. Pack top zone (top-to-bottom) ────────────────────────────────────
+  // ── 3. Pack top zone (top-to-bottom, wrapping around anchor) ────────────
+  //
+  // Text flows in two regions:
+  //   Full-width region:  y ∈ [0, qrFloor),  x-width = contentWidth
+  //   Narrow region:      y ∈ [qrFloor, ∞),  x-width = qrLeft - margin*2
+  //
+  // Slots that overflow the full-width region wrap continuously into the
+  // narrow region (to the left of the QR code) rather than being cut off.
+  // Slots that are narrower than qrLeft are never affected.
+
+  const qrFloor     = anchors.length > 0 ? anchors.reduce((min, a) => Math.min(min, a.y), Infinity) : Infinity;
+  const qrLeft      = anchors.length > 0 ? anchors.reduce((min, a) => Math.min(min, a.x), Infinity) : Infinity;
+  const narrowWidth = isFinite(qrLeft) ? Math.max(0, qrLeft - margin * 2) : 0;
+
+  // Emit a text segment into the payload. Uses max_width only for multi-line text.
+  function emitTextSegment(segLines, renderWidth, startY, fontSize, fontFile, color, spacing) {
+    if (segLines.length === 0) return;
+    const value = segLines.join(' ');
+    const entry = { type: 'text', value, x: margin, y: startY, size: fontSize, font: fontFile, color };
+    if (segLines.length > 1) { entry.max_width = renderWidth; entry.spacing = spacing; }
+    payload.push(entry);
+  }
+
   let cursorY = 0;
   for (const slot of topSlots) {
     if (!isSlotActive(slot, metadata)) {
@@ -179,18 +201,24 @@ async function layoutPlacard(template, metadata, display, refreshType) {
       continue;
     }
 
-    const rawValue  = metadata[slot.field] || '';
-    const text      = applyTransforms(rawValue, slot);
-    const fontFile  = resolveFont(slot.font, template.fonts);
-    const color     = resolveColor(slot.color, refreshType);
+    const rawValue         = metadata[slot.field] || '';
+    const text             = applyTransforms(rawValue, slot);
+    const fontFile         = resolveFont(slot.font, template.fonts);
+    const color            = resolveColor(slot.color, refreshType);
     const slotContentWidth = slot.maxWidth || contentWidth;
-    const maxLines  = slot.maxLines || Infinity;
+    const maxLines         = slot.maxLines || Infinity;
 
     cursorY += slot.marginTop || 0;
 
-    // Determine final font size, respecting maxLines if set.
-    // Try font sizes from configured down to minFontSize in steps of 2,
-    // stopping as soon as the text fits in maxLines (or minFontSize is reached).
+    // Whether this slot can reach the QR column.
+    const overlapsQrColumn = (margin + slotContentWidth) > qrLeft && isFinite(qrFloor) && narrowWidth > 0;
+
+    // Effective width for this slot at the current cursor position.
+    const effectiveWidth = (overlapsQrColumn && cursorY >= qrFloor)
+      ? Math.min(slotContentWidth, narrowWidth)
+      : slotContentWidth;
+
+    // Compute wrapped lines at the effective starting width.
     let fontSize = slot.fontSize || 20;
     let lines    = null;
 
@@ -198,20 +226,10 @@ async function layoutPlacard(template, metadata, display, refreshType) {
       const minFontSize = slot.minFontSize || Math.max(10, Math.floor(fontSize * 0.55));
       for (let fs = fontSize; fs >= minFontSize; fs -= 2) {
         const w = await measureText(fontFile, text, fs);
-        if (w <= slotContentWidth) {
-          // Fits on one line — always within maxLines.
-          fontSize = fs;
-          lines = [text];
-          break;
-        }
-        const wrapped = await wrapText(fontFile, text, fs, slotContentWidth);
-        if (wrapped.length <= maxLines) {
-          fontSize = fs;
-          lines = wrapped;
-          break;
-        }
+        if (w <= effectiveWidth) { fontSize = fs; lines = [text]; break; }
+        const wrapped = await wrapText(fontFile, text, fs, effectiveWidth);
+        if (wrapped.length <= maxLines) { fontSize = fs; lines = wrapped; break; }
         if (fs - 2 < minFontSize) {
-          // Exhausted range — use minFontSize with truncation.
           fontSize = minFontSize;
           const capped = wrapped.slice(0, maxLines);
           const lastLine = capped[capped.length - 1].replace(/\s*\S+$/, '…');
@@ -222,44 +240,50 @@ async function layoutPlacard(template, metadata, display, refreshType) {
     }
 
     if (lines === null) {
-      // No maxLines constraint — measure normally.
       const textWidth = await measureText(fontFile, text, fontSize);
-      if (textWidth <= slotContentWidth) {
-        lines = [text];
-      } else {
-        lines = await wrapText(fontFile, text, fontSize, slotContentWidth);
-      }
+      lines = textWidth <= effectiveWidth ? [text] : await wrapText(fontFile, text, fontSize, effectiveWidth);
     }
 
     const lineH       = await getLineHeight(fontFile, fontSize);
     const customLineH = slot.lineHeight || lineH;
     const spacing     = Math.max(0, customLineH - lineH);
-    const displayText = lines.join(' ');
 
-    if (lines.length === 1) {
-      payload.push({
-        type: 'text',
-        value: displayText,
-        x: margin,
-        y: cursorY,
-        size: fontSize,
-        font: fontFile,
-        color,
-      });
+    // ── Flow around anchor zone ───────────────────────────────────────────
+    // If the slot overlaps the QR column and is currently in the full-width
+    // region, check whether it overflows into the narrow region.
+    if (overlapsQrColumn && cursorY < qrFloor) {
+      const availableAbove = qrFloor - cursorY;
+      const linesAbove     = Math.floor(availableAbove / customLineH);
+
+      if (linesAbove >= lines.length) {
+        // Entire slot fits above the floor — normal emit.
+        emitTextSegment(lines, slotContentWidth, cursorY, fontSize, fontFile, color, spacing);
+        cursorY += lines.length * customLineH;
+      } else {
+        // Slot straddles the floor. Render above portion at full width, then
+        // re-wrap the remainder at narrow width and continue below qrFloor.
+        if (linesAbove > 0) {
+          emitTextSegment(lines.slice(0, linesAbove), slotContentWidth, cursorY, fontSize, fontFile, color, spacing);
+          cursorY += linesAbove * customLineH;
+        }
+        // Reconstruct remaining text from the un-rendered lines and re-wrap narrow.
+        const remainingText  = lines.slice(linesAbove).join(' ');
+        const narrowLines    = await wrapText(fontFile, remainingText, fontSize, narrowWidth);
+        const maxNarrowLines = Math.floor((display.height - qrFloor) / customLineH);
+        const fittedNarrow   = narrowLines.slice(0, maxNarrowLines);
+        if (fittedNarrow.length > 0) {
+          // Snap cursorY to qrFloor for the first narrow segment.
+          cursorY = Math.max(cursorY, qrFloor);
+          emitTextSegment(fittedNarrow, narrowWidth, cursorY, fontSize, fontFile, color, spacing);
+          cursorY += fittedNarrow.length * customLineH;
+        }
+        if (narrowLines.length > maxNarrowLines) debug.overflow = true;
+      }
     } else {
-      payload.push({
-        type: 'text',
-        value: displayText,
-        x: margin,
-        y: cursorY,
-        size: fontSize,
-        font: fontFile,
-        color,
-        max_width: slotContentWidth,
-        spacing,
-      });
+      // Normal emit (either slot doesn't reach QR column, or already in narrow zone).
+      emitTextSegment(lines, effectiveWidth, cursorY, fontSize, fontFile, color, spacing);
+      cursorY += lines.length * customLineH;
     }
-    cursorY += lines.length * customLineH;
 
     debug.slotsRendered++;
   }
@@ -281,7 +305,11 @@ async function layoutPlacard(template, metadata, display, refreshType) {
     // Determine area beside the QR code (or full width if no anchors).
     const qrAnchor = anchors.find(a => a.slot.beside ? a.slot.id === slot.beside : true);
     const descGap = slot.marginTop || 6;   // small top gap before description
-    const fillY  = qrAnchor ? qrAnchor.y + descGap : (display.height - 60);
+    // Start below the anchor top — but also below wherever the top zone left off
+    // in the narrow column, so fill content never collides with top zone overflow.
+    const fillY  = qrAnchor
+      ? Math.max(qrAnchor.y + descGap, cursorY > qrFloor ? cursorY : qrAnchor.y + descGap)
+      : (display.height - 60);
     const fillX  = margin;
     const fillW  = qrAnchor ? qrAnchor.x - margin * 2 : contentWidth;
     const fillH  = display.height - fillY;
@@ -319,11 +347,6 @@ async function layoutPlacard(template, metadata, display, refreshType) {
       spacing,
     });
     debug.slotsRendered++;
-
-    // Overflow check: did top content push past fill area start?
-    if (cursorY > fillY) {
-      debug.overflow = true;
-    }
   }
 
   return { payload, debug };
