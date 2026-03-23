@@ -597,7 +597,7 @@ router.get('/:tvId', async (req, res) => {
 
     const html = renderArtworkPage(
       tvName, fields, `/artwork${imageUrl}`, artworkUrl, sourceId, attributeValues,
-      { deviceId, sourceType, filename: localFilename, addonHome: req.app.locals.addonHome || '' }
+      { deviceId, sourceType, filename: localFilename, addonHome: req.app.locals.addonHome || '..' }
     );
     res.send(html);
   } catch (error) {
