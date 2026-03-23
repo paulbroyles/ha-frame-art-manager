@@ -20,8 +20,9 @@ const SOURCE_MODULES = {
   moma: require('../sources/moma'),
   louvre: require('../sources/louvre'),
   artsy: require('../sources/artsy'),
-  delart: require('../sources/delart'),
-  tate:   require('../sources/tate'),
+  delart:         require('../sources/delart'),
+  tate:           require('../sources/tate'),
+  access_okeefe:  require('../sources/access_okeefe'),
 };
 
 const SOURCE_FETCHERS = Object.fromEntries(
@@ -229,6 +230,12 @@ const BUILTIN_SOURCES = {
     name: 'Tate',
     description: 'British and international artworks from the Tate collection (~66,700 works with cleared images), including Turner\'s bequest, modern and contemporary works',
     type: 'tate',
+  },
+  access_okeefe: {
+    id: 'access_okeefe',
+    name: "Access O'Keeffe",
+    description: "Artworks and photographs from the Georgia O'Keeffe Museum collection (~2,000 objects), primarily works by Georgia O'Keeffe with high-resolution IIIF images",
+    type: 'access_okeefe',
   },
 };
 
