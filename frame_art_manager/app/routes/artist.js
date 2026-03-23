@@ -19,26 +19,15 @@ const router = express.Router();
 const MetadataHelper = require('../metadata_helper');
 const { createArtistResolver } = require('../utils/artistResolver');
 const wikidata = require('../utils/wikidata');
-const moma = require('../sources/moma');
-const artsy = require('../sources/artsy');
-const googleArts = require('../sources/google_arts');
-const metMuseum = require('../sources/met_museum');
-const louvre = require('../sources/louvre');
-const delart = require('../sources/delart');
-const tate = require('../sources/tate');
-const accessOkeefe = require('../sources/access_okeefe');
+const SOURCE_MODULES = require('../sources');
 
 // Wire the resolver once at module load time.
-// Source suggest functions are injected — the resolver has no direct dependency on these modules.
+// Derived dynamically from SOURCE_MODULES — any source that exports suggestArtists
+// is automatically included. No manual list to maintain.
 const resolver = createArtistResolver({
-  sources: [
-    { id: 'moma',          suggestArtists: moma.suggestArtists },
-    { id: 'artsy',         suggestArtists: artsy.suggestArtists },
-    { id: 'google_arts',   suggestArtists: googleArts.suggestArtists },
-    { id: 'delart',        suggestArtists: delart.suggestArtists },
-    { id: 'tate',          suggestArtists: tate.suggestArtists },
-    { id: 'access_okeefe', suggestArtists: accessOkeefe.suggestArtists },
-  ],
+  sources: Object.entries(SOURCE_MODULES)
+    .filter(([, mod]) => mod.suggestArtists)
+    .map(([id, mod]) => ({ id, suggestArtists: mod.suggestArtists })),
   wikidata,
   timeout: 1500,
 });
@@ -115,20 +104,17 @@ router.get('/enrich', async (req, res) => {
  * GET /api/artist-suggest/counts?artist=Van+Gogh
  *
  * Returns per-source artwork counts for a given artist name.
- * All capable sources are queried in parallel. Sources that don't support
- * counting (Artsy) return null. Also includes a local gallery count.
+ * All sources that export countArtistArtworks are queried in parallel.
+ * Sources without that export return null. Also includes a local gallery count.
  *
  * Response:
  * {
  *   "artist": "Van Gogh",
  *   "counts": {
- *     "local":       3,      // images in local gallery by this artist
+ *     "local":       3,
  *     "moma":        42,
- *     "met_museum":  8,      // raw API total — may include partial-word false matches
- *     "google_arts": 50,
- *     "louvre":      60,     // estimated artworks (pages × 20); null if probe failed
- *     "delart":      7,      // artworks in DelArt people directory
- *     "artsy":       null    // not countable without additional API calls
+ *     "met_museum":  8,
+ *     ...
  *   }
  * }
  */
@@ -139,32 +125,21 @@ router.get('/counts', async (req, res) => {
   }
 
   const helper = new MetadataHelper(req.frameArtPath);
+  const sourceEntries = Object.entries(SOURCE_MODULES);
 
-  const [momaCount, metCount, googleCount, louvreCount, delartCount, tateCount, okeefeCount, localImages] = await Promise.all([
-    moma.countArtistArtworks(artist),
-    metMuseum.countArtistArtworks(artist),
-    googleArts.countArtistArtworks(artist),
-    louvre.countArtistArtworks(artist),
-    delart.countArtistArtworks(artist),
-    tate.countArtistArtworks(artist),
-    accessOkeefe.countArtistArtworks(artist),
+  const [sourceCounts, localImages] = await Promise.all([
+    Promise.all(sourceEntries.map(([, mod]) =>
+      mod.countArtistArtworks
+        ? mod.countArtistArtworks(artist).catch(() => null)
+        : Promise.resolve(null)
+    )),
     helper.getLocalArtistImages(artist),
   ]);
 
-  res.json({
-    artist,
-    counts: {
-      local:         localImages.length,
-      moma:          momaCount,
-      met_museum:    metCount,
-      google_arts:   googleCount,
-      louvre:        louvreCount,
-      delart:        delartCount,
-      tate:          tateCount,
-      access_okeefe: okeefeCount,
-      artsy:         null,
-    },
-  });
+  const counts = { local: localImages.length };
+  sourceEntries.forEach(([id], i) => { counts[id] = sourceCounts[i]; });
+
+  res.json({ artist, counts });
 });
 
 module.exports = router;

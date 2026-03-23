@@ -13,17 +13,8 @@ const { autoLinkArtistFromWebSource } = require('../utils/enrichers');
 // Source modules — each must export fetchRandomArtwork, selectMode, metadataFields, and defaultMapping.
 // Optional: settingsSchema, getExtraOptions, getFilterTypes, getMetadataFields, alreadyProcessed.
 // web_sources.js delegates source-specific logic to these modules generically.
-const SOURCE_MODULES = {
-  google_arts: require('../sources/google_arts'),
-  google_art_wallpaper: require('../sources/google_art_wallpaper'),
-  met_museum: require('../sources/met_museum'),
-  moma: require('../sources/moma'),
-  louvre: require('../sources/louvre'),
-  artsy: require('../sources/artsy'),
-  delart:         require('../sources/delart'),
-  tate:           require('../sources/tate'),
-  access_okeefe:  require('../sources/access_okeefe'),
-};
+// To add a new source, add it to sources/index.js and add a BUILTIN_SOURCES entry below.
+const SOURCE_MODULES = require('../sources');
 
 const SOURCE_FETCHERS = Object.fromEntries(
   Object.entries(SOURCE_MODULES).map(([id, mod]) => [id, mod.fetchRandomArtwork])
