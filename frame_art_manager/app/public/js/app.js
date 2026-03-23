@@ -17706,7 +17706,11 @@ function renderWebSourcesTestSection() {
       return `Frame Removed (${escapeHtml(actual)})`;
     })();
     const processingInfoRow = pi ? (() => {
-      const actual = pi.actualProcessor || pi.configured;
+      const pipelineLabel = pi.mode === 'pipeline'
+        ? (pi.pipeline || []).filter(s => s.key !== 'background_strip').map(s => s.key).join(' + ')
+          || (pi.pipeline || []).map(s => s.key).join(' + ')
+        : null;
+      const actual = pi.actualProcessor || pi.configured || pipelineLabel || 'unknown';
       const stopNote = pi.stopReason ? ` — ${pi.stopReason}` : '';
       const mainRow = `<tr><td style="font-weight:600;padding:3px 12px 3px 0;white-space:nowrap;">Processing</td><td>${escapeHtml(actual + stopNote)}</td></tr>`;
 
