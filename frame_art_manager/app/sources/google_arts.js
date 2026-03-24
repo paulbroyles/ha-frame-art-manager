@@ -783,7 +783,7 @@ function parseStructuredFields(av12) {
       .filter(v => Array.isArray(v) && typeof v[0] === 'string')
       .map(v => v[0].trim())
       .filter(Boolean);
-    if (textValues.length > 0) fields[label] = decodeHtmlEntities(textValues.join('; '));
+    if (textValues.length > 0) fields[label] = textValues.join('; ');
   }
   return fields;
 }
@@ -856,6 +856,11 @@ function decodeHtmlEntities(str) {
     .replace(/&#([0-9]+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)));
 }
 
+// Decode HTML entities in a structured text field value (not for URL-type fields).
+function dt(value) {
+  return value ? decodeHtmlEntities(value) : null;
+}
+
 function parseAvBlock(av) {
   const structured = parseStructuredFields(av[12]);
   const rawDesc = Array.isArray(av[5]) ? av[5][1] : null;
@@ -864,23 +869,23 @@ function parseAvBlock(av) {
     : null;
   const { artists, mediumEntities, artMovements } = parseEntityAssociations(av[21]);
   return {
-    title:              structured['Title'] || null,
+    title:              dt(structured['Title']),
     // Some artworks omit "Creator" from structured fields but have an ARTIST entity in av[21].
-    creator:            structured['Creator'] || (artists.length > 0 ? artists[0] : null),
-    dateCreated:        av[3] || structured['Date Created'] || null,
-    type:               structured['Type'] || null,
-    medium:             structured['Medium'] || null,
+    creator:            dt(structured['Creator']) || (artists.length > 0 ? artists[0] : null),
+    dateCreated:        dt(av[3] || structured['Date Created']),
+    type:               dt(structured['Type']),
+    medium:             dt(structured['Medium']),
     mediumEntities:     mediumEntities.length > 0 ? mediumEntities.join('; ') : null,
     artMovement:        artMovements.length > 0 ? artMovements.join('; ') : null,
-    creatorNationality: structured['Creator Nationality'] || null,
-    creatorLifespan:    structured['Creator Lifespan'] || null,
-    creatorGender:      structured['Creator Gender'] || null,
-    style:              structured['tag / style'] || null,
-    repository:         structured['Repository'] || null,
-    dimensions:         structured['Physical Dimensions'] || null,
-    rights:             structured['Rights'] || null,
-    artistBio:          structured['Artist biographical information'] || null,
-    additionalInfo:     structured['Additional artwork information'] || null,
+    creatorNationality: dt(structured['Creator Nationality']),
+    creatorLifespan:    dt(structured['Creator Lifespan']),
+    creatorGender:      dt(structured['Creator Gender']),
+    style:              dt(structured['tag / style']),
+    repository:         dt(structured['Repository']),
+    dimensions:         dt(structured['Physical Dimensions']),
+    rights:             dt(structured['Rights']),
+    artistBio:          dt(structured['Artist biographical information']),
+    additionalInfo:     dt(structured['Additional artwork information']),
     description,
   };
 }
