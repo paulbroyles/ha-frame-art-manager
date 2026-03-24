@@ -267,13 +267,13 @@ async function layoutPlacard(template, metadata, display, refreshType) {
           cursorY += linesAbove * customLineH;
         }
         // Reconstruct remaining text from the un-rendered lines and re-wrap narrow.
+        // Continue from cursorY directly — no snap to qrFloor, since narrow content
+        // sits left of the QR code and won't overlap it regardless of Y position.
         const remainingText  = lines.slice(linesAbove).join(' ');
         const narrowLines    = await wrapText(fontFile, remainingText, fontSize, narrowWidth);
-        const maxNarrowLines = Math.floor((display.height - qrFloor) / customLineH);
+        const maxNarrowLines = Math.floor((display.height - cursorY) / customLineH);
         const fittedNarrow   = narrowLines.slice(0, maxNarrowLines);
         if (fittedNarrow.length > 0) {
-          // Snap cursorY to qrFloor for the first narrow segment.
-          cursorY = Math.max(cursorY, qrFloor);
           emitTextSegment(fittedNarrow, narrowWidth, cursorY, fontSize, fontFile, color, spacing);
           cursorY += fittedNarrow.length * customLineH;
         }
