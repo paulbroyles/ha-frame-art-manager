@@ -783,7 +783,7 @@ function parseStructuredFields(av12) {
       .filter(v => Array.isArray(v) && typeof v[0] === 'string')
       .map(v => v[0].trim())
       .filter(Boolean);
-    if (textValues.length > 0) fields[label] = textValues.join('; ');
+    if (textValues.length > 0) fields[label] = decodeHtmlEntities(textValues.join('; '));
   }
   return fields;
 }
@@ -843,11 +843,24 @@ function parseEntityAssociations(av21) {
   return { artists, mediumEntities, artMovements };
 }
 
+const HTML_ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0',
+  mdash: '—', ndash: '–', lsquo: '\u2018', rsquo: '\u2019',
+  ldquo: '\u201c', rdquo: '\u201d', hellip: '…', copy: '©',
+  reg: '®', trade: '™', deg: '°',
+};
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&([a-zA-Z]+);/g, (_, name) => HTML_ENTITIES[name.toLowerCase()] ?? _)
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#([0-9]+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)));
+}
+
 function parseAvBlock(av) {
   const structured = parseStructuredFields(av[12]);
   const rawDesc = Array.isArray(av[5]) ? av[5][1] : null;
   const description = typeof rawDesc === 'string'
-    ? rawDesc.replace(/<[^>]+>/g, '').trim() || null
+    ? decodeHtmlEntities(rawDesc.replace(/<[^>]+>/g, '').trim()) || null
     : null;
   const { artists, mediumEntities, artMovements } = parseEntityAssociations(av[21]);
   return {
