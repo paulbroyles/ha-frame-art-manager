@@ -195,8 +195,14 @@ async function layoutPlacard(template, metadata, display, refreshType) {
   }
 
   let cursorY = 0;
+  // inlineAnchor: set after a single-line slot renders, so the next slot with
+  // followsInline:true can share the same Y. Cleared after any multi-line slot,
+  // skipped slot, or after a successful inline placement.
+  let inlineAnchor = null; // { y, x, measuredWidth, lineH }
+
   for (const slot of topSlots) {
     if (!isSlotActive(slot, metadata)) {
+      inlineAnchor = null;
       debug.slotsSkipped++;
       continue;
     }
@@ -207,6 +213,31 @@ async function layoutPlacard(template, metadata, display, refreshType) {
     const color            = resolveColor(slot.color, refreshType);
     const slotContentWidth = slot.maxWidth || contentWidth;
     const maxLines         = slot.maxLines || Infinity;
+
+    // ── Inline placement (followsInline: true) ────────────────────────────
+    // Attempt to place this slot on the same line as the previous single-line
+    // slot. Falls back to normal rendering if it doesn't fit or there's no anchor.
+    if (slot.followsInline && inlineAnchor) {
+      const gap      = slot.marginLeft ?? 4;
+      const inlineX  = inlineAnchor.x + inlineAnchor.measuredWidth + gap;
+      const availableW = (margin + contentWidth) - inlineX;
+      if (availableW > 0) {
+        const inlineFontSize = slot.fontSize || 20;
+        const textW = await measureText(fontFile, text, inlineFontSize);
+        if (textW <= availableW) {
+          const fontSize = inlineFontSize;
+          payload.push({ type: 'text', value: text, x: inlineX, y: inlineAnchor.y,
+            size: fontSize, font: fontFile, color });
+          inlineAnchor = null;
+          debug.slotsRendered++;
+          continue;
+        }
+      }
+      // Doesn't fit inline — fall through to normal rendering.
+      inlineAnchor = null;
+    } else if (slot.followsInline) {
+      inlineAnchor = null; // no anchor available
+    }
 
     cursorY += slot.marginTop || 0;
 
@@ -258,6 +289,12 @@ async function layoutPlacard(template, metadata, display, refreshType) {
       if (linesAbove >= lines.length) {
         // Entire slot fits above the floor — normal emit.
         emitTextSegment(lines, slotContentWidth, cursorY, fontSize, fontFile, color, spacing);
+        if (lines.length === 1) {
+          const measuredWidth = await measureText(fontFile, lines[0], fontSize);
+          inlineAnchor = { y: cursorY, x: margin, measuredWidth, lineH: customLineH };
+        } else {
+          inlineAnchor = null;
+        }
         cursorY += lines.length * customLineH;
       } else {
         // Slot straddles the floor. Render above portion at full width, then
@@ -278,10 +315,18 @@ async function layoutPlacard(template, metadata, display, refreshType) {
           cursorY += fittedNarrow.length * customLineH;
         }
         if (narrowLines.length > maxNarrowLines) debug.overflow = true;
+        inlineAnchor = null; // straddle: multi-segment, no inline anchor
       }
     } else {
       // Normal emit (either slot doesn't reach QR column, or already in narrow zone).
       emitTextSegment(lines, effectiveWidth, cursorY, fontSize, fontFile, color, spacing);
+      // Track for potential followsInline on the next slot (single-line only).
+      if (lines.length === 1) {
+        const measuredWidth = await measureText(fontFile, lines[0], fontSize);
+        inlineAnchor = { y: cursorY, x: margin, measuredWidth, lineH: customLineH };
+      } else {
+        inlineAnchor = null;
+      }
       cursorY += lines.length * customLineH;
     }
 

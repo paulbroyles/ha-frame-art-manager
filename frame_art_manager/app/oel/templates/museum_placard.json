@@ -41,9 +41,10 @@
       "font": "small",
       "fontSize": 14,
       "color": "black",
-      "marginTop": 2,
-      "zone": "top",
-      "requires": "creator_nationality"
+      "marginTop": 6,
+      "marginLeft": 6,
+      "followsInline": true,
+      "zone": "top"
     },
     {
       "id": "title",
