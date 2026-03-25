@@ -234,6 +234,12 @@ const BUILTIN_SOURCES = {
     description: 'Open-access paintings, drawings, prints, photographs, and sculpture from the NGA collection (~35,000 works), with high-resolution IIIF images',
     type: 'nga',
   },
+  getty: {
+    id: 'getty',
+    name: 'J. Paul Getty Museum',
+    description: 'Open-access (CC0) artworks and photographs from the Getty Museum collection (~91,500 works), including paintings, sculpture, manuscripts, and the renowned photography collection',
+    type: 'getty',
+  },
 };
 
 // ── Config file helpers ───────────────────────────────────────────────────────

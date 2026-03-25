@@ -18,4 +18,5 @@ module.exports = {
   tate:                require('./tate'),
   access_okeefe:       require('./access_okeefe'),
   nga:                 require('./nga'),
+  getty:               require('./getty'),
 };
