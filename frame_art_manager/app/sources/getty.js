@@ -145,15 +145,32 @@ const ERA_GROUPS = [
 
 // ── Query building ────────────────────────────────────────────────────────────
 
+// Map from objectType value to the Getty curatorial department name.
+// Using `department` instead of `classification_and_object_type` returns only
+// works from that curatorial department — excluding fragments, decorative objects,
+// and Antiquities pieces that happen to share a classification label.
+// Types without a department mapping fall back to classification_and_object_type.
+const OBJECT_TYPE_TO_DEPARTMENT = {
+  'Painting':              'Paintings',
+  'Drawing':               'Drawings',
+  'Photograph':            'Photographs',
+  'Illuminated Manuscript': 'Manuscripts',
+};
+
 /**
  * Build axios params for the search API from the active filter set.
  * open_content=true is always included.
  *
  * Filter → API parameter mapping:
- *   artist  → q= (text search)
- *   search  → q= (text search)
- *   objectType → classification_and_object_type= (exact, case-sensitive)
+ *   artist     → q= (text search)
+ *   search     → q= (text search)
+ *   objectType → department= (curatorial dept, for types with a dept mapping)
+ *                classification_and_object_type= (exact, case-sensitive, fallback)
  *   era        → decade_range= (decade start year, e.g. 1870)
+ *
+ * Using department= for major types avoids fragments and mis-classified objects
+ * that share a classification label with canonical works (e.g. fresco fragments
+ * in the Antiquities dept labeled "Painting").
  */
 function buildSearchParams(filters) {
   const params = { open_content: true };
@@ -168,9 +185,18 @@ function buildSearchParams(filters) {
   if (searchFilter?.values?.[0]) terms.push(searchFilter.values[0].trim());
   if (terms.length > 0) params.q = terms.join(' ');
 
-  // classification_and_object_type is exact and case-sensitive (e.g. "Painting", not "painting")
   if (typeFilter?.values?.[0]) {
-    params.classification_and_object_type = typeFilter.values[0];
+    const typeValue = typeFilter.values[0];
+    const dept = OBJECT_TYPE_TO_DEPARTMENT[typeValue];
+    if (dept) {
+      // Use department filter — returns only works from the curatorial dept,
+      // excluding fragments and mis-classified objects from other departments.
+      params.department = dept;
+    } else {
+      // Fall back to classification for types without a department mapping
+      // (Print, Sculpture, Stereograph, Folio, Vessel).
+      params.classification_and_object_type = typeValue;
+    }
   }
 
   // decade_range accepts a decade start year as a string (e.g. "1870" for the 1870s)
@@ -206,7 +232,7 @@ function buildSearchParams(filters) {
 async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
   const params = buildSearchParams(filters);
-  const isFiltered = !!(params.q || params.classification_and_object_type || params.decade_range);
+  const isFiltered = !!(params.q || params.classification_and_object_type || params.department || params.decade_range);
 
   // Pure browse: use cached total, no preflight needed.
   // Any filter: preflight size=0 to get the filtered pool size.

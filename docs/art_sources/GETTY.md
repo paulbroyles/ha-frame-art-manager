@@ -18,8 +18,11 @@ The J. Paul Getty Museum (Los Angeles) publishes ~91,500 artworks under CC0 (pub
 | `from={n}` | Pagination offset (0-based, max ~91,524) |
 | `size={n}` | Results per page |
 | `q={term}` | Full-text search across title, artist, materials, culture, provenance, etc. |
+| `classification_and_object_type={v}` | Exact object type (e.g. `Painting`, `Print`) — case-sensitive |
+| `department={v}` | Curatorial department (e.g. `Paintings`, `Photographs`, `Drawings`, `Manuscripts`, `Antiquities`) |
+| `decade_range={decade}` | Decade start year (e.g. `1870`) |
 
-The API is unauthenticated with no documented rate limits. CORS is enabled.
+The API is unauthenticated with no documented rate limits. CORS is enabled. The `classification_and_object_type`, `department`, and `decade_range` parameters are undocumented but confirmed working.
 
 ## Selection Strategy
 
@@ -66,15 +69,37 @@ Medium/materials are not included in the search response. They are available via
 
 ## Filters
 
-The Getty API only supports text search (`q=`). Object type, time period, and medium facets are read-only aggregations — not filter parameters.
+The Getty API supports several undocumented filter parameters in addition to `q=`:
+
+| Parameter | Description |
+|-----------|-------------|
+| `classification_and_object_type={v}` | Exact, case-sensitive type filter (e.g. `Print`, `Sculpture`) |
+| `department={v}` | Curatorial department (e.g. `Paintings`, `Photographs`) |
+| `decade_range={decade}` | Decade start year (e.g. `1870` for the 1870s) |
+
+### Object Type (`objectType`)
+
+Require mode only. For most types this maps to the `department` API parameter rather than `classification_and_object_type`. Using `department` returns only works from the curatorial department, excluding fragments and objects from other departments that happen to share a classification label (e.g. fresco fragments from the Antiquities department classified as "Painting").
+
+| Type value | API parameter |
+|------------|---------------|
+| Painting | `department=Paintings` |
+| Drawing | `department=Drawings` |
+| Photograph | `department=Photographs` |
+| Illuminated Manuscript | `department=Manuscripts` |
+| Print, Sculpture, Stereograph, Folio, Vessel | `classification_and_object_type={value}` |
+
+The `department` approach reduces the painting pool from ~768 results to ~436 curated ones.
+
+### Era (`era`)
+
+Require mode only. Maps to `decade_range={decade}`. Covers ancient (0s) through the 2000s in decade increments.
 
 ### Artist (`artist`)
-Require mode only. Searches `q={artistName}`, which matches against all indexed fields. The artist facet from the response powers `suggestArtists()`.
+Require mode only. Searches `q={artistName}`, which matches against all indexed fields. The artist facet from the response powers `suggestArtists()`. `modeDetermining: true`.
 
 ### Search (`search`)
-Require mode only. Searches `q={term}` across title, artist, materials, culture, provenance, and other text fields.
-
-Both filter types are `modeDetermining: true` — configuring either switches to search mode (fetches total first, then random offset).
+Require mode only. Searches `q={term}` across title, artist, materials, culture, provenance, and other text fields. `modeDetermining: true`.
 
 ## fetchByIdentifier
 
