@@ -384,6 +384,8 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   pool = applyEnumFilter(pool, filters, 'subclassification', 'subclassification');
   pool = applyEnumFilter(pool, filters, 'timePeriod', 'timePeriod');
 
+  console.log(`[nga] pool size after filters: ${pool.length} (filters: ${JSON.stringify(filters)}, aspectRatio: ${aspectRatio})`);
+
   if (aspectRatio !== 'all') {
     pool = pool.filter(r => {
       if (!r.width || !r.height) return true; // dimensions unknown; include
@@ -401,7 +403,10 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   // Pick a random record and download its image
   const MAX_ATTEMPTS = 10;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const record = pool[Math.floor(Math.random() * pool.length)];
+    const idx = Math.floor(Math.random() * pool.length);
+    const record = pool[idx];
+
+    console.log(`[nga] attempt ${attempt + 1}: idx=${idx} objectId=${record.objectId} attribution="${record.attribution}" classification="${record.classification}"`);
 
     const imageUrl = `${record.iiifUrl}/full/!4800,4800/0/default.jpg`;
     let imageBuffer;
@@ -413,6 +418,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       continue;
     }
 
+    console.log(`[nga] success: objectId=${record.objectId} attribution="${record.attribution}"`);
     return {
       imageBuffer,
       contentType: 'image/jpeg',
