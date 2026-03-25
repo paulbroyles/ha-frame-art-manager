@@ -17,4 +17,5 @@ module.exports = {
   delart:              require('./delart'),
   tate:                require('./tate'),
   access_okeefe:       require('./access_okeefe'),
+  nga:                 require('./nga'),
 };

@@ -16,14 +16,15 @@ Source modules are responsible only for fetching and filtering.
 ## Checklist
 
 1. Create `frame_art_manager/app/sources/<source_id>.js` following the contract below.
-2. Add the module to `SOURCE_MODULES` in `web_sources.js` (order matters — more-specific `canHandleIdentifier` patterns should come first).
+2. Add the module to `sources/index.js`.
 3. Add a `BUILTIN_SOURCES` entry in `web_sources.js`.
 4. Export `selectMode(filters)` — even if the source has only one mode, this is required.
 5. If the source has filterable dimensions (e.g. media categories, object types), export `getFilterTypes()`.
 6. If the source has non-filter options derived from settings (e.g. fetchRichMetadata), export `getExtraOptions(settings)`.
 7. If the source has stable per-artwork identifiers, export `fetchByIdentifier` and `canHandleIdentifier`.
 8. If the source is orientation-constrained, export `aspectRatioConstraint` (see _Landscape-only sources_).
-9. Create `docs/art_sources/<SOURCE>.md` documenting the external API, selection strategy, and any limitations.
+9. If the source exports `suggestArtists` or `countArtistArtworks`, add a short label to `SOURCE_LABELS` in `app/public/js/app.js`.
+10. Create `docs/art_sources/<SOURCE>.md` documenting the external API, selection strategy, and any limitations.
 
 ---
 

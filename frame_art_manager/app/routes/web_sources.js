@@ -228,6 +228,12 @@ const BUILTIN_SOURCES = {
     description: "Artworks and photographs from the Georgia O'Keeffe Museum collection (~2,000 objects), primarily works by Georgia O'Keeffe with high-resolution IIIF images",
     type: 'access_okeefe',
   },
+  nga: {
+    id: 'nga',
+    name: 'National Gallery of Art',
+    description: 'Open-access paintings, drawings, prints, photographs, and sculpture from the NGA collection (~35,000 works), with high-resolution IIIF images',
+    type: 'nga',
+  },
 };
 
 // ── Config file helpers ───────────────────────────────────────────────────────
@@ -840,7 +846,8 @@ router.get('/sources/:sourceId/filter-types', (req, res) => {
   if (!BUILTIN_SOURCES[sourceId]) {
     return res.status(404).json({ error: `Unknown source: ${sourceId}` });
   }
-  res.json({ success: true, filterTypes: SOURCE_FILTER_TYPES[sourceId] || [] });
+  const filterTypes = SOURCE_MODULES[sourceId]?.getFilterTypes?.() || SOURCE_FILTER_TYPES[sourceId] || [];
+  res.json({ success: true, filterTypes });
 });
 
 // PUT /api/web-sources/sources/:sourceId/filters
@@ -860,7 +867,7 @@ router.put('/sources/:sourceId/filters', async (req, res) => {
       return res.status(400).json({ error: 'filters must be an array' });
     }
 
-    const filterTypes = SOURCE_FILTER_TYPES[sourceId] || [];
+    const filterTypes = SOURCE_MODULES[sourceId]?.getFilterTypes?.() || SOURCE_FILTER_TYPES[sourceId] || [];
     for (const filter of filters) {
       if (!filter.type || !filter.mode || !Array.isArray(filter.values)) {
         return res.status(400).json({ error: 'Each filter must have type (string), mode (string), and values (array)' });
