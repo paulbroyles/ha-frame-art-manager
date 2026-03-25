@@ -74,6 +74,7 @@ const IMAGE_COLS = [
 /**
  * Parse the header row and return a Map<columnIndex → fieldName> for only the
  * columns listed in desiredCols, plus the highest needed index.
+ * The header itself is always a simple single line with no embedded newlines.
  */
 function buildColIndex(headerLine, desiredCols) {
   const headers = headerLine.split(',').map(h => h.replace(/^"|"$/g, '').trim());
@@ -87,43 +88,16 @@ function buildColIndex(headerLine, desiredCols) {
 }
 
 /**
- * Parse one CSV data line, extracting only the columns in idxToCol.
- * Stops parsing as soon as maxIdx is passed to avoid processing long trailing fields
- * (e.g. provenancetext that can be thousands of characters).
- */
-function parseLine(line, idxToCol, maxIdx) {
-  const result = {};
-  let field = '';
-  let inQuotes = false;
-  let colIdx = 0;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inQuotes) {
-      if (ch === '"' && line[i + 1] === '"') { field += '"'; i++; }
-      else if (ch === '"') { inQuotes = false; }
-      else { field += ch; }
-    } else {
-      if (ch === '"') {
-        inQuotes = true;
-      } else if (ch === ',') {
-        if (idxToCol.has(colIdx)) result[idxToCol.get(colIdx)] = field;
-        field = '';
-        colIdx++;
-        if (colIdx > maxIdx) break; // all needed columns collected — stop early
-      } else {
-        field += ch;
-      }
-    }
-  }
-  if (colIdx <= maxIdx && idxToCol.has(colIdx)) result[idxToCol.get(colIdx)] = field;
-  return result;
-}
-
-/**
  * Parse a CSV text string, extracting only desiredCols from each row.
- * Much more memory-efficient than full parsing: avoids allocating per-row arrays
- * and stops parsing each line once the last needed column is reached.
+ *
+ * This is a character-level parser that correctly handles quoted fields containing
+ * embedded newlines (common in NGA's dimensions, provenancetext, and other fields).
+ * It stops extracting field content once the last needed column (maxIdx) has been
+ * collected, but still scans the remainder of each row to find the row boundary,
+ * ensuring correct alignment for subsequent rows.
+ *
+ * Memory efficiency comes from only allocating strings for the columns we need,
+ * not for long trailing fields like provenancetext.
  *
  * @param {string} text
  * @param {string[]} desiredCols
@@ -136,14 +110,81 @@ function parseCsvSelective(text, desiredCols) {
   if (maxIdx === -1) return [];
 
   const rows = [];
-  let pos = nl + 1;
-  while (pos < text.length) {
-    let end = text.indexOf('\n', pos);
-    if (end === -1) end = text.length;
-    const line = text.slice(pos, end).trimEnd();
-    if (line) rows.push(parseLine(line, idxToCol, maxIdx));
-    pos = end + 1;
+  let i = nl + 1; // start after header line
+
+  while (i < text.length) {
+    const result = {};
+    let field = '';
+    let inQuotes = false;
+    let colIdx = 0;
+    let capturing = true; // false once we pass maxIdx (scan only, no allocation)
+
+    while (i < text.length) {
+      const ch = text[i];
+
+      if (inQuotes) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') {
+            // Escaped double-quote inside a quoted field
+            if (capturing) field += '"';
+            i += 2;
+            continue;
+          } else {
+            inQuotes = false;
+            i++;
+            continue;
+          }
+        } else {
+          // Embedded newlines inside quoted fields are part of the field value
+          if (capturing) field += ch;
+          i++;
+          continue;
+        }
+      }
+
+      // Outside quotes:
+      if (ch === '"') {
+        inQuotes = true;
+        i++;
+      } else if (ch === ',') {
+        if (capturing && idxToCol.has(colIdx)) result[idxToCol.get(colIdx)] = field;
+        field = '';
+        colIdx++;
+        i++;
+        if (colIdx > maxIdx) {
+          capturing = false;
+          // Scan ahead to find the end of this row, respecting quoted fields
+          while (i < text.length) {
+            const c = text[i];
+            if (inQuotes) {
+              if (c === '"') {
+                if (text[i + 1] === '"') { i += 2; continue; }
+                inQuotes = false;
+              }
+            } else {
+              if (c === '"') { inQuotes = true; }
+              else if (c === '\n') { i++; break; }
+            }
+            i++;
+          }
+          break; // done with this row
+        }
+      } else if (ch === '\n') {
+        // End of row (unquoted newline = row boundary)
+        if (capturing && idxToCol.has(colIdx)) result[idxToCol.get(colIdx)] = field;
+        i++;
+        break;
+      } else if (ch === '\r') {
+        i++; // skip CR in CRLF line endings
+      } else {
+        if (capturing) field += ch;
+        i++;
+      }
+    }
+
+    if (Object.keys(result).length > 0) rows.push(result);
   }
+
   return rows;
 }
 
@@ -261,7 +302,7 @@ async function buildCache() {
   _discoveredValues.subclassification = sortedSubclasses.map(v => ({ value: v, label: v }));
   _discoveredValues.objectType        = sortedObjectTypes.map(v => ({ value: v, label: v }));
 
-  console.log(`[nga] Discovered ${sortedPeriods.length} time periods, ${sortedSubclasses.length} subclassifications, ${sortedObjectTypes.length} object types`);
+  console.log(`[nga] Discovered ${sortedPeriods.length} time periods, ${sortedSubclasses.length} subclassifications, ${sortedObjectTypes.length} object types: ${JSON.stringify(sortedObjectTypes)}`);
 
   return records;
 }
