@@ -66,7 +66,7 @@ const OBJECT_COLS = [
   'medium', 'dimensions', 'displaydate', 'creditline', 'visualbrowsertimespan', 'isvirtual',
 ];
 const IMAGE_COLS = [
-  'iiifurl', 'viewtype', 'width', 'height', 'openaccess', 'depictstmsobjectid',
+  'iiifurl', 'viewtype', 'sequence', 'width', 'height', 'openaccess', 'depictstmsobjectid',
 ];
 
 /**
@@ -181,17 +181,34 @@ async function buildCache() {
   console.log('[nga] Downloading NGA images CSV...');
   const imagesResp = await axios.get(IMAGES_CSV_URL, { responseType: 'text', timeout: 60000 });
 
-  // Join: open-access images with primary/front viewtype
-  const records = [];
+  // Collect the best open-access image per object.
+  // The NGA CSV stores openaccess as 'true'/'false' (not '1'/'0') — accept either.
+  // For objects with multiple images, prefer lower sequence numbers (primary views come first).
+  // Known secondary viewtypes (verso, detail, x-ray, etc.) are deprioritised but not excluded,
+  // so an object with only a verso image still gets an entry.
+  const SECONDARY_VIEWTYPES = new Set(['verso', 'detail', 'infrared', 'x-ray', 'back', 'documentation']);
+
+  const bestImage = new Map(); // objectId → { img, isPrimary, seq }
   for (const img of parseCsvSelective(imagesResp.data, IMAGE_COLS)) {
-    if (img.openaccess !== '1') continue;
-    const vt = (img.viewtype || '').toLowerCase();
-    if (vt && vt !== 'primary' && vt !== 'front') continue;
     if (!img.iiifurl || !img.depictstmsobjectid) continue;
+    if (!objectMap.has(img.depictstmsobjectid)) continue;
 
-    const obj = objectMap.get(img.depictstmsobjectid);
-    if (!obj) continue;
+    const vt = (img.viewtype || '').toLowerCase();
+    const isPrimary = !SECONDARY_VIEWTYPES.has(vt);
+    const seq = parseInt(img.sequence, 10) || 999;
 
+    const existing = bestImage.get(img.depictstmsobjectid);
+    if (!existing
+      || (isPrimary && !existing.isPrimary)           // prefer primary over secondary
+      || (isPrimary === existing.isPrimary && seq < existing.seq)) { // prefer lower sequence
+      bestImage.set(img.depictstmsobjectid, { img, isPrimary, seq });
+    }
+  }
+
+  const records = [];
+  for (const [objectId, { img }] of bestImage) {
+    const obj = objectMap.get(objectId);
+    const oa = (img.openaccess || '').toLowerCase();
     records.push({
       objectId:          obj.objectid,
       title:             obj.title                || null,
@@ -203,6 +220,7 @@ async function buildCache() {
       displaydate:       obj.displaydate          || null,
       creditline:        obj.creditline           || null,
       timePeriod:        obj.visualbrowsertimespan || null,
+      openAccess:        oa === '1' || oa === 'true', // normalize to boolean
       iiifUrl:           img.iiifurl.replace(/\/$/, ''), // strip trailing slash
       width:             parseInt(img.width,  10) || 0,
       height:            parseInt(img.height, 10) || 0,
@@ -383,6 +401,14 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 
   pool = applyEnumFilter(pool, filters, 'subclassification', 'subclassification');
   pool = applyEnumFilter(pool, filters, 'timePeriod', 'timePeriod');
+
+  // openAccess filter: 'require' with value 'Open Access' narrows to open-access images only
+  const requireOpenAccess = filters.some(
+    f => f.type === 'openAccess' && f.mode === 'require' && (f.values || []).includes('Open Access')
+  );
+  if (requireOpenAccess) {
+    pool = pool.filter(r => r.openAccess);
+  }
 
   console.log(`[nga] pool size after filters: ${pool.length} (filters: ${JSON.stringify(filters)}, aspectRatio: ${aspectRatio})`);
 
@@ -604,6 +630,14 @@ function getFilterTypes() {
       multiValue: true,
       modeDetermining: false,
       values: _discoveredValues.timePeriod,
+    },
+    {
+      type: 'openAccess',
+      label: 'Open Access',
+      description: 'Restrict to images marked as open access (Creative Commons Zero). Images without this designation may still be downloadable.',
+      modes: ['require'],
+      multiValue: false,
+      values: [{ value: 'Open Access', label: 'Open Access only' }],
     },
     {
       type: 'artist',
