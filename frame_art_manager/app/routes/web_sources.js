@@ -1331,8 +1331,11 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
 
   const fetcher = SOURCE_FETCHERS[chosenSourceId];
 
-  // Fetch, with optional retry when the image is below the minimum resolution threshold
-  // or has been recently shown on this TV (recency deduplication).
+  // Fetch, with optional retry when:
+  //   - image orientation doesn't match the aspect ratio filter (route-level fallback for
+  //     all sources — catches anything a source's internal check misses)
+  //   - image is below minimum resolution (skipLowRes)
+  //   - image was recently shown on this TV (recency deduplication)
   const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
   const recentArtworkIds = new Set(webSources.webSourceRecency?.[deviceId] || []);
   const MAX_FETCH_ATTEMPTS = 5;
@@ -1343,15 +1346,33 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
     fetchResult = (attempt === 0 && prefetchedResult) ? prefetchedResult : await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
     const isLast = attempt === MAX_FETCH_ATTEMPTS - 1;
 
-    if (skipLowRes) {
+    // Resolve image dimensions once for both checks (avoids calling sharp twice).
+    const needsMetadata = skipLowRes || aspectRatio !== 'all';
+    if (needsMetadata) {
       const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
-      const shortSide = Math.min(width, height);
-      if (shortSide < minResolution) {
-        if (!isLast) {
-          console.warn(`[web_sources] Low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS})`);
-          continue;
+
+      if (skipLowRes) {
+        const shortSide = Math.min(width, height);
+        if (shortSide < minResolution) {
+          if (!isLast) {
+            console.warn(`[web_sources] Low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS})`);
+            continue;
+          }
+          console.warn(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts returned low-res images; using last result`);
         }
-        console.warn(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts returned low-res images; using last result`);
+      }
+
+      if (aspectRatio !== 'all') {
+        const isLandscape = width > height;
+        const orientationMatches = (aspectRatio === 'landscape' && isLandscape)
+                                 || (aspectRatio === 'portrait'  && !isLandscape);
+        if (!orientationMatches) {
+          if (!isLast) {
+            console.warn(`[web_sources] Wrong orientation (${width}×${height}, wanted ${aspectRatio}); retrying (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS})`);
+            continue;
+          }
+          console.warn(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts returned wrong orientation; using last result`);
+        }
       }
     }
 
@@ -1838,7 +1859,21 @@ router.post('/test-fetch', async (req, res) => {
       fetchTrace.adHocFilters = adHocFilters || [];
       fetchTrace.mergedFilters = mergedFilters;
       const extraOpts = sourceModule?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
-      ({ imageBuffer, contentType, metadata: artMetadata } = await fetcher(mergedFilters, { aspectRatio, ...extraOpts }));
+      // Retry loop so orientation filter works even when a source's internal check misses.
+      const MAX_TEST_RETRIES = 5;
+      let testFetchResult;
+      for (let attempt = 0; attempt < MAX_TEST_RETRIES; attempt++) {
+        testFetchResult = await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
+        if (aspectRatio === 'all') break;
+        const { width, height } = await sharp(testFetchResult.imageBuffer).metadata();
+        const isLandscape = width > height;
+        const matches = (aspectRatio === 'landscape' && isLandscape) || (aspectRatio === 'portrait' && !isLandscape);
+        if (matches) break;
+        if (attempt === MAX_TEST_RETRIES - 1) {
+          console.warn(`[test-fetch] All ${MAX_TEST_RETRIES} attempts returned wrong orientation (wanted ${aspectRatio}); using last result`);
+        }
+      }
+      ({ imageBuffer, contentType, metadata: artMetadata } = testFetchResult);
     } else {
       // Virtual tag determines source — delegate to shared dispatch helper.
       let vtFetch;
