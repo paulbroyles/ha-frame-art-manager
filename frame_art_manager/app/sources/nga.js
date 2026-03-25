@@ -64,7 +64,6 @@ const _discoveredValues = {
 // all of them exhausts the container's heap.
 const OBJECT_COLS = [
   'objectid', 'title', 'attribution', 'classification', 'subclassification',
-  'visualbrowserclassification',
   'medium', 'dimensions', 'displaydate', 'creditline', 'visualbrowsertimespan', 'isvirtual',
 ];
 const IMAGE_COLS = [
@@ -253,21 +252,20 @@ async function buildCache() {
     const obj = objectMap.get(objectId);
     const oa = (img.openaccess || '').toLowerCase();
     records.push({
-      objectId:                  obj.objectid,
-      title:                     obj.title                       || null,
-      attribution:               obj.attribution                 || null,
-      classification:            obj.classification              || null,
-      visualBrowserClassification: obj.visualbrowserclassification || null,
-      subclassification:         obj.subclassification           || null,
-      medium:                    obj.medium                      || null,
-      dimensions:                obj.dimensions                  || null,
-      displaydate:               obj.displaydate                 || null,
-      creditline:                obj.creditline                  || null,
-      timePeriod:                obj.visualbrowsertimespan       || null,
-      openAccess:                oa === '1' || oa === 'true', // normalize to boolean
-      iiifUrl:                   img.iiifurl.replace(/\/$/, ''), // strip trailing slash
-      width:                     parseInt(img.width,  10) || 0,
-      height:                    parseInt(img.height, 10) || 0,
+      objectId:          obj.objectid,
+      title:             obj.title             || null,
+      attribution:       obj.attribution       || null,
+      classification:    obj.classification    || null,
+      subclassification: obj.subclassification || null,
+      medium:            obj.medium            || null,
+      dimensions:        obj.dimensions        || null,
+      displaydate:       obj.displaydate       || null,
+      creditline:        obj.creditline        || null,
+      timePeriod:        obj.visualbrowsertimespan || null,
+      openAccess:        oa === '1' || oa === 'true', // normalize to boolean
+      iiifUrl:           img.iiifurl.replace(/\/$/, ''), // strip trailing slash
+      width:             parseInt(img.width,  10) || 0,
+      height:            parseInt(img.height, 10) || 0,
     });
   }
 
@@ -281,7 +279,7 @@ async function buildCache() {
   for (const r of records) {
     if (r.timePeriod) periodSet.add(r.timePeriod);
     if (r.subclassification) subclassSet.add(r.subclassification);
-    if (r.visualBrowserClassification) objectTypeSet.add(r.visualBrowserClassification);
+    if (r.classification) objectTypeSet.add(r.classification);
   }
 
   const sortedPeriods = [...periodSet].sort((a, b) => {
@@ -331,43 +329,6 @@ async function getCache() {
 }
 
 // ── Filter helpers ────────────────────────────────────────────────────────────
-
-/**
- * Resolve objectType filters into a Set of eligible lowercase visualbrowserclassification names,
- * or null if no type filter is active.
- * Uses discovered values when available (after cache build), CLASSIFICATION_TYPES otherwise.
- * Throws if require filters leave nothing eligible.
- */
-function resolveTypeFilter(filters) {
-  const requireSets = filters
-    .filter(f => f.type === 'objectType' && f.mode === 'require')
-    .map(f => new Set((f.values || []).map(v => v.toLowerCase())));
-  const excludeValues = new Set(
-    filters
-      .filter(f => f.type === 'objectType' && f.mode === 'exclude')
-      .flatMap(f => f.values || [])
-      .map(v => v.toLowerCase())
-  );
-
-  if (requireSets.length === 0 && excludeValues.size === 0) return null;
-
-  // Use discovered values from the cache when available; fall back to static defaults.
-  const knownTypes = _discoveredValues.objectType.length > 0
-    ? _discoveredValues.objectType.map(v => v.value)
-    : CLASSIFICATION_TYPES;
-
-  let eligible = knownTypes;
-  if (requireSets.length > 0) {
-    eligible = eligible.filter(n => requireSets.every(s => s.has(n.toLowerCase())));
-  }
-  if (excludeValues.size > 0) {
-    eligible = eligible.filter(n => !excludeValues.has(n.toLowerCase()));
-  }
-  if (requireSets.length > 0 && eligible.length === 0) {
-    throw new Error('No object types eligible after applying filters');
-  }
-  return new Set(eligible.map(n => n.toLowerCase()));
-}
 
 /**
  * Apply a simple enum filter against a record field.
@@ -434,9 +395,6 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   const searchFilter = filters.find(f => f.type === 'search' && f.mode === 'require');
   const searchTerm = (searchFilter?.values?.[0] || '').toLowerCase().trim();
 
-  // Classification filter
-  const eligibleTypes = resolveTypeFilter(filters);
-
   // Build the eligible pool
   let pool = records;
 
@@ -455,10 +413,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     );
   }
 
-  if (eligibleTypes !== null) {
-    pool = pool.filter(r => r.visualBrowserClassification && eligibleTypes.has(r.visualBrowserClassification.toLowerCase()));
-  }
-
+  pool = applyEnumFilter(pool, filters, 'objectType', 'classification');
   pool = applyEnumFilter(pool, filters, 'subclassification', 'subclassification');
   pool = applyEnumFilter(pool, filters, 'timePeriod', 'timePeriod');
 
