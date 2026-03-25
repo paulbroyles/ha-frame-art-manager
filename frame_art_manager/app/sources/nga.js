@@ -201,7 +201,6 @@ let _cachePromise = null;   // In-flight build promise (prevents duplicate fetch
  * @returns {Promise<Array>}
  */
 async function buildCache() {
-  console.log('[nga] Downloading NGA objects CSV...');
 
   // Download sequentially so we never hold both large CSV texts in memory at once.
   // objects.csv can be 50–80 MB (provenancetext etc.); parallel download doubles peak usage.
@@ -215,12 +214,8 @@ async function buildCache() {
       objectMap.set(obj.objectid, obj);
     }
   }
-  console.log(`[nga] Loaded ${objectMap.size} objects`);
-
   // Release the objects CSV text before downloading the images CSV
   objectsResp.data = null;
-
-  console.log('[nga] Downloading NGA images CSV...');
   const imagesResp = await axios.get(IMAGES_CSV_URL, { responseType: 'text', timeout: 60000 });
 
   // Collect the best open-access image per object.
@@ -269,8 +264,6 @@ async function buildCache() {
     });
   }
 
-  console.log(`[nga] Cache built: ${records.length} eligible records`);
-
   // Discover unique timePeriod and subclassification values for dynamic filter types.
   // Sort timePeriod by numeric start year; subclassification alphabetically.
   const periodSet = new Set();
@@ -299,8 +292,6 @@ async function buildCache() {
   _discoveredValues.timePeriod        = sortedPeriods.map(v => ({ value: v, label: v }));
   _discoveredValues.subclassification = sortedSubclasses.map(v => ({ value: v, label: v }));
   _discoveredValues.objectType        = sortedObjectTypes.map(v => ({ value: v, label: v }));
-
-  console.log(`[nga] Discovered ${sortedPeriods.length} time periods, ${sortedSubclasses.length} subclassifications, ${sortedObjectTypes.length} object types: ${JSON.stringify(sortedObjectTypes)}`);
 
   return records;
 }
@@ -425,7 +416,6 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     pool = pool.filter(r => r.openAccess);
   }
 
-  console.log(`[nga] pool size after filters: ${pool.length} (filters: ${JSON.stringify(filters)}, aspectRatio: ${aspectRatio})`);
 
   if (aspectRatio !== 'all') {
     pool = pool.filter(r => {
@@ -447,8 +437,6 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     const idx = Math.floor(Math.random() * pool.length);
     const record = pool[idx];
 
-    console.log(`[nga] attempt ${attempt + 1}: idx=${idx} objectId=${record.objectId} attribution="${record.attribution}" classification="${record.classification}"`);
-
     const imageUrl = `${record.iiifUrl}/full/!4800,4800/0/default.jpg`;
     let imageBuffer;
     try {
@@ -459,7 +447,6 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       continue;
     }
 
-    console.log(`[nga] success: objectId=${record.objectId} attribution="${record.attribution}"`);
     return {
       imageBuffer,
       contentType: 'image/jpeg',
