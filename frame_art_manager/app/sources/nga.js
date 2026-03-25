@@ -51,8 +51,9 @@ const PERIOD_DEFAULTS = [
 // Module-level store for filter values discovered when the cache loads.
 // getFilterTypes() reads from here so the route always returns up-to-date values.
 const _discoveredValues = {
-  timePeriod:      PERIOD_DEFAULTS.map(v => ({ value: v, label: v })),
-  subclassification: [],
+  timePeriod:         PERIOD_DEFAULTS.map(v => ({ value: v, label: v })),
+  subclassification:  [],
+  objectType:         CLASSIFICATION_TYPES.map(v => ({ value: v, label: v })),
 };
 
 // ── CSV parser ────────────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ const _discoveredValues = {
 // all of them exhausts the container's heap.
 const OBJECT_COLS = [
   'objectid', 'title', 'attribution', 'classification', 'subclassification',
+  'visualbrowserclassification',
   'medium', 'dimensions', 'displaydate', 'creditline', 'visualbrowsertimespan', 'isvirtual',
 ];
 const IMAGE_COLS = [
@@ -210,20 +212,21 @@ async function buildCache() {
     const obj = objectMap.get(objectId);
     const oa = (img.openaccess || '').toLowerCase();
     records.push({
-      objectId:          obj.objectid,
-      title:             obj.title                || null,
-      attribution:       obj.attribution          || null,
-      classification:    obj.classification       || null,
-      subclassification: obj.subclassification    || null,
-      medium:            obj.medium               || null,
-      dimensions:        obj.dimensions           || null,
-      displaydate:       obj.displaydate          || null,
-      creditline:        obj.creditline           || null,
-      timePeriod:        obj.visualbrowsertimespan || null,
-      openAccess:        oa === '1' || oa === 'true', // normalize to boolean
-      iiifUrl:           img.iiifurl.replace(/\/$/, ''), // strip trailing slash
-      width:             parseInt(img.width,  10) || 0,
-      height:            parseInt(img.height, 10) || 0,
+      objectId:                  obj.objectid,
+      title:                     obj.title                       || null,
+      attribution:               obj.attribution                 || null,
+      classification:            obj.classification              || null,
+      visualBrowserClassification: obj.visualbrowserclassification || null,
+      subclassification:         obj.subclassification           || null,
+      medium:                    obj.medium                      || null,
+      dimensions:                obj.dimensions                  || null,
+      displaydate:               obj.displaydate                 || null,
+      creditline:                obj.creditline                  || null,
+      timePeriod:                obj.visualbrowsertimespan       || null,
+      openAccess:                oa === '1' || oa === 'true', // normalize to boolean
+      iiifUrl:                   img.iiifurl.replace(/\/$/, ''), // strip trailing slash
+      width:                     parseInt(img.width,  10) || 0,
+      height:                    parseInt(img.height, 10) || 0,
     });
   }
 
@@ -233,9 +236,11 @@ async function buildCache() {
   // Sort timePeriod by numeric start year; subclassification alphabetically.
   const periodSet = new Set();
   const subclassSet = new Set();
+  const objectTypeSet = new Set();
   for (const r of records) {
     if (r.timePeriod) periodSet.add(r.timePeriod);
     if (r.subclassification) subclassSet.add(r.subclassification);
+    if (r.visualBrowserClassification) objectTypeSet.add(r.visualBrowserClassification);
   }
 
   const sortedPeriods = [...periodSet].sort((a, b) => {
@@ -244,11 +249,19 @@ async function buildCache() {
     return numA - numB;
   });
   const sortedSubclasses = [...subclassSet].sort();
+  // Sort objectType values with known types first (matching CLASSIFICATION_TYPES order),
+  // then any additional values discovered from the data alphabetically.
+  const knownLower = CLASSIFICATION_TYPES.map(v => v.toLowerCase());
+  const sortedObjectTypes = [
+    ...CLASSIFICATION_TYPES.filter(v => objectTypeSet.has(v)),
+    ...[...objectTypeSet].filter(v => !knownLower.includes(v.toLowerCase())).sort(),
+  ];
 
-  _discoveredValues.timePeriod      = sortedPeriods.map(v => ({ value: v, label: v }));
+  _discoveredValues.timePeriod        = sortedPeriods.map(v => ({ value: v, label: v }));
   _discoveredValues.subclassification = sortedSubclasses.map(v => ({ value: v, label: v }));
+  _discoveredValues.objectType        = sortedObjectTypes.map(v => ({ value: v, label: v }));
 
-  console.log(`[nga] Discovered ${sortedPeriods.length} time periods, ${sortedSubclasses.length} subclassifications`);
+  console.log(`[nga] Discovered ${sortedPeriods.length} time periods, ${sortedSubclasses.length} subclassifications, ${sortedObjectTypes.length} object types`);
 
   return records;
 }
@@ -279,8 +292,9 @@ async function getCache() {
 // ── Filter helpers ────────────────────────────────────────────────────────────
 
 /**
- * Resolve objectType filters into a Set of eligible lowercase classification names,
+ * Resolve objectType filters into a Set of eligible lowercase visualbrowserclassification names,
  * or null if no type filter is active.
+ * Uses discovered values when available (after cache build), CLASSIFICATION_TYPES otherwise.
  * Throws if require filters leave nothing eligible.
  */
 function resolveTypeFilter(filters) {
@@ -296,7 +310,12 @@ function resolveTypeFilter(filters) {
 
   if (requireSets.length === 0 && excludeValues.size === 0) return null;
 
-  let eligible = CLASSIFICATION_TYPES;
+  // Use discovered values from the cache when available; fall back to static defaults.
+  const knownTypes = _discoveredValues.objectType.length > 0
+    ? _discoveredValues.objectType.map(v => v.value)
+    : CLASSIFICATION_TYPES;
+
+  let eligible = knownTypes;
   if (requireSets.length > 0) {
     eligible = eligible.filter(n => requireSets.every(s => s.has(n.toLowerCase())));
   }
@@ -396,7 +415,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   }
 
   if (eligibleTypes !== null) {
-    pool = pool.filter(r => r.classification && eligibleTypes.has(r.classification.toLowerCase()));
+    pool = pool.filter(r => r.visualBrowserClassification && eligibleTypes.has(r.visualBrowserClassification.toLowerCase()));
   }
 
   pool = applyEnumFilter(pool, filters, 'subclassification', 'subclassification');
@@ -607,11 +626,11 @@ function getFilterTypes() {
     {
       type: 'objectType',
       label: 'Object Type',
-      description: 'Filter by broad artwork classification (e.g. Painting, Print, Sculpture).',
+      description: 'Filter by broad artwork classification (e.g. Painting, Print, Sculpture). Values are discovered from the collection.',
       modes: ['require', 'exclude'],
       multiValue: true,
       modeDetermining: false,
-      values: CLASSIFICATION_TYPES.map(name => ({ value: name, label: name })),
+      values: _discoveredValues.objectType,
     },
     {
       type: 'subclassification',

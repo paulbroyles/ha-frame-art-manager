@@ -14,13 +14,14 @@ Two CSV files are downloaded from the NGA opendata GitHub repository and joined 
 
 | File | URL | Key columns used |
 |------|-----|-----------------|
-| `objects.csv` | `raw.githubusercontent.com/NationalGalleryOfArt/opendata/main/data/objects.csv` | `objectid`, `title`, `attribution`, `classification`, `medium`, `dimensions`, `displaydate`, `creditline`, `isvirtual` |
-| `published_images.csv` | `raw.githubusercontent.com/NationalGalleryOfArt/opendata/main/data/published_images.csv` | `depictstmsobjectid`, `iiifurl`, `width`, `height`, `openaccess`, `viewtype` |
+| `objects.csv` | `raw.githubusercontent.com/NationalGalleryOfArt/opendata/main/data/objects.csv` | `objectid`, `title`, `attribution`, `classification`, `visualbrowserclassification`, `subclassification`, `medium`, `dimensions`, `displaydate`, `creditline`, `visualbrowsertimespan`, `isvirtual` |
+| `published_images.csv` | `raw.githubusercontent.com/NationalGalleryOfArt/opendata/main/data/published_images.csv` | `depictstmsobjectid`, `iiifurl`, `width`, `height`, `openaccess`, `viewtype`, `sequence` |
 
 **Join key**: `objects.objectid` = `published_images.depictstmsobjectid`
 
 **Eligibility criteria**:
-- `published_images.openaccess = 1` (public domain)
+- `objects.isvirtual != 1` (no virtual/group records)
+- Best image per object selected by: primary viewtype > lowest sequence number
 - `published_images.viewtype` is `primary` or `front` (one image per object)
 - `objects.isvirtual != 1` (no virtual/group records)
 
@@ -69,10 +70,7 @@ https://www.nga.gov/collection/art-object-page.{objectid}.html
 All filters are applied in-memory against the cached records. Multiple filters of the same type intersect (AND); multiple filter entries of different types also intersect.
 
 ### Object Type (`objectType`)
-Maps to `objects.classification`. Supported values (case-insensitive):
-- Painting, Drawing, Print, Photograph, Sculpture, Decorative Art, Textile/Fashion, Portfolio
-
-Any classification value not in this list is accessible via random shuffle (no filter) but cannot be targeted by the objectType filter.
+Maps to `objects.visualbrowserclassification` — the same field the NGA website uses for Browse-by-Type navigation. Values are **discovered dynamically** from the CSV when the cache loads. Common values: Painting, Drawing, Print, Photograph, Sculpture, Decorative Art, Textile/Fashion, Portfolio.
 
 ### Sub-type (`subclassification`)
 Maps to `objects.subclassification`. More granular than objectType — e.g., "etching", "lithograph", "oil", "daguerreotype", "chalk". Values are **discovered dynamically** from the CSV when the cache loads; the filter UI shows the full list from actual data. Useful for focusing on a specific print technique, photographic process, etc.
