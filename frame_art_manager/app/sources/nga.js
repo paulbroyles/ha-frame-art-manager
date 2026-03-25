@@ -57,13 +57,44 @@ const _discoveredValues = {
 
 // ── CSV parser ────────────────────────────────────────────────────────────────
 
+// Columns we actually need from each CSV.
+// Keeping this list tight is critical: objects.csv has 27 columns including
+// provenancetext, inscription, markings, etc. that can be very long — parsing
+// all of them exhausts the container's heap.
+const OBJECT_COLS = [
+  'objectid', 'title', 'attribution', 'classification', 'subclassification',
+  'medium', 'dimensions', 'displaydate', 'creditline', 'visualbrowsertimespan', 'isvirtual',
+];
+const IMAGE_COLS = [
+  'iiifurl', 'viewtype', 'width', 'height', 'openaccess', 'depictstmsobjectid',
+];
+
 /**
- * Parse a single CSV line, handling quoted fields with embedded commas and "" escapes.
+ * Parse the header row and return a Map<columnIndex → fieldName> for only the
+ * columns listed in desiredCols, plus the highest needed index.
  */
-function parseCsvLine(line) {
-  const fields = [];
+function buildColIndex(headerLine, desiredCols) {
+  const headers = headerLine.split(',').map(h => h.replace(/^"|"$/g, '').trim());
+  const idxToCol = new Map();
+  for (const col of desiredCols) {
+    const idx = headers.indexOf(col);
+    if (idx !== -1) idxToCol.set(idx, col);
+  }
+  const maxIdx = idxToCol.size ? Math.max(...idxToCol.keys()) : -1;
+  return { idxToCol, maxIdx };
+}
+
+/**
+ * Parse one CSV data line, extracting only the columns in idxToCol.
+ * Stops parsing as soon as maxIdx is passed to avoid processing long trailing fields
+ * (e.g. provenancetext that can be thousands of characters).
+ */
+function parseLine(line, idxToCol, maxIdx) {
+  const result = {};
   let field = '';
   let inQuotes = false;
+  let colIdx = 0;
+
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
     if (inQuotes) {
@@ -71,32 +102,45 @@ function parseCsvLine(line) {
       else if (ch === '"') { inQuotes = false; }
       else { field += ch; }
     } else {
-      if (ch === '"') { inQuotes = true; }
-      else if (ch === ',') { fields.push(field); field = ''; }
-      else { field += ch; }
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        if (idxToCol.has(colIdx)) result[idxToCol.get(colIdx)] = field;
+        field = '';
+        colIdx++;
+        if (colIdx > maxIdx) break; // all needed columns collected — stop early
+      } else {
+        field += ch;
+      }
     }
   }
-  fields.push(field);
-  return fields;
+  if (colIdx <= maxIdx && idxToCol.has(colIdx)) result[idxToCol.get(colIdx)] = field;
+  return result;
 }
 
 /**
- * Parse CSV text (header + data rows) into an array of objects keyed by the header row.
+ * Parse a CSV text string, extracting only desiredCols from each row.
+ * Much more memory-efficient than full parsing: avoids allocating per-row arrays
+ * and stops parsing each line once the last needed column is reached.
+ *
+ * @param {string} text
+ * @param {string[]} desiredCols
+ * @returns {Object[]}
  */
-function parseCsv(text) {
-  const lines = text.split('\n');
-  if (lines.length < 2) return [];
-  const headers = parseCsvLine(lines[0]);
+function parseCsvSelective(text, desiredCols) {
+  const nl = text.indexOf('\n');
+  if (nl === -1) return [];
+  const { idxToCol, maxIdx } = buildColIndex(text.slice(0, nl), desiredCols);
+  if (maxIdx === -1) return [];
+
   const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    const fields = parseCsvLine(line);
-    const row = {};
-    for (let j = 0; j < headers.length; j++) {
-      row[headers[j]] = fields[j] ?? '';
-    }
-    rows.push(row);
+  let pos = nl + 1;
+  while (pos < text.length) {
+    let end = text.indexOf('\n', pos);
+    if (end === -1) end = text.length;
+    const line = text.slice(pos, end).trimEnd();
+    if (line) rows.push(parseLine(line, idxToCol, maxIdx));
+    pos = end + 1;
   }
   return rows;
 }
@@ -115,29 +159,31 @@ let _cachePromise = null;   // In-flight build promise (prevents duplicate fetch
  * @returns {Promise<Array>}
  */
 async function buildCache() {
-  console.log('[nga] Downloading NGA open data CSVs...');
+  console.log('[nga] Downloading NGA objects CSV...');
 
-  const [objectsResp, imagesResp] = await Promise.all([
-    axios.get(OBJECTS_CSV_URL, { responseType: 'text', timeout: 60000 }),
-    axios.get(IMAGES_CSV_URL,  { responseType: 'text', timeout: 60000 }),
-  ]);
+  // Download sequentially so we never hold both large CSV texts in memory at once.
+  // objects.csv can be 50–80 MB (provenancetext etc.); parallel download doubles peak usage.
+  const objectsResp = await axios.get(OBJECTS_CSV_URL, { responseType: 'text', timeout: 60000 });
 
-  const objects = parseCsv(objectsResp.data);
-  const images  = parseCsv(imagesResp.data);
-
-  console.log(`[nga] Parsed ${objects.length} objects, ${images.length} images`);
-
-  // Build lookup: objectid → object row (skip virtual objects)
+  // Parse only the columns we need; stop each line at the last needed column index
+  // to avoid allocating memory for long trailing fields (provenancetext, markings, etc.)
   const objectMap = new Map();
-  for (const obj of objects) {
+  for (const obj of parseCsvSelective(objectsResp.data, OBJECT_COLS)) {
     if (obj.objectid && obj.isvirtual !== '1') {
       objectMap.set(obj.objectid, obj);
     }
   }
+  console.log(`[nga] Loaded ${objectMap.size} objects`);
+
+  // Release the objects CSV text before downloading the images CSV
+  objectsResp.data = null;
+
+  console.log('[nga] Downloading NGA images CSV...');
+  const imagesResp = await axios.get(IMAGES_CSV_URL, { responseType: 'text', timeout: 60000 });
 
   // Join: open-access images with primary/front viewtype
   const records = [];
-  for (const img of images) {
+  for (const img of parseCsvSelective(imagesResp.data, IMAGE_COLS)) {
     if (img.openaccess !== '1') continue;
     const vt = (img.viewtype || '').toLowerCase();
     if (vt && vt !== 'primary' && vt !== 'front') continue;
