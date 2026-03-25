@@ -419,7 +419,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 
   if (aspectRatio !== 'all') {
     pool = pool.filter(r => {
-      if (!r.width || !r.height) return false; // dimensions unknown; exclude when filtering by orientation
+      if (!r.width || !r.height) return true; // dimensions unknown; include and let route-level check handle orientation
       const isLandscape = r.width > r.height;
       if (aspectRatio === 'landscape') return isLandscape;
       if (aspectRatio === 'portrait') return !isLandscape;
