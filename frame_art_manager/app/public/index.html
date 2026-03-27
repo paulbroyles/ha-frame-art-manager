@@ -1320,11 +1320,12 @@
 
   <!-- Mood Modal -->
   <div id="mood-modal" class="modal">
-    <div class="modal-content tagset-modal">
+    <div class="modal-content">
       <button class="close close-simple" id="mood-modal-close">✕</button>
       <div class="modal-details">
         <h3 id="mood-modal-title">New Mood</h3>
-
+      </div>
+      <div class="modal-body-scroll">
         <form id="mood-form">
           <!-- Label + ID -->
           <div class="form-group">
@@ -1399,11 +1400,11 @@
           <input type="hidden" id="mood-original-id" />
         </form>
       </div>
-      <div class="tagset-modal-actions">
-        <div class="tagset-modal-actions-left">
+      <div class="modal-actions" style="display:flex;justify-content:space-between;align-items:center;padding:12px 20px;border-top:1px solid #eee;background:#f9f9f9;">
+        <div>
           <button type="button" id="delete-mood-btn" class="btn-danger" style="display:none;">Delete</button>
         </div>
-        <div class="tagset-modal-actions-right">
+        <div style="display:flex;gap:10px;">
           <button type="button" id="cancel-mood-btn" class="btn-secondary">Cancel</button>
           <button type="submit" form="mood-form" id="save-mood-btn" class="btn-primary">Save Mood</button>
         </div>
