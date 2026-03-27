@@ -12027,6 +12027,25 @@ input[type="checkbox"]:checked + .toggle-text {
 
 /* ── Moods UI ─────────────────────────────────────────────────────────────── */
 
+/* Mood modal: override tagset-modal's overflow:hidden so the form scrolls.
+   Also force the form and its children to stay within the modal width. */
+#mood-modal .modal-details {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+#mood-modal form,
+#mood-modal .form-group {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+#mood-modal .tagset-tag-pool {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
 /* Chip input area (for search_terms / reject_terms free-text entry) */
 .chip-input-wrapper {
   border: 1px solid #ddd;
