@@ -18236,9 +18236,9 @@ function openMoodModal(moodId) {
   document.getElementById('delete-mood-btn').style.display = moodId ? '' : 'none';
 
   // Populate tag pools
-  const allTags = Object.keys(window.allTags || {}).sort();
-  renderMoodTagPool('mood-boost-pool', allTags, mood.boost_tags || [], 'boost');
-  renderMoodTagPool('mood-suppress-pool', allTags, mood.suppress_tags || [], 'suppress');
+  const tagPool = [...allTags];
+  renderMoodTagPool('mood-boost-pool', tagPool, mood.boost_tags || [], 'boost');
+  renderMoodTagPool('mood-suppress-pool', tagPool, mood.suppress_tags || [], 'suppress');
   renderMoodSelectedTags('mood-boost-tags', mood.boost_tags || [], 'boost');
   renderMoodSelectedTags('mood-suppress-tags', mood.suppress_tags || [], 'suppress');
 
@@ -18303,8 +18303,8 @@ function renderMoodSelectedTags(containerId, selected, section) {
       const tag = chip.dataset.tag;
       const sec = chip.dataset.section;
       moodModalTags[sec] = moodModalTags[sec].filter(t => t !== tag);
-      const allTags = Object.keys(window.allTags || {}).sort();
-      refreshMoodTagSection(sec, allTags);
+      const tagPool = [...allTags];
+      refreshMoodTagSection(sec, tagPool);
     });
   });
 }
