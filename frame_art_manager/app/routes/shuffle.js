@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const MetadataHelper = require('../metadata_helper');
 const { readTagsets } = require('./tagsets');
+const { readMoods } = require('./moods');
 const { readWebSourcesConfig, getArtistCounts } = require('./web_sources');
 
 // Virtual tag constants (mirrored from frame-art-shuffler)
@@ -180,6 +181,111 @@ async function makeWebSourceResponse(tag, { eligibleCount, freshCount, usedFallb
   return { type: 'web_source', virtualTagId, eligibleCount, selectedTag: tag, freshCount: 0, usedFallback: false };
 }
 
+// ── Mood scoring constants ─────────────────────────────────────────────────
+// Each matching boost_tag multiplies the score by (1 + strength * BOOST_FACTOR)
+const BOOST_FACTOR = 0.5;
+// Each matching suppress_tag (penalize mode) multiplies score by SUPPRESS_PENALTY
+const SUPPRESS_PENALTY = 0.2;
+
+/**
+ * Compute a mood-adjusted score for a single image.
+ *
+ * @param {string[]} imageTags  Tags on the image
+ * @param {Array}    activeMoodDefs  Array of resolved mood definition objects
+ * @param {boolean}  inBasePool  Whether this image is in the base tagset pool
+ * @returns {number} Final weighted score (log-compressed for diminishing returns)
+ */
+function scoreMoodImage(imageTags, activeMoodDefs, inBasePool = true) {
+  const tagSet = new Set(imageTags);
+  let score = inBasePool ? 1.0 : 0.5; // base pool images start higher
+
+  for (const mood of activeMoodDefs) {
+    const boostMatches = (mood.boost_tags || []).filter(t => tagSet.has(t)).length;
+    if (boostMatches > 0) {
+      score *= (1 + (mood.strength || 1.0) * boostMatches * BOOST_FACTOR);
+    }
+
+    if (mood.suppress_mode !== 'exclude') {
+      const suppressMatches = (mood.suppress_tags || []).filter(t => tagSet.has(t)).length;
+      if (suppressMatches > 0) {
+        score *= Math.pow(SUPPRESS_PENALTY, suppressMatches);
+      }
+    }
+  }
+
+  // Diminishing returns compression
+  return Math.log(1 + score);
+}
+
+/**
+ * Return true if an image is hard-suppressed (suppress_mode='exclude')
+ * by ANY active mood.
+ */
+function isMoodHardSuppressed(imageTags, activeMoodDefs) {
+  const tagSet = new Set(imageTags);
+  return activeMoodDefs.some(
+    mood => mood.suppress_mode === 'exclude' &&
+            (mood.suppress_tags || []).some(t => tagSet.has(t))
+  );
+}
+
+/**
+ * Get the baseline floor probability (0-1) from active moods.
+ * If any exclusive mood is active, floor = 0.
+ * Otherwise, the TV's configured baseline_floor is used (default 0).
+ */
+function getMoodBaselineFloor(activeMoodDefs, configuredFloor = 0) {
+  const hasExclusive = activeMoodDefs.some(m => m.exclusive);
+  return hasExclusive ? 0 : configuredFloor;
+}
+
+/**
+ * Build mood-derived web source search entries from active mood definitions.
+ *
+ * Moods with search_terms and search_compose !== false are merged into a single
+ * composed query (AND semantics via joined keyword string). Moods with
+ * search_compose === false each produce an independent search entry.
+ *
+ * @param {Array} activeMoodDefs  Resolved mood definition objects
+ * @returns {Array} Entries with { keyword, weight } for pool selection
+ */
+function buildMoodSearchEntries(activeMoodDefs) {
+  const entries = [];
+  const composing = activeMoodDefs.filter(
+    m => (m.search_terms || []).length > 0 && m.search_compose !== false
+  );
+  if (composing.length > 0) {
+    const keyword = composing.flatMap(m => m.search_terms).join(' ');
+    const weight = composing.reduce((s, m) => s + (m.strength || 1.0), 0);
+    entries.push({ keyword, weight });
+  }
+  const independent = activeMoodDefs.filter(
+    m => (m.search_terms || []).length > 0 && m.search_compose === false
+  );
+  for (const mood of independent) {
+    entries.push({ keyword: mood.search_terms.join(' '), weight: mood.strength || 1.0 });
+  }
+  return entries;
+}
+
+/**
+ * Pick one web source entry from the combined pool of virtual tags and
+ * mood-derived keyword searches, using weighted random selection.
+ *
+ * @param {string[]} virtualWebTags   Virtual web source tags (ws:* strings)
+ * @param {object}   tagWeights       Per-tag weights from tagset config
+ * @param {Array}    moodSearchEntries Entries from buildMoodSearchEntries()
+ * @returns {{ kind: 'vtag', id: string } | { kind: 'mood', keyword: string } | null}
+ */
+function selectWebEntry(virtualWebTags, tagWeights, moodSearchEntries) {
+  const pool = [
+    ...virtualWebTags.map(id => ({ kind: 'vtag', id, weight: tagWeights[id] ?? 1.0 })),
+    ...moodSearchEntries.map(e => ({ kind: 'mood', keyword: e.keyword, weight: e.weight })),
+  ];
+  if (pool.length === 0) return null;
+  return weightedRandomChoice(pool, e => e.weight);
+}
+
 /**
  * POST /api/shuffle/select
  *
@@ -215,6 +321,7 @@ router.post('/select', async (req, res) => {
       weightingType = 'image',
       currentImage = null,
       recentImages = [],
+      activeMoods = [],
     } = req.body;
 
     // If tagsetName is provided, resolve the tagset definition locally.
@@ -228,6 +335,41 @@ router.post('/select', async (req, res) => {
         excludeTags = tagset.exclude_tags || [];
         tagWeights = tagset.tag_weights || {};
         weightingType = tagset.weighting_type || 'image';
+      }
+    }
+
+    // Resolve active mood definitions
+    let activeMoodDefs = [];
+    if (activeMoods && activeMoods.length > 0) {
+      try {
+        const moodsConfig = await readMoods(req.frameArtPath);
+        activeMoodDefs = activeMoods
+          .map(id => moodsConfig.moods[id])
+          .filter(Boolean);
+      } catch (err) {
+        console.warn('[shuffle/select] Could not read moods:', err.message);
+      }
+    }
+
+    // If an exclusive mood is active, redirect pool to that mood's boost_tags
+    const exclusiveMoods = activeMoodDefs.filter(m => m.exclusive);
+    const activeMoodsTotalStrength = activeMoodDefs.reduce((s, m) => s + (m.strength || 1.0), 0);
+    let moodExpandedTags = new Set(); // tags added from mood boost_tags beyond base pool
+
+    if (exclusiveMoods.length > 0) {
+      // Highest-strength exclusive mood wins
+      const winnerMood = exclusiveMoods.reduce((a, b) => (b.strength || 1.0) > (a.strength || 1.0) ? b : a);
+      includeTags = winnerMood.boost_tags || [];
+      excludeTags = [...excludeTags, ...(winnerMood.suppress_tags || [])];
+      tagWeights = {};
+      weightingType = 'image';
+    } else if (activeMoodDefs.length > 0) {
+      // Normal mode: expand pool with mood boost_tags not already in include_tags
+      const baseTagSet = new Set(includeTags.filter(t => !isVirtualWebTag(t)));
+      for (const mood of activeMoodDefs) {
+        for (const tag of (mood.boost_tags || [])) {
+          if (!baseTagSet.has(tag)) moodExpandedTags.add(tag);
+        }
       }
     }
 
@@ -251,12 +393,21 @@ router.post('/select', async (req, res) => {
     // Separate virtual web source tags from real library tags
     const virtualWebTags = includeTags.filter(isVirtualWebTag);
     const libraryIncludeTags = includeTags.filter(t => !isVirtualWebTag(t));
-    const hasWebSources = virtualWebTags.length > 0;
 
-    // Only virtual web tags — pick one weighted-randomly and return sentinel
+    // Mood-derived keyword search entries compete alongside virtual tags in the pool.
+    // Only generate entries when web sources are available (mood-only search with no
+    // virtual tags is excluded because exclusive moods already reset includeTags).
+    const moodSearchEntries = buildMoodSearchEntries(activeMoodDefs);
+    const hasMoodSearches = moodSearchEntries.length > 0;
+    const hasWebSources = virtualWebTags.length > 0 || hasMoodSearches;
+
+    // Only virtual web tags / mood searches — pick one and return sentinel
     if (hasWebSources && libraryIncludeTags.length === 0) {
-      const chosen = weightedRandomChoice(virtualWebTags, t => tagWeights[t] ?? 1.0);
-      return res.json(await makeWebSourceResponse(chosen, {
+      const webEntry = selectWebEntry(virtualWebTags, tagWeights, moodSearchEntries);
+      if (webEntry && webEntry.kind === 'mood') {
+        return res.json({ type: 'web_source', moodKeyword: webEntry.keyword, eligibleCount: 1, selectedTag: null, freshCount: 0, usedFallback: false });
+      }
+      return res.json(await makeWebSourceResponse(webEntry.id, {
         eligibleCount: 1, freshCount: 0, usedFallback: false,
         frameArtPath: req.frameArtPath, metadata, helper, currentImage, recentImages,
       }));
@@ -284,46 +435,84 @@ router.post('/select', async (req, res) => {
     }
 
     // ----------------------------------------------------------------
-    // IMAGE-WEIGHTED MODE: all eligible images equally likely
+    // IMAGE-WEIGHTED MODE: images weighted by mood scores
     // ----------------------------------------------------------------
     if (weightingType === 'image') {
+      // Base pool: images matching the tagset include tags
       const eligible = Object.entries(images)
         .filter(([, img]) => {
           const imgTags = new Set(img.tags || []);
-          if (!libraryIncludeTags.some(t => imgTags.has(t))) return false;
+          if (libraryIncludeTags.length > 0 && !libraryIncludeTags.some(t => imgTags.has(t))) return false;
           if (excludeTags.some(t => imgTags.has(t))) return false;
+          if (activeMoodDefs.length > 0 && isMoodHardSuppressed(img.tags || [], activeMoodDefs)) return false;
           return true;
         })
-        .map(([filename, img]) => ({ ...img, filename }));
+        .map(([filename, img]) => ({ ...img, filename, _inBasePool: true }));
 
-      const libraryCount = eligible.length;
+      // Mood-expanded pool: images matching mood boost_tags but not in base pool
+      const baseFilenames = new Set(eligible.map(img => img.filename));
+      let expandedEligible = [];
+      if (moodExpandedTags.size > 0) {
+        expandedEligible = Object.entries(images)
+          .filter(([filename, img]) => {
+            if (baseFilenames.has(filename)) return false; // already in base pool
+            const imgTags = new Set(img.tags || []);
+            if (excludeTags.some(t => imgTags.has(t))) return false;
+            if (isMoodHardSuppressed(img.tags || [], activeMoodDefs)) return false;
+            return [...moodExpandedTags].some(t => imgTags.has(t));
+          })
+          .map(([filename, img]) => ({ ...img, filename, _inBasePool: false }));
+      }
 
-      // Virtual web tags get effective count = avg images per library tag
+      const allEligible = [...eligible, ...expandedEligible];
+      const libraryCount = allEligible.length;
+
+      // Virtual web tags + mood search entries get effective count = avg images per library tag.
+      const totalWebEntryCount = virtualWebTags.length + moodSearchEntries.length;
       const perVtagEffective = hasWebSources && libraryIncludeTags.length > 0
-        ? Math.max(1, Math.floor(libraryCount / Math.max(1, libraryIncludeTags.length)))
+        ? Math.max(1, Math.floor(eligible.length / Math.max(1, libraryIncludeTags.length)))
         : hasWebSources ? 1 : 0;
-      const webEffective = perVtagEffective * virtualWebTags.length;
+      const webEffective = perVtagEffective * totalWebEntryCount;
       const eligibleCount = libraryCount + webEffective;
 
       if (eligibleCount === 0) return res.json({ type: 'none', eligibleCount: 0 });
 
-      // Roll for web source (proportional to effective share)
-      if (hasWebSources && Math.random() < webEffective / eligibleCount) {
-        const chosen = weightedRandomChoice(virtualWebTags, t => tagWeights[t] ?? 1.0);
-        return res.json(await makeWebSourceResponse(chosen, {
-          eligibleCount, freshCount: 0, usedFallback: false,
-          frameArtPath: req.frameArtPath, metadata, helper, currentImage, recentImages,
-        }));
+      // Compute library vs web split using mood-weighted library total
+      const moodsActive = activeMoodDefs.length > 0;
+      let libraryTotalWeight = 0;
+      if (moodsActive) {
+        for (const img of allEligible) {
+          libraryTotalWeight += scoreMoodImage(img.tags || [], activeMoodDefs, img._inBasePool);
+        }
+      } else {
+        libraryTotalWeight = allEligible.length;
       }
 
-      if (eligible.length === 0) return res.json({ type: 'none', eligibleCount });
+      // Roll for web source (proportional to effective share relative to total weight)
+      if (hasWebSources) {
+        const totalWeight = libraryTotalWeight + webEffective;
+        if (Math.random() < webEffective / totalWeight) {
+          const webEntry = selectWebEntry(virtualWebTags, tagWeights, moodSearchEntries);
+          if (webEntry && webEntry.kind === 'mood') {
+            return res.json({ type: 'web_source', moodKeyword: webEntry.keyword, eligibleCount, selectedTag: null, freshCount: 0, usedFallback: false });
+          }
+          return res.json(await makeWebSourceResponse(webEntry.id, {
+            eligibleCount, freshCount: 0, usedFallback: false,
+            frameArtPath: req.frameArtPath, metadata, helper, currentImage, recentImages,
+          }));
+        }
+      }
 
-      const candidates = eligible.filter(img => img.filename !== currentImage);
+      if (allEligible.length === 0) return res.json({ type: 'none', eligibleCount });
+
+      const candidates = allEligible.filter(img => img.filename !== currentImage);
       if (candidates.length === 0) {
-        // No library candidates — fall back to web source if available
         if (hasWebSources) {
-          const chosen = weightedRandomChoice(virtualWebTags, t => tagWeights[t] ?? 1.0);
-          return res.json(await makeWebSourceResponse(chosen, {
+          const webEntry = selectWebEntry(virtualWebTags, tagWeights, moodSearchEntries);
+          if (webEntry && webEntry.kind === 'mood') {
+            return res.json({ type: 'web_source', moodKeyword: webEntry.keyword, eligibleCount, selectedTag: null, freshCount: 0, usedFallback: false });
+          }
+          return res.json(await makeWebSourceResponse(webEntry.id, {
             eligibleCount, freshCount: 0, usedFallback: false,
             frameArtPath: req.frameArtPath, metadata, helper, currentImage, recentImages,
           }));
@@ -332,16 +521,23 @@ router.post('/select', async (req, res) => {
       }
 
       const { pool, freshCount, usedFallback } = applyRecencyPreference(candidates, recentImages);
-      const selected = selectRandom(pool);
 
+      let selected;
+      if (moodsActive) {
+        selected = weightedRandomChoice(pool, img => scoreMoodImage(img.tags || [], activeMoodDefs, img._inBasePool));
+      } else {
+        selected = selectRandom(pool);
+      }
+
+      const { _inBasePool: _bp, ...selectedClean } = selected || {};
       return res.json({
-        type: 'library', ...selected,
+        type: 'library', ...selectedClean,
         eligibleCount, selectedTag: null, freshCount, usedFallback,
       });
     }
 
     // ----------------------------------------------------------------
-    // TAG-WEIGHTED MODE: select tag first, then random image from pool
+    // TAG-WEIGHTED MODE: select tag first, then mood-weighted image from pool
     // ----------------------------------------------------------------
     const tagPools = buildTagPools(images, libraryIncludeTags, excludeTags, tagWeights);
 
@@ -349,18 +545,31 @@ router.post('/select', async (req, res) => {
     for (const pool of Object.values(tagPools)) {
       for (const img of pool) allEligible.add(img.filename);
     }
-    const eligibleCount = allEligible.size + (hasWebSources ? virtualWebTags.length : 0);
+    const totalWebEntryCountTagMode = virtualWebTags.length + moodSearchEntries.length;
+    const eligibleCount = allEligible.size + (hasWebSources ? totalWebEntryCountTagMode : 0);
 
     if (eligibleCount === 0) return res.json({ type: 'none', eligibleCount: 0 });
 
-    // Weighted tag selection with re-roll on empty pools
-    let remainingTags = [...includeTags];
+    // Weighted tag selection with re-roll on empty pools.
+    // Mood search entries are added to the pool as synthetic entrants so they compete
+    // alongside existing virtual tags. Each is assigned a unique placeholder key.
+    const moodSearchTagMap = new Map(moodSearchEntries.map((e, i) => [`__mood_search_${i}__`, e]));
+    let remainingTags = [
+      ...includeTags,
+      ...Array.from(moodSearchTagMap.keys()),
+    ];
     let selectedTag = null;
     let candidates = [];
 
     while (remainingTags.length > 0 && candidates.length === 0) {
-      const chosen = weightedRandomChoice(remainingTags, t => tagWeights[t] ?? 1.0);
+      const chosen = weightedRandomChoice(remainingTags, t => moodSearchTagMap.get(t)?.weight ?? tagWeights[t] ?? 1.0);
       selectedTag = chosen;
+
+      // Mood search entry wins — return a web_source response with the keyword.
+      const moodSearchEntry = moodSearchTagMap.get(chosen);
+      if (moodSearchEntry) {
+        return res.json({ type: 'web_source', moodKeyword: moodSearchEntry.keyword, eligibleCount, selectedTag: null, freshCount: 0, usedFallback: false });
+      }
 
       if (isVirtualWebTag(chosen)) {
         return res.json(await makeWebSourceResponse(chosen, {
@@ -378,10 +587,25 @@ router.post('/select', async (req, res) => {
       }
     }
 
+    // Apply hard suppression from moods to tag pools
+    if (activeMoodDefs.length > 0) {
+      for (const tag of Object.keys(tagPools)) {
+        tagPools[tag] = tagPools[tag].filter(
+          img => !isMoodHardSuppressed(img.tags || [], activeMoodDefs)
+        );
+      }
+    }
+
     if (candidates.length === 0) return res.json({ type: 'none', eligibleCount });
 
     const { pool: finalPool, freshCount, usedFallback } = applyRecencyPreference(candidates, recentImages);
-    const selected = selectRandom(finalPool);
+
+    let selected;
+    if (activeMoodDefs.length > 0) {
+      selected = weightedRandomChoice(finalPool, img => scoreMoodImage(img.tags || [], activeMoodDefs, true));
+    } else {
+      selected = selectRandom(finalPool);
+    }
 
     return res.json({
       type: 'library', ...selected,

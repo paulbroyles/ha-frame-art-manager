@@ -12024,3 +12024,91 @@ input[type="checkbox"]:checked + .toggle-text {
   background: #fdf0ed;
   border-color: #c0604a;
 }
+
+/* ── Moods UI ─────────────────────────────────────────────────────────────── */
+
+/* Chip input area (for search_terms / reject_terms free-text entry) */
+.chip-input-wrapper {
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: #fff;
+  min-height: 38px;
+}
+
+.chip-input-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.chip-input-area:empty {
+  display: none;
+}
+
+.chip-text-input {
+  border: none;
+  outline: none;
+  font-size: 13px;
+  padding: 2px 0;
+  background: transparent;
+  width: 100%;
+}
+
+/* Chips inside the area */
+.chip-removable {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: #e8f4fd;
+  border: 1px solid #bee3f8;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #2b6cb0;
+}
+
+.chip-remove {
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.6;
+}
+.chip-remove:hover {
+  opacity: 1;
+}
+
+/* Tag chips used in mood selected lists */
+.tag-chip-selected {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 14px;
+  font-size: 12px;
+  cursor: default;
+  border: 1px solid;
+}
+
+/* Mood tag pool pills (reuse pool style but add pointer) */
+.mood-pool-tag {
+  cursor: pointer;
+}
+
+/* Mood selected tags container reuses tagset-selected-tags styles */
+.mood-selected-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 14px;
+  font-size: 12px;
+  cursor: default;
+}
+
+.suppress-mode-label {
+  font-size: 12px;
+  color: #555;
+  cursor: pointer;
+}

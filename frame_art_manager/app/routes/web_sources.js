@@ -9,6 +9,7 @@ const { processWebSourceImage, solidBorderStrip, runPipeline, PRE_PROCESSORS, IM
 const { applyFieldFormat } = require('../utils/fieldFormatters');
 const MetadataHelper = require('../metadata_helper');
 const { autoLinkArtistFromWebSource } = require('../utils/enrichers');
+const { readMoods } = require('./moods');
 
 // Source modules — each must export fetchRandomArtwork, selectMode, metadataFields, and defaultMapping.
 // Optional: settingsSchema, getExtraOptions, getFilterTypes, getMetadataFields, alreadyProcessed.
@@ -1275,14 +1276,31 @@ async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio) {
   return { chosenSourceId, fetchResult, mergedFilters, extraOpts };
 }
 
-async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId }) {
+async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId, activeMoods = [], moodKeyword = null }) {
   const webSources = await readWebSourcesConfig(req.frameArtPath);
   const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
 
-  // Resolve virtual tag → sourceId + extra filters
+  // Load mood definitions for reject_terms filtering and filter injection.
+  let activeMoodDefs = [];
+  if (activeMoods.length > 0) {
+    try {
+      const moodsConfig = await readMoods(req.frameArtPath);
+      activeMoodDefs = activeMoods.map(id => moodsConfig.moods[id]).filter(Boolean);
+    } catch (err) {
+      console.warn('[web_sources] Could not load mood definitions:', err.message);
+    }
+  }
+  const moodRejectTerms = activeMoodDefs.flatMap(m => m.reject_terms || []).map(t => t.toLowerCase());
+  const moodFilters = activeMoodDefs.flatMap(m => m.filters || []);
+
+  // Resolve virtual tag → sourceId + extra filters.
+  // A mood keyword search overrides virtualTagId, behaving as a unified keyword search.
   let virtualTag = null;
   let chosenSourceId = sourceId;
-  if (virtualTagId) {
+  if (moodKeyword) {
+    // Treat as a synthetic unified keyword search virtual tag.
+    virtualTag = { id: '__mood_search__', sourceId: null, queryMode: 'search', queryParams: { keyword: moodKeyword }, filters: [] };
+  } else if (virtualTagId) {
     virtualTag = webSources.virtualTags[virtualTagId];
     if (!virtualTag) {
       const err = new Error(`Virtual tag "${virtualTagId}" not found`);
@@ -1295,14 +1313,15 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
   let prefetchedResult = null;
   let mergedFilters, extraOpts;
 
-  if (virtualTagId) {
-    // Virtual tag dispatch — handles both regular and unified-search tags.
+  if (virtualTag) {
+    // Virtual tag dispatch (including synthetic mood keyword tag) —
+    // handles regular, unified-search, and unified-artist tags.
     ({ chosenSourceId, fetchResult: prefetchedResult, mergedFilters, extraOpts }
       = await fetchFromVirtualTag(webSources, virtualTag, aspectRatio));
   } else {
     // Direct source selection (no virtual tag).
     if (!chosenSourceId) {
-      const err = new Error('Either virtualTagId or sourceId is required.');
+      const err = new Error('Either virtualTagId, moodKeyword, or sourceId is required.');
       err.statusCode = 400;
       throw err;
     }
@@ -1329,6 +1348,15 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
     extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
   }
 
+  // Inject active mood filters into the merged filter cascade.
+  // These are the same filter cascade objects as virtual tag filters, so they
+  // slot into the existing infrastructure (e.g., color filters for Google Arts).
+  if (moodFilters.length > 0) {
+    mergedFilters = mergeFilterCascade(mergedFilters, moodFilters);
+    // Discard the prefetched result so the retry loop fetches with the full filter set.
+    prefetchedResult = null;
+  }
+
   const fetcher = SOURCE_FETCHERS[chosenSourceId];
 
   // Fetch, with optional retry when:
@@ -1336,6 +1364,7 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
   //     all sources — catches anything a source's internal check misses)
   //   - image is below minimum resolution (skipLowRes)
   //   - image was recently shown on this TV (recency deduplication)
+  //   - image metadata contains mood reject_terms (best-effort post-fetch filter)
   const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
   const recentArtworkIds = new Set(webSources.webSourceRecency?.[deviceId] || []);
   const MAX_FETCH_ATTEMPTS = 5;
@@ -1384,6 +1413,24 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
           continue;
         }
         console.log(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts returned recently shown artwork; using last result`);
+      }
+    }
+
+    // Best-effort mood reject_terms filter: skip images whose metadata contains
+    // any of the reject terms. Falls through on the last attempt so we always
+    // return something rather than failing the shuffle.
+    if (moodRejectTerms.length > 0) {
+      const metaStr = [
+        fetchResult.metadata?.title,
+        fetchResult.metadata?.description,
+        fetchResult.metadata?.creator_name,
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (moodRejectTerms.some(term => metaStr.includes(term))) {
+        if (!isLast) {
+          console.warn(`[web_sources] Mood reject_terms matched metadata; retrying (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS})`);
+          continue;
+        }
+        console.warn(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts matched mood reject_terms; using last result`);
       }
     }
 
@@ -1447,7 +1494,7 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
 // Always returns { success, contentId, sourceId, virtualTagId?, metadata,
 //   artworkMetadata, cacheFile }.
 router.post('/fetch-and-send', async (req, res) => {
-  const { deviceId, select = true, sourceId, virtualTagId, screenOn = true, matte, tvOrientation } = req.body;
+  const { deviceId, select = true, sourceId, virtualTagId, screenOn = true, matte, tvOrientation, activeMoods = [], moodKeyword = null } = req.body;
 
   if (!deviceId) {
     return res.status(400).json({ error: 'deviceId is required' });
@@ -1458,7 +1505,7 @@ router.post('/fetch-and-send', async (req, res) => {
     let fetchResult;
     const helper = new MetadataHelper(req.frameArtPath);
     for (let attempt = 0; attempt < MAX_BLACKLIST_RETRIES; attempt++) {
-      fetchResult = await fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId });
+      fetchResult = await fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId, activeMoods, moodKeyword });
       const artworkUrl = fetchResult.artMetadata?.artworkUrl;
       if (!artworkUrl || !(await helper.isBlacklisted('web', artworkUrl))) break;
       console.log(`[fetch-and-send] Skipping blacklisted artwork (attempt ${attempt + 1}): ${artworkUrl}`);

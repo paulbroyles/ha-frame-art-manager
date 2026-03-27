@@ -1031,6 +1031,8 @@ function switchToAdvancedSubTab(tabName) {
     loadRecencyTab();
   } else if (targetTab === 'blacklist') {
     loadBlacklistTab();
+  } else if (targetTab === 'moods') {
+    loadMoodsTab();
   }
 }
 
@@ -1366,6 +1368,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initTvModal();
   initGalleryInfiniteScroll(); // Initialize infinite scroll for gallery
   initTagsetModalListeners(); // Initialize tagset modal event listeners
+  initMoodModalListeners();   // Initialize mood modal event listeners
   initWebSourceSettingsModal(); // Initialize web source settings modal
   initVirtualTagModal(); // Initialize virtual tag modal
   
@@ -18091,4 +18094,373 @@ async function reprocessTestWebSource() {
     showToast(`Error: ${error.message}`, 'error');
     if (btn) { btn.disabled = false; btn.textContent = 'Reprocess'; }
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MOODS — Dynamic Shuffle Composition
+// ─────────────────────────────────────────────────────────────────────────────
+
+let allMoods = {};        // id -> moodDef
+let moodModalOriginalId = null;  // null = create, string = edit
+
+// ── Data loading ─────────────────────────────────────────────────────────────
+
+async function loadMoodsData() {
+  try {
+    const resp = await fetch(`${API_BASE}/moods`);
+    const data = await resp.json();
+    allMoods = data.moods || {};
+  } catch (err) {
+    console.error('[moods] Failed to load moods:', err);
+    allMoods = {};
+  }
+}
+
+async function loadMoodsTab() {
+  await loadMoodsData();
+  renderMoodsTable();
+}
+
+// ── Table rendering ───────────────────────────────────────────────────────────
+
+function renderMoodsTable() {
+  const container = document.getElementById('moods-table-container');
+  if (!container) return;
+
+  const moodIds = Object.keys(allMoods).sort((a, b) => a.localeCompare(b));
+
+  if (moodIds.length === 0) {
+    container.innerHTML = '<p class="empty-state">No moods defined. Click "+ New Mood" to create one.</p>';
+    initNewMoodButton();
+    return;
+  }
+
+  const chipList = (items, cls = '') =>
+    items.length === 0
+      ? '<span class="tag-summary-none">—</span>'
+      : items.map(t => `<span class="tag-chip-inline ${cls}">${escapeHtml(t)}</span>`).join('');
+
+  let html = `
+    <table class="tagsets-table">
+      <thead>
+        <tr>
+          <th>ID / Label</th>
+          <th class="desktop-only">Boost Tags</th>
+          <th class="desktop-only">Suppress Tags</th>
+          <th class="desktop-only">Search Terms</th>
+          <th class="desktop-only th-weighting">Strength</th>
+          <th class="th-actions"></th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  for (const id of moodIds) {
+    const mood = allMoods[id];
+    const label = mood.label || id;
+    const boostChips = chipList(mood.boost_tags || []);
+    const suppressChips = chipList(mood.suppress_tags || [], 'exclude');
+    const searchStr = (mood.search_terms || []).join(', ') || '<span class="tag-summary-none">—</span>';
+    const exclusiveBadge = mood.exclusive
+      ? '<span class="weighting-badge" style="background:#c0392b;color:#fff;margin-left:4px;">excl</span>'
+      : '';
+    const suppressModeBadge = (mood.suppress_tags || []).length > 0 && mood.suppress_mode === 'exclude'
+      ? '<span class="weighting-badge" style="background:#555;color:#fff;margin-left:4px;">hard</span>'
+      : '';
+
+    html += `
+      <tr class="tagset-row clickable-row" data-mood-id="${escapeHtml(id)}">
+        <td class="td-name">
+          <div class="tagset-name-row">
+            <span class="tagset-name-text">${escapeHtml(label)}</span>
+            ${exclusiveBadge}
+          </div>
+          <div class="mobile-tagset-meta" style="font-size:11px;color:#888;">${escapeHtml(id)}</div>
+        </td>
+        <td class="td-include desktop-only">${boostChips}</td>
+        <td class="td-exclude desktop-only">${suppressChips}${suppressModeBadge}</td>
+        <td class="td-include desktop-only" style="font-size:12px;">${searchStr}</td>
+        <td class="td-weighting desktop-only"><span class="weighting-badge weighting-image">${mood.strength ?? 1.0}</span></td>
+        <td class="td-actions">
+          <button class="btn-icon mood-delete-btn" data-mood-id="${escapeHtml(id)}" title="Delete">×</button>
+        </td>
+      </tr>
+    `;
+  }
+
+  html += `</tbody></table>`;
+  container.innerHTML = html;
+
+  // Row click → edit modal
+  container.querySelectorAll('.tagset-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.mood-delete-btn')) return;
+      openMoodModal(row.dataset.moodId);
+    });
+  });
+
+  // Delete button
+  container.querySelectorAll('.mood-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.moodId;
+      if (confirm(`Delete mood "${id}"?`)) {
+        await deleteMood(id);
+      }
+    });
+  });
+
+  initNewMoodButton();
+}
+
+function initNewMoodButton() {
+  const btn = document.getElementById('new-mood-btn');
+  if (btn) btn.onclick = () => openMoodModal(null);
+}
+
+// ── Modal open/close ──────────────────────────────────────────────────────────
+
+function openMoodModal(moodId) {
+  moodModalOriginalId = moodId || null;
+  const mood = moodId ? (allMoods[moodId] || {}) : {};
+
+  document.getElementById('mood-modal-title').textContent = moodId ? 'Edit Mood' : 'New Mood';
+  document.getElementById('mood-original-id').value = moodId || '';
+  document.getElementById('mood-label-input').value = mood.label || '';
+  document.getElementById('mood-id-input').value = mood.id || moodId || '';
+  document.getElementById('mood-id-input').readOnly = !!moodId; // lock ID when editing
+  document.getElementById('mood-strength-input').value = mood.strength ?? 1.0;
+  document.getElementById('mood-exclusive').checked = !!mood.exclusive;
+  document.getElementById('mood-suppress-exclude').checked = mood.suppress_mode === 'exclude';
+  document.getElementById('mood-search-compose').checked = mood.search_compose !== false;
+  document.getElementById('delete-mood-btn').style.display = moodId ? '' : 'none';
+
+  // Populate tag pools
+  const allTags = Object.keys(window.allTags || {}).sort();
+  renderMoodTagPool('mood-boost-pool', allTags, mood.boost_tags || [], 'boost');
+  renderMoodTagPool('mood-suppress-pool', allTags, mood.suppress_tags || [], 'suppress');
+  renderMoodSelectedTags('mood-boost-tags', mood.boost_tags || [], 'boost');
+  renderMoodSelectedTags('mood-suppress-tags', mood.suppress_tags || [], 'suppress');
+
+  // Chip inputs
+  renderChipInput('mood-search-terms', mood.search_terms || []);
+  renderChipInput('mood-reject-terms', mood.reject_terms || []);
+
+  // Auto-generate ID from label when creating
+  if (!moodId) {
+    document.getElementById('mood-label-input').oninput = (e) => {
+      const slug = e.target.value.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '');
+      document.getElementById('mood-id-input').value = slug;
+    };
+  } else {
+    document.getElementById('mood-label-input').oninput = null;
+  }
+
+  document.getElementById('mood-modal').classList.add('active');
+}
+
+function closeMoodModal() {
+  document.getElementById('mood-modal').classList.remove('active');
+}
+
+// ── Tag pool rendering ────────────────────────────────────────────────────────
+
+// Track selected tags per section across re-renders
+const moodModalTags = { boost: [], suppress: [] };
+
+function renderMoodTagPool(poolId, allTags, selected, section) {
+  moodModalTags[section] = [...selected];
+  const pool = document.getElementById(poolId);
+  if (!pool) return;
+
+  const unselected = allTags.filter(t => !selected.includes(t));
+  pool.innerHTML = unselected.map(tag =>
+    `<span class="tag-pill pool-tag mood-pool-tag" data-tag="${escapeHtml(tag)}" data-section="${section}">${escapeHtml(tag)}</span>`
+  ).join('');
+
+  pool.querySelectorAll('.mood-pool-tag').forEach(pill => {
+    pill.addEventListener('click', () => {
+      const tag = pill.dataset.tag;
+      const sec = pill.dataset.section;
+      if (!moodModalTags[sec].includes(tag)) {
+        moodModalTags[sec].push(tag);
+        refreshMoodTagSection(sec, allTags);
+      }
+    });
+  });
+}
+
+function renderMoodSelectedTags(containerId, selected, section) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  container.innerHTML = selected.map(tag =>
+    `<span class="tag-chip-selected mood-selected-tag" data-tag="${escapeHtml(tag)}" data-section="${section}">${escapeHtml(tag)} <span class="chip-remove">×</span></span>`
+  ).join('');
+
+  container.querySelectorAll('.mood-selected-tag').forEach(chip => {
+    chip.querySelector('.chip-remove')?.addEventListener('click', () => {
+      const tag = chip.dataset.tag;
+      const sec = chip.dataset.section;
+      moodModalTags[sec] = moodModalTags[sec].filter(t => t !== tag);
+      const allTags = Object.keys(window.allTags || {}).sort();
+      refreshMoodTagSection(sec, allTags);
+    });
+  });
+}
+
+function refreshMoodTagSection(section, allTags) {
+  const poolId = section === 'boost' ? 'mood-boost-pool' : 'mood-suppress-pool';
+  const selectedId = section === 'boost' ? 'mood-boost-tags' : 'mood-suppress-tags';
+  renderMoodTagPool(poolId, allTags, moodModalTags[section], section);
+  renderMoodSelectedTags(selectedId, moodModalTags[section], section);
+}
+
+// ── Chip input (free-text terms) ──────────────────────────────────────────────
+
+function renderChipInput(containerId, terms) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = terms.map(t =>
+    `<span class="tag-chip-inline chip-removable" data-term="${escapeHtml(t)}">${escapeHtml(t)} <span class="chip-remove">×</span></span>`
+  ).join('');
+  container.querySelectorAll('.chip-removable').forEach(chip => {
+    chip.querySelector('.chip-remove')?.addEventListener('click', () => {
+      chip.remove();
+    });
+  });
+}
+
+function addChipFromInput(inputId, containerId) {
+  const input = document.getElementById(inputId);
+  const term = input ? input.value.trim() : '';
+  if (!term) return;
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  // Avoid duplicates
+  const existing = [...container.querySelectorAll('[data-term]')].map(c => c.dataset.term);
+  if (existing.includes(term)) { input.value = ''; return; }
+  const chip = document.createElement('span');
+  chip.className = 'tag-chip-inline chip-removable';
+  chip.dataset.term = term;
+  chip.innerHTML = `${escapeHtml(term)} <span class="chip-remove">×</span>`;
+  chip.querySelector('.chip-remove').addEventListener('click', () => chip.remove());
+  container.appendChild(chip);
+  input.value = '';
+}
+
+function getChipTerms(containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return [];
+  return [...container.querySelectorAll('[data-term]')].map(c => c.dataset.term);
+}
+
+// ── Save / Delete ─────────────────────────────────────────────────────────────
+
+async function saveMood(e) {
+  if (e) e.preventDefault();
+
+  const originalId = document.getElementById('mood-original-id').value;
+  const id = document.getElementById('mood-id-input').value.trim();
+  const label = document.getElementById('mood-label-input').value.trim();
+
+  if (!id || !/^[a-z0-9_-]+$/.test(id)) {
+    alert('Mood ID must be lowercase letters, numbers, underscores, or hyphens');
+    return;
+  }
+  if (!label) {
+    alert('Label is required');
+    return;
+  }
+
+  const payload = {
+    id,
+    label,
+    boost_tags: moodModalTags.boost,
+    suppress_tags: moodModalTags.suppress,
+    suppress_mode: document.getElementById('mood-suppress-exclude').checked ? 'exclude' : 'penalize',
+    search_terms: getChipTerms('mood-search-terms'),
+    search_compose: document.getElementById('mood-search-compose').checked,
+    reject_terms: getChipTerms('mood-reject-terms'),
+    filters: [],  // advanced use: populated via JSON editor in future
+    strength: parseFloat(document.getElementById('mood-strength-input').value) || 1.0,
+    exclusive: document.getElementById('mood-exclusive').checked,
+  };
+
+  try {
+    let resp;
+    if (originalId) {
+      if (originalId !== id) payload.newId = id;
+      resp = await fetch(`${API_BASE}/moods/${encodeURIComponent(originalId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } else {
+      resp = await fetch(`${API_BASE}/moods`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    const result = await resp.json();
+    if (result.success) {
+      closeMoodModal();
+      await loadMoodsTab();
+    } else {
+      alert(result.error || 'Failed to save mood');
+    }
+  } catch (err) {
+    console.error('[moods] Error saving mood:', err);
+    alert('Error saving mood: ' + err.message);
+  }
+}
+
+async function deleteMood(moodId) {
+  try {
+    const resp = await fetch(`${API_BASE}/moods/${encodeURIComponent(moodId)}`, { method: 'DELETE' });
+    const result = await resp.json();
+    if (result.success) {
+      delete allMoods[moodId];
+      renderMoodsTable();
+    } else {
+      alert(result.error || 'Failed to delete mood');
+    }
+  } catch (err) {
+    console.error('[moods] Error deleting mood:', err);
+    alert('Error deleting mood: ' + err.message);
+  }
+}
+
+// ── Modal listeners (initialized once at startup) ─────────────────────────────
+
+function initMoodModalListeners() {
+  const modal = document.getElementById('mood-modal');
+  if (!modal) return;
+
+  document.getElementById('mood-modal-close')?.addEventListener('click', closeMoodModal);
+  document.getElementById('cancel-mood-btn')?.addEventListener('click', closeMoodModal);
+  document.getElementById('mood-form')?.addEventListener('submit', saveMood);
+
+  document.getElementById('delete-mood-btn')?.addEventListener('click', async () => {
+    const id = document.getElementById('mood-original-id').value;
+    if (id && confirm(`Delete mood "${id}"?`)) {
+      await deleteMood(id);
+      closeMoodModal();
+    }
+  });
+
+  // Chip inputs: add on Enter
+  document.getElementById('mood-search-term-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); addChipFromInput('mood-search-term-input', 'mood-search-terms'); }
+  });
+  document.getElementById('mood-reject-term-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); addChipFromInput('mood-reject-term-input', 'mood-reject-terms'); }
+  });
+
+  // Close on background click
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeMoodModal();
+  });
 }
