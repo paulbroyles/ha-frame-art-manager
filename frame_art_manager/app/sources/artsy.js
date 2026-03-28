@@ -533,6 +533,74 @@ async function suggestArtists(query, limit = 5) {
   return results.slice(0, limit);
 }
 
+// ── searchPreview ─────────────────────────────────────────────────────────────
+
+/**
+ * Return up to `count` search results for a keyword query without downloading images.
+ * Uses artworksConnection(keyword:) GraphQL query; requests a small thumbnail image version.
+ *
+ * @param {string} query
+ * @param {object} [options]
+ * @param {number} [options.count=12]
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all']
+ * @returns {Promise<{ results: Array<{title,creator,thumbnailUrl,artworkUrl,source}>, totalAvailable: number }>}
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12, aspectRatio = 'all' } = options;
+  const fetchSize = aspectRatio !== 'all' ? Math.min(count * 3, 50) : count;
+
+  const escaped = query.replace(/"/g, '\\"');
+  let result;
+  try {
+    result = await _graphql(`{
+      artworksConnection(
+        first: ${fetchSize},
+        page: 1,
+        forSale: true,
+        sort: "-merchandisability",
+        keyword: "${escaped}"
+      ) {
+        counts { total }
+        edges {
+          node {
+            title date href
+            artist { name }
+            image { url(version: "small") aspectRatio }
+          }
+        }
+      }
+    }`);
+  } catch (err) {
+    throw new Error(`[artsy] searchPreview failed: ${err.message}`);
+  }
+
+  const conn = result?.data?.artworksConnection;
+  const totalAvailable = conn?.counts?.total || 0;
+  const edges = conn?.edges || [];
+
+  const results = [];
+  for (const { node } of edges) {
+    if (results.length >= count) break;
+    if (!node?.image?.url) continue;
+
+    if (aspectRatio !== 'all' && node.image.aspectRatio) {
+      const isLandscape = node.image.aspectRatio > 1;
+      if (aspectRatio === 'landscape' && !isLandscape) continue;
+      if (aspectRatio === 'portrait'  &&  isLandscape) continue;
+    }
+
+    results.push({
+      title:        node.title           || null,
+      creator:      node.artist?.name    || null,
+      thumbnailUrl: node.image.url,
+      artworkUrl:   node.href ? `https://www.artsy.net${node.href}` : null,
+      source:       'Artsy',
+    });
+  }
+
+  return { results, totalAvailable };
+}
+
 // ── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -542,6 +610,7 @@ module.exports = {
   selectMode,
   getFilterTypes,
   suggestArtists,
+  searchPreview,
   metadataFields,
   defaultMapping,
 };

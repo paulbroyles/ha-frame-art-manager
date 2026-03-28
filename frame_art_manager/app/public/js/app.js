@@ -15207,6 +15207,12 @@ let webSourceTestAdHocSourceId = ''; // Selected source for ad-hoc test
 let webSourceTestTagsetName = ''; // Selected tagset for tagset-mode test
 let webSourceTestAdHocFilters = []; // Ad-hoc filters built inline
 
+// Preview mode state
+let previewTagsetName = '';       // Selected tagset for preview mode
+let previewActiveMoods = [];      // Active mood IDs for preview mode
+let previewSearchSourceId = '';   // Selected source for search preview
+let previewSearchQuery = '';      // Search query for search preview
+
 const WEB_SOURCES_VIRTUAL_TAG = 'web_sources';
 
 /**
@@ -15247,7 +15253,11 @@ async function loadWebSourcesTab() {
   if (!allEntityTypes || allEntityTypes.length === 0) {
     await loadEntities();
   }
-  await loadWebSourcesConfig();
+  // Load moods in parallel with web sources config so the Preview tab has mood data
+  await Promise.all([
+    loadWebSourcesConfig(),
+    loadMoodsData(),
+  ]);
   renderWebSourcesGlobalSettings();
   renderWebSourcesList();
   renderVirtualTagsList();
@@ -17611,6 +17621,7 @@ function renderWebSourcesTestSection() {
     <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'ad-hoc' ? 'active' : ''}" data-mode="ad-hoc">Ad-hoc</button>
     <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'tagset' ? 'active' : ''}" data-mode="tagset">Tagset</button>
     <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'specific' ? 'active' : ''}" data-mode="specific">Specific Image</button>
+    <button type="button" class="ws-test-mode-btn ${webSourceTestMode === 'preview' ? 'active' : ''}" data-mode="preview">Preview</button>
   </div>`;
 
   // Virtual Tag mode
@@ -17658,8 +17669,60 @@ function renderWebSourcesTestSection() {
     </div>
   </div>`;
 
-  // Common controls: orientation + buttons
-  html += `<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
+  // Preview mode — build tagset options (all tagsets, not just those with ws: tags)
+  const previewTagsetOptions = Object.keys(allGlobalTagsets || {}).sort().map(name =>
+    `<option value="${escapeHtml(name)}" ${previewTagsetName === name ? 'selected' : ''}>${escapeHtml(name)}</option>`
+  ).join('');
+  const previewSourceOptions = Object.entries(sources)
+    .map(([id, src]) => `<option value="${escapeHtml(id)}" ${previewSearchSourceId === id ? 'selected' : ''}>${escapeHtml(src.name)}</option>`)
+    .join('');
+  const previewMoodCheckboxes = Object.entries(allMoods || {}).sort(([a],[b]) => a.localeCompare(b)).map(([id, mood]) =>
+    `<label class="preview-mood-chip" title="${escapeHtml(mood.label || id)}">
+       <input type="checkbox" value="${escapeHtml(id)}" ${previewActiveMoods.includes(id) ? 'checked' : ''}> ${escapeHtml(mood.label || id)}
+     </label>`
+  ).join('');
+
+  html += `<div class="ws-test-mode-panel" id="ws-test-panel-preview" style="${webSourceTestMode === 'preview' ? '' : 'display:none;'}">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+      <div style="flex:1;min-width:180px;">
+        <label style="font-size:12px;font-weight:600;color:var(--text-muted,#666);display:block;margin-bottom:4px;">Tagset</label>
+        <select id="preview-tagset" class="ws-select" style="width:100%;">
+          <option value="">— None (all images) —</option>
+          ${previewTagsetOptions}
+        </select>
+      </div>
+      <div style="flex:0 0 auto;align-self:flex-end;">
+        <button type="button" id="preview-pool-btn" class="btn-secondary btn-small">Preview Pool</button>
+      </div>
+    </div>
+    ${previewMoodCheckboxes ? `<div style="margin-bottom:10px;">
+      <div style="font-size:12px;font-weight:600;color:var(--text-muted,#666);margin-bottom:6px;">Active Moods</div>
+      <div id="preview-mood-list" class="preview-mood-list">${previewMoodCheckboxes}</div>
+    </div>` : ''}
+    <div id="preview-pool-results"></div>
+    <hr style="border:none;border-top:1px solid var(--border-color,#e0e0e0);margin:16px 0 12px;">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;align-items:flex-end;">
+      <div style="flex:1;min-width:140px;">
+        <label style="font-size:12px;font-weight:600;color:var(--text-muted,#666);display:block;margin-bottom:4px;">Source</label>
+        <select id="preview-search-source" class="ws-select" style="width:100%;">
+          <option value="">— Select source —</option>
+          ${previewSourceOptions}
+        </select>
+      </div>
+      <div style="flex:2;min-width:180px;">
+        <label style="font-size:12px;font-weight:600;color:var(--text-muted,#666);display:block;margin-bottom:4px;">Search Query</label>
+        <input type="text" id="preview-search-query" class="ws-type-input" style="width:100%;"
+               placeholder="e.g. monet water lilies" value="${escapeHtml(previewSearchQuery)}">
+      </div>
+      <div style="flex:0 0 auto;">
+        <button type="button" id="preview-search-btn" class="btn-secondary btn-small">Search Preview</button>
+      </div>
+    </div>
+    <div id="preview-search-results"></div>
+  </div>`;
+
+  // Common controls: orientation + buttons (hidden in Preview mode)
+  html += `<div style="display:${webSourceTestMode === 'preview' ? 'none' : 'flex'};align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;" id="ws-test-common-controls">
     <button type="button" id="web-source-test-fetch-btn" class="btn-secondary btn-small">Fetch Test Image</button>
     ${testCache ? `<button type="button" id="web-source-test-reprocess-btn" class="btn-secondary btn-small">Reprocess</button>` : ''}
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;">
@@ -17841,6 +17904,9 @@ function renderWebSourcesTestSection() {
       container.querySelectorAll('.ws-test-mode-panel').forEach(p => {
         p.style.display = p.id === `ws-test-panel-${webSourceTestMode}` ? '' : 'none';
       });
+      // Show/hide common controls (Fetch Test Image + orientation) — hidden in Preview mode
+      const commonControls = document.getElementById('ws-test-common-controls');
+      if (commonControls) commonControls.style.display = webSourceTestMode === 'preview' ? 'none' : 'flex';
     });
   });
 
@@ -17873,6 +17939,29 @@ function renderWebSourcesTestSection() {
   document.getElementById('web-source-specific-image')?.addEventListener('input', (e) => {
     webSourceSpecificImage = e.target.value;
   });
+
+  // Preview mode event listeners
+  document.getElementById('preview-tagset')?.addEventListener('change', (e) => {
+    previewTagsetName = e.target.value;
+  });
+  document.getElementById('preview-pool-btn')?.addEventListener('click', fetchPreviewPool);
+  document.getElementById('preview-mood-list')?.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      previewActiveMoods = Array.from(
+        document.getElementById('preview-mood-list').querySelectorAll('input[type="checkbox"]:checked')
+      ).map(el => el.value);
+    });
+  });
+  document.getElementById('preview-search-source')?.addEventListener('change', (e) => {
+    previewSearchSourceId = e.target.value;
+  });
+  document.getElementById('preview-search-query')?.addEventListener('input', (e) => {
+    previewSearchQuery = e.target.value;
+  });
+  document.getElementById('preview-search-query')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') fetchPreviewSearch();
+  });
+  document.getElementById('preview-search-btn')?.addEventListener('click', fetchPreviewSearch);
 
   // Common controls
   document.getElementById('web-source-test-fetch-btn')?.addEventListener('click', fetchTestWebSource);
@@ -18463,4 +18552,215 @@ function initMoodModalListeners() {
   modal.addEventListener('click', (e) => {
     if (e.target === modal) closeMoodModal();
   });
+}
+
+// ============================================================================
+// PREVIEW MODE (Pool Preview + Search Preview)
+// ============================================================================
+
+/**
+ * Fetch and render the pool preview for the selected tagset + moods.
+ * Calls POST /api/shuffle/preview and renders the scored library pool.
+ */
+async function fetchPreviewPool() {
+  const resultsEl = document.getElementById('preview-pool-results');
+  if (!resultsEl) return;
+
+  resultsEl.innerHTML = '<div style="color:var(--text-muted,#888);font-size:13px;padding:8px 0;">Loading pool…</div>';
+
+  try {
+    const resp = await fetch(`${API_BASE}/shuffle/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tagsetName: previewTagsetName || null,
+        activeMoods: previewActiveMoods,
+        sampleSize: 60,
+      }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    renderPreviewPoolResults(data, resultsEl);
+  } catch (err) {
+    resultsEl.innerHTML = `<div style="color:var(--error-color,#c00);font-size:13px;">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+/**
+ * Render pool preview results into the given container element.
+ */
+function renderPreviewPoolResults(data, container) {
+  const { libraryPool = [], excludedImages = [], webEntries = [], stats = {} } = data;
+
+  let html = '';
+
+  // Stats bar
+  html += `<div class="preview-stats-bar">
+    <span>${stats.totalEligible ?? 0} eligible</span>
+    ${stats.moodExpanded > 0 ? `<span class="preview-stat-highlight">${stats.moodExpanded} mood-expanded</span>` : ''}
+    ${stats.hardExcluded > 0 ? `<span class="preview-stat-suppressed">${stats.hardExcluded} suppressed</span>` : ''}
+    ${stats.tagExcluded > 0 ? `<span>${stats.tagExcluded} tag-excluded</span>` : ''}
+    ${stats.webEntryCount > 0 ? `<span>${stats.webEntryCount} web entr${stats.webEntryCount !== 1 ? 'ies' : 'y'}</span>` : ''}
+  </div>`;
+
+  // Library image grid
+  if (libraryPool.length > 0) {
+    html += `<div style="margin-bottom:8px;font-size:12px;font-weight:600;color:var(--text-muted,#666);">Library Pool (top ${libraryPool.length} by score)</div>`;
+    html += `<div class="preview-thumb-grid">`;
+    for (const img of libraryPool) {
+      const scoreLabel = img.score != null ? img.score.toFixed(2) : '—';
+      const inBase = img.inBasePool;
+      const tagStr = (img.tags || []).slice(0, 5).map(t => escapeHtml(t)).join(', ');
+      html += `<div class="preview-thumb-item" title="${escapeHtml(img.filename)}\nTags: ${tagStr}\nScore: ${scoreLabel}">
+        <img src="thumbs/thumb_${encodeURIComponent(img.filename)}" alt="${escapeHtml(img.filename)}"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"
+             onclick="showImageLightbox('library/${encodeURIComponent(img.filename)}','${escapeHtml(img.filename)}')">
+        <div class="preview-thumb-fallback" style="display:none;">${escapeHtml(img.filename.slice(0, 20))}</div>
+        <div class="preview-score-badge ${inBase ? '' : 'preview-score-expanded'}">${scoreLabel}</div>
+      </div>`;
+    }
+    html += `</div>`;
+  } else {
+    html += `<div style="color:var(--text-muted,#888);font-size:13px;padding:8px 0;">No eligible library images.</div>`;
+  }
+
+  // Web entries list
+  if (webEntries.length > 0) {
+    html += `<div style="margin:12px 0 6px;font-size:12px;font-weight:600;color:var(--text-muted,#666);">Web Source Entries</div>`;
+    html += `<div class="preview-web-entries">`;
+    for (const entry of webEntries) {
+      const label = entry.kind === 'vtag'
+        ? (webSourcesConfig?.virtualTags?.[entry.id]?.label || entry.id)
+        : `Mood search: "${entry.keyword}"`;
+      const badge = entry.kind === 'vtag' ? 'virtual tag' : 'mood';
+      const keyword = entry.kind === 'mood' ? entry.keyword : null;
+      html += `<div class="preview-web-entry">
+        <span class="preview-web-badge preview-web-badge-${entry.kind}">${badge}</span>
+        <span class="preview-web-label">${escapeHtml(label)}</span>
+        <span class="preview-web-weight" title="weight">×${entry.weight.toFixed(1)}</span>
+        ${keyword ? `<button type="button" class="btn-icon preview-search-trigger" data-keyword="${escapeHtml(keyword)}" title="Search preview for this keyword" style="font-size:11px;padding:2px 6px;">Search</button>` : ''}
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Hard-suppressed images (collapsed by default)
+  if (excludedImages.filter(e => e.reason === 'mood_suppress').length > 0) {
+    const suppressed = excludedImages.filter(e => e.reason === 'mood_suppress');
+    html += `<details style="margin-top:10px;">
+      <summary style="font-size:12px;font-weight:600;color:var(--text-muted,#666);cursor:pointer;">
+        Suppressed images (${suppressed.length})
+      </summary>
+      <div class="preview-thumb-grid preview-thumb-grid-suppressed" style="margin-top:8px;">`;
+    for (const img of suppressed) {
+      html += `<div class="preview-thumb-item preview-thumb-suppressed" title="${escapeHtml(img.filename)}">
+        <img src="thumbs/thumb_${encodeURIComponent(img.filename)}" alt="${escapeHtml(img.filename)}"
+             onerror="this.style.display='none';">
+        <div class="preview-score-badge preview-score-suppressed">✕</div>
+      </div>`;
+    }
+    html += `</div></details>`;
+  }
+
+  container.innerHTML = html;
+
+  // Wire "Search" buttons on mood web entries to trigger search preview
+  container.querySelectorAll('.preview-search-trigger').forEach(btn => {
+    btn.addEventListener('click', () => {
+      previewSearchQuery = btn.dataset.keyword;
+      // Fill in the search query input and trigger search
+      const queryInput = document.getElementById('preview-search-query');
+      if (queryInput) queryInput.value = previewSearchQuery;
+      fetchPreviewSearch();
+    });
+  });
+}
+
+/**
+ * Fetch and render search preview results for the selected source + query.
+ * Calls POST /api/web-sources/search-preview.
+ */
+async function fetchPreviewSearch() {
+  const resultsEl = document.getElementById('preview-search-results');
+  if (!resultsEl) return;
+
+  const sourceId = previewSearchSourceId || document.getElementById('preview-search-source')?.value || '';
+  const query = previewSearchQuery || document.getElementById('preview-search-query')?.value?.trim() || '';
+
+  if (!sourceId) {
+    resultsEl.innerHTML = '<div style="color:var(--text-muted,#888);font-size:13px;">Select a source first.</div>';
+    return;
+  }
+  if (!query) {
+    resultsEl.innerHTML = '<div style="color:var(--text-muted,#888);font-size:13px;">Enter a search query.</div>';
+    return;
+  }
+
+  resultsEl.innerHTML = '<div style="color:var(--text-muted,#888);font-size:13px;padding:8px 0;">Searching…</div>';
+
+  try {
+    const resp = await fetch(`${API_BASE}/web-sources/search-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceId, query, count: 12, aspectRatio: webSourceTestOrientation !== 'portrait' ? 'all' : 'portrait' }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    renderPreviewSearchResults(data, query, resultsEl);
+  } catch (err) {
+    resultsEl.innerHTML = `<div style="color:var(--error-color,#c00);font-size:13px;">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+/**
+ * Render search preview results into the given container element.
+ */
+function renderPreviewSearchResults(data, query, container) {
+  const { results = [], totalAvailable = 0, unsupported = false } = data;
+
+  if (unsupported) {
+    container.innerHTML = '<div style="color:var(--text-muted,#888);font-size:13px;padding:8px 0;">Search preview is not supported for this source. Use Fetch Test Image instead.</div>';
+    return;
+  }
+
+  let html = '';
+
+  // Stats line
+  html += `<div class="preview-stats-bar" style="margin-bottom:8px;">
+    Search: <strong>${escapeHtml(query)}</strong> — ${results.length} of ${totalAvailable} results
+  </div>`;
+
+  if (results.length === 0) {
+    html += '<div style="color:var(--text-muted,#888);font-size:13px;">No results found.</div>';
+    container.innerHTML = html;
+    return;
+  }
+
+  html += `<div class="preview-thumb-grid preview-search-grid">`;
+  for (const r of results) {
+    const caption = [r.title, r.creator].filter(Boolean).map(s => escapeHtml(s)).join(' · ');
+    const arLabel = r.aspectRatio != null
+      ? (r.aspectRatio > 1 ? 'landscape' : r.aspectRatio < 1 ? 'portrait' : 'square')
+      : '';
+    html += `<div class="preview-search-item">
+      ${r.thumbnailUrl
+        ? `<a href="${escapeHtml(r.artworkUrl || '#')}" target="_blank" rel="noopener">
+             <img src="${escapeHtml(r.thumbnailUrl)}" alt="${escapeHtml(r.title || '')}"
+                  class="preview-search-thumb"
+                  onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"
+                  onclick="if(event.ctrlKey||event.metaKey||event.shiftKey)return;event.preventDefault();showImageLightbox('${escapeHtml(r.thumbnailUrl)}','${escapeHtml(r.title || '')}')">
+             <div class="preview-thumb-fallback" style="display:none;">${escapeHtml((r.title || '').slice(0, 20))}</div>
+           </a>`
+        : `<div class="preview-thumb-fallback">${escapeHtml((r.title || '').slice(0, 20) || '?')}</div>`
+      }
+      <div class="preview-search-caption">
+        ${caption ? `<div class="preview-search-title">${caption}</div>` : ''}
+        ${r.repository ? `<div class="preview-search-repo">${escapeHtml(r.repository)}</div>` : ''}
+        ${arLabel ? `<div class="preview-search-ar">${arLabel}</div>` : ''}
+      </div>
+    </div>`;
+  }
+  html += '</div>';
+
+  container.innerHTML = html;
 }

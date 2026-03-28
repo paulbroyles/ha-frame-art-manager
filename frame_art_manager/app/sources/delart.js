@@ -262,6 +262,78 @@ async function resolveArtistPerson(artistName) {
 }
 
 /**
+ * Parse search result items from a /search/{query}/objects HTML page.
+ * Extends parseGridItems to also extract title and creator from each block,
+ * which eMuseum renders alongside the thumbnail in the search result grid.
+ * Returns array of { objectPath, mediaId, title, creator }.
+ */
+function parseSearchItems(html) {
+  const items = [];
+  const blocks = html.split(/(?=data-emuseum-id=)/);
+  for (const block of blocks.slice(1)) {
+    const pathMatch  = block.match(/href="(\/objects\/\d+\/[^"]+)"/);
+    const mediaMatch = block.match(/\/internal\/media\/dispatcher\/(\d+)\/thumbnail/);
+    if (!pathMatch || !mediaMatch) continue;
+
+    // Title: try common eMuseum class patterns, then fall back to first <a> text.
+    const titleMatch =
+      block.match(/class="[^"]*(?:objectTitle|title-field|emuseum-img-link-title)[^"]*"[^>]*>([\s\S]*?)<\/(?:div|span|p|h\d)>/i) ||
+      block.match(/<h[2-4][^>]*>([\s\S]*?)<\/h[2-4]>/i) ||
+      block.match(/class="[^"]*title[^"]*"[^>]*>\s*<[^>]+>\s*([\s\S]*?)<\//i);
+    const title = titleMatch ? stripHtml(titleMatch[1]) : null;
+
+    // Creator: try people/artist class names.
+    const creatorMatch =
+      block.match(/class="[^"]*(?:people|artist|creatorField|objectPeople)[^"]*"[^>]*>([\s\S]*?)<\/(?:div|span|p)>/i);
+    const creator = creatorMatch ? stripHtml(creatorMatch[1]) : null;
+
+    const objectPath = pathMatch[1].replace(/;jsessionid=[^?#]*/i, '');
+    items.push({
+      objectPath,
+      mediaId: mediaMatch[1],
+      title,
+      creator,
+    });
+  }
+  return items;
+}
+
+/**
+ * Return up to `count` search results for a keyword query without downloading images.
+ * Uses the eMuseum /search/{query}/objects endpoint (server-rendered HTML).
+ *
+ * @param {string} query
+ * @param {object} [options]
+ * @param {number} [options.count=12]
+ * @returns {Promise<{ results: Array<{title,creator,thumbnailUrl,artworkUrl,source}>, totalAvailable: number }>}
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12 } = options;
+
+  const url = `${BASE_URL}/search/${encodeURIComponent(query)}/objects`;
+  let html;
+  try {
+    const resp = await axios.get(url, { timeout: 15000, headers: HEADERS });
+    html = resp.data;
+  } catch (err) {
+    throw new Error(`[delart] searchPreview failed: ${err.message}`);
+  }
+
+  const totalAvailable = parseTotalCount(html) ?? 0;
+  const items = parseSearchItems(html);
+
+  const results = items.slice(0, count).map(item => ({
+    title:        item.title,
+    creator:      item.creator,
+    thumbnailUrl: `${BASE_URL}/internal/media/dispatcher/${item.mediaId}/thumbnail`,
+    artworkUrl:   `${BASE_URL}${item.objectPath}`,
+    source:       'Delaware Art Museum',
+  }));
+
+  return { results, totalAvailable };
+}
+
+/**
  * Parse metadata fields and media ID from a detail page HTML.
  * eMuseum detail pages use .detailField.{fieldName} wrappers with .detailFieldValue spans.
  */
@@ -714,8 +786,10 @@ module.exports = {
   getFilterTypes,
   suggestArtists,
   countArtistArtworks,
+  searchPreview,
   parsePeopleSearchResults,   // exported for unit tests
   nameMatchesQuery,           // exported for unit tests
+  parseSearchItems,           // exported for unit tests
   metadataFields,
   defaultMapping,
   CLASSIFICATION_TYPES,

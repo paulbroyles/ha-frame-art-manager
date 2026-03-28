@@ -571,6 +571,55 @@ async function countArtistArtworks(artistName) {
   return artworkIndex.filter(rec => rec.a.some(n => n.toLowerCase().includes(q))).length;
 }
 
+/**
+ * Build a small MoMA Dragonfly thumbnail URL from a file ID.
+ * Uses a 400×400 resize constraint (same pattern as buildImageUrl but smaller).
+ */
+function buildThumbnailUrl(fileId) {
+  const raw = `[["f","${fileId}"],["p","convert","-quality 80 -resize 400x400\\u003e"]]`;
+  const b64 = Buffer.from(raw, 'ascii').toString('base64').replace(/=+$/, '');
+  return `https://www.moma.org/media/${b64}.jpg`;
+}
+
+/**
+ * Return up to `count` search results for a keyword query without downloading images.
+ * Searches the in-memory cache by title, artist name, and medium.
+ *
+ * @param {string} query
+ * @param {object} [options]
+ * @param {number} [options.count=12]
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all']
+ * @returns {Promise<{ results: Array<{title,creator,thumbnailUrl,artworkUrl,source}>, totalAvailable: number }>}
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12, aspectRatio = 'all' } = options;
+  await ensureCache();
+
+  const q = query.toLowerCase().trim();
+  let matches = artworkIndex.filter(a =>
+    (a.t  && a.t.toLowerCase().includes(q)) ||
+    a.a.some(name => name.toLowerCase().includes(q)) ||
+    (a.med && a.med.toLowerCase().includes(q))
+  );
+
+  if (aspectRatio !== 'all') {
+    matches = matches.filter(a => {
+      if (!a.w || !a.h) return true; // no dims — include
+      return aspectRatio === 'landscape' ? a.w > a.h : a.h > a.w;
+    });
+  }
+
+  const results = matches.slice(0, count).map(artwork => ({
+    title:        artwork.t || null,
+    creator:      artwork.a.filter(Boolean).join(', ') || null,
+    thumbnailUrl: buildThumbnailUrl(artwork.fid),
+    artworkUrl:   artwork.url || (artwork.id ? `https://www.moma.org/collection/works/${artwork.id}` : null),
+    source:       'The Museum of Modern Art (MoMA)',
+  }));
+
+  return { results, totalAvailable: matches.length };
+}
+
 const settingsSchema = { fields: [] };
 
 const metadataFields = [
@@ -607,6 +656,7 @@ module.exports = {
   getFilterTypes,
   suggestArtists,
   countArtistArtworks,
+  searchPreview,
   filterAndSortArtists,   // exported for unit tests
   settingsSchema,
   metadataFields,

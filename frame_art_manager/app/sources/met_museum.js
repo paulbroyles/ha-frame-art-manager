@@ -407,4 +407,58 @@ async function countArtistArtworks(artistName) {
   }
 }
 
-module.exports = { fetchRandomArtwork, fetchByObjectId, fetchByIdentifier, canHandleIdentifier, selectMode, countArtistArtworks, MEDIUM_TYPES, MEDIUM_CATEGORIES, getFilterTypes, metadataFields, defaultMapping };
+/**
+ * Return up to `count` search results for a keyword query without downloading images.
+ * Uses /search?q= to get objectIDs, then fetches each object record in parallel for
+ * metadata and primaryImageSmall thumbnail URLs.
+ *
+ * @param {string} query
+ * @param {object} [options]
+ * @param {number} [options.count=12]
+ * @returns {Promise<{ results: Array<{title,creator,thumbnailUrl,artworkUrl,source}>, totalAvailable: number }>}
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12 } = options;
+
+  let objectIDs;
+  try {
+    const response = await axios.get(`${BASE_URL}/search`, {
+      params: { q: query, hasImages: true },
+      timeout: 15000,
+    });
+    objectIDs = response.data.objectIDs || [];
+  } catch (err) {
+    throw new Error(`[met_museum] searchPreview failed: ${err.message}`);
+  }
+
+  if (!objectIDs.length) return { results: [], totalAvailable: 0 };
+  const totalAvailable = objectIDs.length;
+
+  // Fetch extra candidates to fill `count` after filtering out non-public-domain items.
+  const toFetch = objectIDs.slice(0, Math.min(count * 2, 50));
+  const objects = await Promise.all(toFetch.map(async (id) => {
+    try {
+      const response = await axios.get(`${BASE_URL}/objects/${id}`, { timeout: 10000 });
+      return response.data;
+    } catch {
+      return null;
+    }
+  }));
+
+  const results = [];
+  for (const obj of objects) {
+    if (results.length >= count) break;
+    if (!obj || !obj.isPublicDomain || !obj.primaryImage) continue;
+    results.push({
+      title:        obj.title              || null,
+      creator:      obj.artistDisplayName  || null,
+      thumbnailUrl: obj.primaryImageSmall  || obj.primaryImage,
+      artworkUrl:   obj.objectURL          || null,
+      source:       'The Metropolitan Museum of Art',
+    });
+  }
+
+  return { results, totalAvailable };
+}
+
+module.exports = { fetchRandomArtwork, fetchByObjectId, fetchByIdentifier, canHandleIdentifier, selectMode, countArtistArtworks, searchPreview, MEDIUM_TYPES, MEDIUM_CATEGORIES, getFilterTypes, metadataFields, defaultMapping };

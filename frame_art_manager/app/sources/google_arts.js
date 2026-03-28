@@ -1650,4 +1650,64 @@ async function suggestArtists(query, limit = 5) {
   return results.slice(0, limit);
 }
 
-module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, selectMode, suggestArtists, countArtistArtworks, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, DEFAULT_EXCLUDED_TYPES, getFilterTypes, getDefaultFilters, metadataFields, defaultMapping };
+/**
+ * Search preview: return N results from the Google Arts search API with thumbnail metadata.
+ * Does NOT download full images — uses the imageBase URL with a small size suffix.
+ *
+ * @param {string} query        - Search query string
+ * @param {object} [options]
+ * @param {number} [options.count=12]       - Maximum results to return
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all'] - Aspect ratio filter
+ * @returns {Promise<{ results: Array, totalAvailable: number }>}
+ */
+async function searchPreview(query, { count = 12, aspectRatio = 'all' } = {}) {
+  await seedCookies();
+
+  let pool = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await cookieClient.get(`${BASE_URL}/api/search`, {
+        params: { q: query, hl: 'en' },
+        headers: { ...HTTP_HEADERS, Accept: 'application/json, text/plain, */*' },
+        timeout: 15000,
+        responseType: 'text',
+      });
+      const parsed = parseApiResponse(response.data);
+      const artworks = extractArtworks(parsed);
+      if (artworks.length > 0) {
+        pool = artworks;
+        break;
+      }
+    } catch (err) {
+      console.warn(`[google_arts] searchPreview API error (attempt ${attempt + 1}): ${err.message}`);
+    }
+  }
+
+  if (!pool) return { results: [], totalAvailable: 0 };
+
+  // Aspect ratio filtering (uses metadata only — no image download)
+  if (aspectRatio !== 'all') {
+    pool = pool.filter(a => {
+      if (a.aspectRatio === null) return false;
+      if (aspectRatio === 'landscape') return a.aspectRatio > 1;
+      if (aspectRatio === 'portrait') return a.aspectRatio < 1;
+      return true;
+    });
+  }
+
+  const totalAvailable = pool.length;
+  const results = pool.slice(0, count).map(artwork => ({
+    title: artwork.title || null,
+    creator: artwork.creator || null,
+    repository: artwork.repository || null,
+    artworkUrl: `${BASE_URL}${artwork.link}`,
+    // Thumbnail: imageBase with small size suffix (no full download)
+    thumbnailUrl: artwork.imageBase ? `${artwork.imageBase}=w400` : null,
+    aspectRatio: artwork.aspectRatio || null,
+    source: 'Google Arts & Culture',
+  }));
+
+  return { results, totalAvailable };
+}
+
+module.exports = { fetchRandomArtwork, fetchByIdentifier, canHandleIdentifier, fetchArtworkMetadata, clearCookies, selectMode, suggestArtists, countArtistArtworks, searchPreview, MEDIUM_ENTITIES, MEDIUM_CATEGORIES, DEFAULT_EXCLUDED_TYPES, getFilterTypes, getDefaultFilters, metadataFields, defaultMapping };

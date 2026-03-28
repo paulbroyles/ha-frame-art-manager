@@ -24,7 +24,8 @@ Source modules are responsible only for fetching and filtering.
 7. If the source has stable per-artwork identifiers, export `fetchByIdentifier` and `canHandleIdentifier`.
 8. If the source is orientation-constrained, export `aspectRatioConstraint` (see _Landscape-only sources_).
 9. If the source exports `suggestArtists` or `countArtistArtworks`, add a short label to `SOURCE_LABELS` in `app/public/js/app.js`.
-10. Create `docs/art_sources/<SOURCE>.md` documenting the external API, selection strategy, and any limitations.
+10. If the source supports any form of keyword or title search (directly or via the source's web interface), export `searchPreview`. Only sources that are fundamentally non-searchable (e.g. random-browse-only with no meaningful query capability) may omit it. When in doubt, implement it.
+11. Create `docs/art_sources/<SOURCE>.md` documenting the external API, selection strategy, and any limitations.
 
 ---
 
@@ -157,6 +158,69 @@ async function fetchByIdentifier(identifier) {
 If the source has no stable per-artwork identifier (e.g. identifiers are opaque or ephemeral),
 omit these exports. The Test pane will still work via `fetchRandomArtwork`; the specific-image
 field will simply not recognize this source's URLs.
+
+### Recommended Export: searchPreview
+
+Sources that support any form of keyword or title search should export `searchPreview`. This powers
+the Preview tab on the test page, letting users see multiple results for a query without downloading
+full images. Only sources that are fundamentally non-searchable (e.g. purely random-browse with no
+useful query capability, like Google Art Wallpaper) may omit it.
+
+```js
+/**
+ * Return up to `count` search results for a keyword query without downloading images.
+ * Returns metadata + thumbnail URLs only — no image buffer is downloaded.
+ *
+ * @param {string} query         - Keyword/title search term
+ * @param {object} [options]
+ * @param {number} [options.count=12]                            - Max results to return
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio]  - Filter by aspect ratio if known pre-download
+ * @returns {Promise<{ results: Array, totalAvailable: number }>}
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12, aspectRatio = 'all' } = options;
+  // ...
+  return {
+    results: [
+      {
+        title:        string | null,
+        creator:      string | null,
+        thumbnailUrl: string | null,  // URL the browser will load; does NOT need to be small
+        artworkUrl:   string | null,  // Canonical link to the artwork page
+        source:       string,         // Human-readable source name
+      },
+      // ...up to count entries
+    ],
+    totalAvailable: number,           // Total matching results (may be approximate)
+  };
+}
+```
+
+**Thumbnail URLs**: Return whatever URL is cheapest to obtain without downloading a full image.
+Options in rough preference order:
+- A dedicated thumbnail endpoint provided by the source's API (preferred)
+- A IIIF URL with a small size constraint: `${iiifBase}/full/!300,300/0/default.jpg`
+- A resized Dragonfly/CDN URL constructed from the source's image URL conventions
+- The full image URL as a fallback (browser will download and scale it; acceptable but not ideal)
+
+**Aspect ratio**: Only filter by aspect ratio if the information is available without downloading
+the image (e.g. from API-returned dimensions or IIIF `info.json`). If not available, omit
+aspect ratio filtering in `searchPreview` — the user is just browsing results, not selecting for display.
+
+**Implementation approaches** (pick the one that fits the source):
+- **API with search endpoint**: Call the existing search/query API with `limit=count`, extract
+  metadata and thumbnail URLs from the response (no extra fetches needed). Example: Tate, Getty, Artsy.
+- **In-memory cache**: Filter the cached artwork index client-side, build thumbnail URLs from
+  stored IIIF or CDN fields. Example: MoMA, NGA.
+- **HTML search results**: Fetch the source's website search page and parse result items from the HTML.
+  Use the same parsing patterns as the existing `fetchRandomArtwork` browse logic. Example: Del Art.
+- **Parallel metadata fetches**: Fetch the first page of search results to get IDs, then fetch each
+  record in parallel for metadata and thumbnail URL. Example: Met Museum (parallel object fetches),
+  Louvre (parallel ARK JSON fetches).
+- **Local index + disk cache**: Build an in-memory index from the full collection (lazy, on first call),
+  persist to disk so container restarts don't require a full rebuild, then search in-memory.
+  Use this only when the collection is small enough to index (≤ a few thousand items) and the
+  source has no search API. Example: Access O'Keeffe (REPO_MAX=2000, written to `/data/`).
 
 ### Optional Exports
 
@@ -350,3 +414,8 @@ Sources receive the fully merged filter array and should not need to know which 
 
 The test-fetch path (`POST /api/web-sources/test-fetch`) uses the same filter and fetcher call
 but writes to a `_test.<ext>` cache file and does not call `sendImageToTV`.
+
+The search-preview path (`POST /api/web-sources/search-preview`) calls `mod.searchPreview(query, { count, aspectRatio })`
+directly and returns `{ results, totalAvailable }` without downloading images or writing any files.
+If the source does not export `searchPreview`, the route returns `{ unsupported: true }` and the
+test page shows a "not supported" message for that source.

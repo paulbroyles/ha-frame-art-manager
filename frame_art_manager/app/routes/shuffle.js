@@ -287,6 +287,193 @@ function selectWebEntry(virtualWebTags, tagWeights, moodSearchEntries) {
 }
 
 /**
+ * Resolve tagset and mood parameters into canonical pool-building inputs.
+ *
+ * Given raw request fields (tagsetName, includeTags, excludeTags, tagWeights,
+ * weightingType, activeMoods), returns the resolved set of fields ready for
+ * pool construction.
+ *
+ * @param {object} params
+ * @param {string} frameArtPath
+ * @returns {Promise<{includeTags, excludeTags, tagWeights, weightingType, activeMoodDefs, moodExpandedTags}>}
+ */
+async function resolvePoolParams(params, frameArtPath) {
+  let {
+    tagsetName = null,
+    includeTags = [],
+    excludeTags = [],
+    tagWeights = {},
+    weightingType = 'image',
+    activeMoods = [],
+  } = params;
+
+  if (tagsetName) {
+    const tagsetsConfig = await readTagsets(frameArtPath);
+    const tagset = tagsetsConfig.tagsets[tagsetName];
+    if (tagset) {
+      includeTags = tagset.tags || [];
+      excludeTags = tagset.exclude_tags || [];
+      tagWeights = tagset.tag_weights || {};
+      weightingType = tagset.weighting_type || 'image';
+    }
+  }
+
+  let activeMoodDefs = [];
+  if (activeMoods && activeMoods.length > 0) {
+    try {
+      const moodsConfig = await readMoods(frameArtPath);
+      activeMoodDefs = activeMoods.map(id => moodsConfig.moods[id]).filter(Boolean);
+    } catch (err) {
+      console.warn('[shuffle] Could not read moods:', err.message);
+    }
+  }
+
+  // Exclusive mood override
+  const exclusiveMoods = activeMoodDefs.filter(m => m.exclusive);
+  let moodExpandedTags = new Set();
+
+  if (exclusiveMoods.length > 0) {
+    const winnerMood = exclusiveMoods.reduce((a, b) => (b.strength || 1.0) > (a.strength || 1.0) ? b : a);
+    includeTags = winnerMood.boost_tags || [];
+    excludeTags = [...excludeTags, ...(winnerMood.suppress_tags || [])];
+    tagWeights = {};
+    weightingType = 'image';
+  } else if (activeMoodDefs.length > 0) {
+    const baseTagSet = new Set(includeTags.filter(t => !isVirtualWebTag(t)));
+    for (const mood of activeMoodDefs) {
+      for (const tag of (mood.boost_tags || [])) {
+        if (!baseTagSet.has(tag)) moodExpandedTags.add(tag);
+      }
+    }
+  }
+
+  return { includeTags, excludeTags, tagWeights, weightingType, activeMoodDefs, moodExpandedTags };
+}
+
+/**
+ * Build the library pool and web entry list from resolved pool parameters.
+ *
+ * Returns the full scored pool (all eligible images with mood scores), excluded
+ * images, and web source entries — without performing random selection.
+ *
+ * @param {object} resolved  Output from resolvePoolParams()
+ * @param {object} images    Metadata images map (already blacklist-filtered)
+ * @returns {object} { libraryPool, excludedImages, virtualWebTags, moodSearchEntries, webEntries, stats }
+ */
+function buildScoredPool(resolved, images) {
+  const { includeTags, excludeTags, tagWeights, weightingType, activeMoodDefs, moodExpandedTags } = resolved;
+
+  const virtualWebTags = includeTags.filter(isVirtualWebTag);
+  const libraryIncludeTags = includeTags.filter(t => !isVirtualWebTag(t));
+  const moodSearchEntries = buildMoodSearchEntries(activeMoodDefs);
+  const hasWebSources = virtualWebTags.length > 0 || moodSearchEntries.length > 0;
+
+  const libraryPool = [];
+  const excludedImages = [];
+
+  for (const [filename, img] of Object.entries(images)) {
+    const imgTags = new Set(img.tags || []);
+
+    // Hard exclude: suppress_mode=exclude
+    if (activeMoodDefs.length > 0 && isMoodHardSuppressed(img.tags || [], activeMoodDefs)) {
+      excludedImages.push({ filename, tags: img.tags || [], reason: 'mood_suppress' });
+      continue;
+    }
+
+    // Tag exclusion
+    if (excludeTags.some(t => imgTags.has(t))) {
+      excludedImages.push({ filename, tags: img.tags || [], reason: 'excluded_tag' });
+      continue;
+    }
+
+    // Determine membership
+    let inBasePool = false;
+
+    if (libraryIncludeTags.length === 0) {
+      inBasePool = true;
+    } else if (libraryIncludeTags.some(t => imgTags.has(t))) {
+      inBasePool = true;
+    } else if (moodExpandedTags.size > 0 && [...moodExpandedTags].some(t => imgTags.has(t))) {
+      inBasePool = false; // in expanded pool only (mood boost)
+    } else {
+      continue; // not in any pool
+    }
+
+    const score = scoreMoodImage(img.tags || [], activeMoodDefs, inBasePool);
+    libraryPool.push({ filename, tags: img.tags || [], score, inBasePool, boosted: score > (inBasePool ? Math.log(2) : Math.log(1.5)), suppressed: score < (inBasePool ? Math.log(1.5) : Math.log(1.2)) });
+  }
+
+  // Sort by score descending
+  libraryPool.sort((a, b) => b.score - a.score);
+
+  // Build web entries for display
+  const webEntries = [
+    ...virtualWebTags.map(tag => ({ kind: 'vtag', id: getVirtualTagId(tag) || tag, tag, weight: tagWeights[tag] ?? 1.0 })),
+    ...moodSearchEntries.map(e => ({ kind: 'mood', keyword: e.keyword, weight: e.weight })),
+  ];
+
+  const stats = {
+    totalEligible: libraryPool.length,
+    hardExcluded: excludedImages.filter(e => e.reason === 'mood_suppress').length,
+    tagExcluded: excludedImages.filter(e => e.reason === 'excluded_tag').length,
+    moodExpanded: libraryPool.filter(i => !i.inBasePool).length,
+    webEntryCount: webEntries.length,
+    hasWebSources,
+  };
+
+  return { libraryPool, excludedImages, virtualWebTags, moodSearchEntries, webEntries, stats };
+}
+
+/**
+ * POST /api/shuffle/preview
+ *
+ * Returns the full scored library pool and web entry list for a given
+ * tagset + mood combination. Used by the Preview tab in the test page.
+ *
+ * Request body:
+ *   tagsetName    string?   Tagset to resolve (optional)
+ *   activeMoods   string[]  Mood IDs to apply (optional)
+ *   sampleSize    number    Max library images to return (default 50)
+ *
+ * Response:
+ *   { libraryPool, excludedImages, webEntries, stats }
+ */
+router.post('/preview', async (req, res) => {
+  try {
+    const { tagsetName = null, activeMoods = [], sampleSize = 50 } = req.body;
+
+    const resolved = await resolvePoolParams(
+      { tagsetName, activeMoods },
+      req.frameArtPath
+    );
+
+    const helper = new MetadataHelper(req.frameArtPath);
+    const metadata = await helper.readMetadata();
+
+    const blacklist = await helper.readBlacklist().catch(() => ({ local: [], web: [] }));
+    const blacklistedLocal = new Set(blacklist.local || []);
+    let images = metadata.images || {};
+    if (blacklistedLocal.size > 0) {
+      images = Object.fromEntries(
+        Object.entries(images).filter(([f]) => !blacklistedLocal.has(f))
+      );
+    }
+
+    const { libraryPool, excludedImages, webEntries, stats } = buildScoredPool(resolved, images);
+
+    return res.json({
+      libraryPool: libraryPool.slice(0, sampleSize),
+      excludedImages: excludedImages.slice(0, sampleSize),
+      webEntries,
+      stats,
+    });
+  } catch (err) {
+    console.error('[shuffle/preview] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * POST /api/shuffle/select
  *
  * Selects a random image from the library (or a virtual web source tag)

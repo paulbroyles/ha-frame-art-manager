@@ -682,6 +682,46 @@ const defaultMapping = {
   source:      null,
 };
 
+/**
+ * Return up to `count` search results for a keyword query without downloading images.
+ * Searches the in-memory CSV cache by title and attribution; builds IIIF thumbnail URLs.
+ *
+ * @param {string} query
+ * @param {object} [options]
+ * @param {number} [options.count=12]
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all']
+ * @returns {Promise<{ results: Array<{title,creator,thumbnailUrl,artworkUrl,source}>, totalAvailable: number }>}
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12, aspectRatio = 'all' } = options;
+
+  const records = await getCache();
+  const q = query.toLowerCase().trim();
+
+  let matches = records.filter(r =>
+    (r.title       && r.title.toLowerCase().includes(q)) ||
+    (r.attribution && r.attribution.toLowerCase().includes(q))
+  );
+
+  if (aspectRatio !== 'all') {
+    matches = matches.filter(r => {
+      if (!r.width || !r.height) return true;
+      const isLandscape = r.width > r.height;
+      return aspectRatio === 'landscape' ? isLandscape : !isLandscape;
+    });
+  }
+
+  const results = matches.slice(0, count).map(record => ({
+    title:        record.title       || null,
+    creator:      record.attribution || null,
+    thumbnailUrl: `${record.iiifUrl}/full/!300,300/0/default.jpg`,
+    artworkUrl:   `https://www.nga.gov/collection/art-object-page.${record.objectId}.html`,
+    source:       'National Gallery of Art',
+  }));
+
+  return { results, totalAvailable: matches.length };
+}
+
 module.exports = {
   fetchRandomArtwork,
   fetchByIdentifier,
@@ -690,6 +730,7 @@ module.exports = {
   getFilterTypes,
   suggestArtists,
   countArtistArtworks,
+  searchPreview,
   metadataFields,
   defaultMapping,
 };

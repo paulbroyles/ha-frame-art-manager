@@ -503,6 +503,46 @@ const defaultMapping = {
   source:          null,
 };
 
+/**
+ * Return up to `count` search results for a keyword query without downloading images.
+ * Uses the Getty search API with q=; builds IIIF thumbnail URLs from thumbUuid.
+ *
+ * @param {string} query
+ * @param {object} [options]
+ * @param {number} [options.count=12]
+ * @returns {Promise<{ results: Array<{title,creator,thumbnailUrl,artworkUrl,source}>, totalAvailable: number }>}
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12 } = options;
+
+  let items, totalAvailable;
+  try {
+    const resp = await axios.get(SEARCH_URL, {
+      params: { q: query, open_content: true, size: count },
+      timeout: 15000,
+    });
+    items         = resp.data.data  || [];
+    totalAvailable = resp.data.total || 0;
+  } catch (err) {
+    throw new Error(`[getty] searchPreview failed: ${err.message}`);
+  }
+
+  const results = items
+    .filter(item => item.manifest?.thumbUuid)
+    .map(item => {
+      const producer = item.producers?.[0] || null;
+      return {
+        title:        item.primary_name      || null,
+        creator:      producer?.primary_name || null,
+        thumbnailUrl: `${IIIF_IMAGE_BASE}/${item.manifest.thumbUuid}/full/!300,300/0/default.jpg`,
+        artworkUrl:   `${ARTWORK_BASE}${item.slug_with_path || ''}`,
+        source:       'J. Paul Getty Museum',
+      };
+    });
+
+  return { results, totalAvailable };
+}
+
 module.exports = {
   fetchRandomArtwork,
   fetchByIdentifier,
@@ -511,6 +551,7 @@ module.exports = {
   getFilterTypes,
   suggestArtists,
   countArtistArtworks,
+  searchPreview,
   metadataFields,
   defaultMapping,
 };

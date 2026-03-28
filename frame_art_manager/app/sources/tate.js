@@ -394,6 +394,72 @@ async function suggestArtists(query, limit = 10) {
 }
 
 /**
+ * Return up to `count` search results for a keyword query without downloading images.
+ * Uses the /api/v2/artworks/?search= endpoint; filters by aspect ratio using
+ * master_images.height_ratio (same pre-download check as fetchRandomArtwork).
+ *
+ * @param {string} query
+ * @param {object} [options]
+ * @param {number} [options.count=12]
+ * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all']
+ * @returns {Promise<{ results: Array<{title,creator,thumbnailUrl,artworkUrl,source}>, totalAvailable: number }>}
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12, aspectRatio = 'all' } = options;
+
+  // Fetch extra candidates so aspect-ratio filtering doesn't leave us short.
+  const fetchLimit = aspectRatio !== 'all' ? Math.min(count * 4, 100) : count;
+
+  let response;
+  try {
+    response = await axios.get(`${BASE_URL}/artworks/`, {
+      params: {
+        search: query,
+        masterImageStatus: 'CLEARED',
+        limit: fetchLimit,
+        fields: 'acno,title,allArtists,url,master_images',
+      },
+      timeout: 15000,
+    });
+  } catch (err) {
+    throw new Error(`[tate] searchPreview failed: ${err.message}`);
+  }
+
+  const items = response.data.items || response.data.results || [];
+  const totalAvailable = response.data.meta?.total_count ?? 0;
+
+  const results = [];
+  for (const obj of items) {
+    if (results.length >= count) break;
+
+    const imageInfo = extractImageInfo(obj.master_images);
+    if (!imageInfo) continue;
+
+    if (aspectRatio === 'landscape' && imageInfo.isPortrait) continue;
+    if (aspectRatio === 'portrait' && !imageInfo.isPortrait) continue;
+
+    // Use the smallest available size as the thumbnail.
+    const img = Array.isArray(obj.master_images) ? obj.master_images[0] : obj.master_images;
+    const sizes = img?.sizes;
+    const thumbnailUrl = sizes?.[0]?.[2] || imageInfo.url;
+
+    const artworkUrl = obj.url
+      ? (obj.url.startsWith('http') ? obj.url : `https://www.tate.org.uk${obj.url}`)
+      : null;
+
+    results.push({
+      title:        obj.title      || null,
+      creator:      obj.allArtists || null,
+      thumbnailUrl,
+      artworkUrl,
+      source: 'Tate',
+    });
+  }
+
+  return { results, totalAvailable };
+}
+
+/**
  * Count cleared artworks in the Tate collection for a given artist name.
  * Resolves name → cisId, then queries the API with mltArtists={cisId}.
  *
@@ -572,6 +638,7 @@ module.exports = {
   getFilterTypes,
   suggestArtists,
   countArtistArtworks,
+  searchPreview,
   CLASSIFICATION_NAMES,
   metadataFields,
   defaultMapping,

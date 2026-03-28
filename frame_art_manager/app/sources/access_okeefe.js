@@ -1,4 +1,6 @@
 'use strict';
+const fs    = require('fs').promises;
+const path  = require('path');
 const axios = require('axios');
 
 // Access O'Keeffe — Georgia O'Keeffe Museum collection
@@ -21,6 +23,20 @@ const REPO_MAX    = 2000;
 // Higher than other sources because the collection has many non-artwork objects
 // (art supplies, personal belongings) mixed in; type filters need more probe attempts.
 const MAX_ATTEMPTS = 40;
+
+// ── Collection index (for searchPreview) ──────────────────────────────────────
+//
+// Building the index requires probing up to REPO_MAX individual JSON-LD URLs.
+// To avoid rebuilding on every container restart, the index is written to disk
+// at INDEX_PATH and reloaded if fresh. TTL = 7 days.
+
+const INDEX_PATH    = '/data/okeefe_collection_index.json';
+const INDEX_TTL_MS  = 7 * 24 * 60 * 60 * 1000; // 7 days
+const INDEX_BATCH   = 25; // parallel requests per batch
+
+let _collectionIndex = null;       // Array<{ repoId, title, creator, types, iiifServiceUrl }>
+let _collectionIndexLoadedAt = 0;
+let _collectionIndexPromise = null;
 
 // ── Getty AAT URIs for identification ────────────────────────────────────────
 
@@ -466,6 +482,117 @@ const defaultMapping = {
   source:          null,
 };
 
+// ── Collection index ──────────────────────────────────────────────────────────
+
+/**
+ * Ensure the full collection index is loaded.
+ * Reads from disk if the cached file is fresh (< 7 days); otherwise probes all
+ * REPO_MAX IDs in parallel batches of INDEX_BATCH and writes the result to disk.
+ *
+ * Index entries: { repoId, title, creator, types, iiifServiceUrl }
+ */
+async function ensureCollectionIndex() {
+  const now = Date.now();
+  if (_collectionIndex !== null && (now - _collectionIndexLoadedAt) < INDEX_TTL_MS) return;
+  if (_collectionIndexPromise) { await _collectionIndexPromise; return; }
+
+  _collectionIndexPromise = (async () => {
+    try {
+      // Try reading from disk first.
+      try {
+        const raw  = await fs.readFile(INDEX_PATH, 'utf8');
+        const disk = JSON.parse(raw);
+        if (disk.builtAt && (now - disk.builtAt) < INDEX_TTL_MS && Array.isArray(disk.entries)) {
+          _collectionIndex      = disk.entries;
+          _collectionIndexLoadedAt = now;
+          console.log(`[access_okeefe] Loaded collection index from disk: ${disk.entries.length} entries`);
+          return;
+        }
+      } catch {
+        // File absent or stale — rebuild below.
+      }
+
+      console.log('[access_okeefe] Building collection index (probing up to', REPO_MAX, 'IDs)...');
+      const entries = [];
+
+      for (let start = 1; start <= REPO_MAX; start += INDEX_BATCH) {
+        const ids = Array.from(
+          { length: Math.min(INDEX_BATCH, REPO_MAX - start + 1) },
+          (_, i) => start + i
+        );
+        const batch = await Promise.all(ids.map(async (repoId) => {
+          try {
+            const resp = await axios.get(`${DATA_URL}/${repoId}.json`, { timeout: 8000 });
+            const obj  = resp.data;
+            const iiifServiceUrl = extractIIIFServiceUrl(obj);
+            if (!iiifServiceUrl) return null;
+            const title   = getIdentified(obj, AAT_PREFERRED_TERM);
+            const creator = obj.produced_by?.carried_out_by?.[0]?._label || null;
+            const types   = getObjectTypes(obj);
+            return { repoId, title, creator, types, iiifServiceUrl };
+          } catch {
+            return null; // 404 or network error — skip
+          }
+        }));
+        for (const entry of batch) {
+          if (entry) entries.push(entry);
+        }
+      }
+
+      _collectionIndex      = entries;
+      _collectionIndexLoadedAt = Date.now();
+      console.log(`[access_okeefe] Collection index built: ${entries.length} entries`);
+
+      // Persist to disk so container restarts don't require a full rebuild.
+      try {
+        await fs.mkdir(path.dirname(INDEX_PATH), { recursive: true });
+        await fs.writeFile(INDEX_PATH, JSON.stringify({ builtAt: Date.now(), entries }));
+      } catch (err) {
+        console.warn('[access_okeefe] Could not write collection index to disk:', err.message);
+      }
+    } catch (err) {
+      console.warn('[access_okeefe] Failed to build collection index:', err.message);
+      _collectionIndex = _collectionIndex || [];
+    } finally {
+      _collectionIndexPromise = null;
+    }
+  })();
+
+  await _collectionIndexPromise;
+}
+
+/**
+ * Return up to `count` search results for a keyword query without downloading images.
+ * Searches the in-memory/disk-cached collection index by title and creator.
+ * Triggers a full index build (disk-cached, 7-day TTL) on first call.
+ *
+ * @param {string} query
+ * @param {object} [options]
+ * @param {number} [options.count=12]
+ * @returns {Promise<{ results: Array<{title,creator,thumbnailUrl,artworkUrl,source}>, totalAvailable: number }>}
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12 } = options;
+
+  await ensureCollectionIndex();
+
+  const q = query.toLowerCase().trim();
+  const matching = (_collectionIndex || []).filter(entry =>
+    (entry.title   || '').toLowerCase().includes(q) ||
+    (entry.creator || '').toLowerCase().includes(q)
+  );
+
+  const results = matching.slice(0, count).map(entry => ({
+    title:        entry.title,
+    creator:      entry.creator,
+    thumbnailUrl: `${entry.iiifServiceUrl}/full/!300,300/0/default.jpg`,
+    artworkUrl:   `${BASE_URL}/object/${entry.repoId}/`,
+    source:       "Access O'Keeffe",
+  }));
+
+  return { results, totalAvailable: matching.length };
+}
+
 module.exports = {
   fetchRandomArtwork,
   fetchByIdentifier,
@@ -474,6 +601,7 @@ module.exports = {
   getFilterTypes,
   suggestArtists,
   countArtistArtworks,
+  searchPreview,
   metadataFields,
   defaultMapping,
 };

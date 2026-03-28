@@ -2255,6 +2255,53 @@ router.get('/test-cache/preprocessed-image', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/web-sources/search-preview
+ *
+ * Returns N search results from a source's search/browse capability without
+ * downloading full images. Currently supported: google_arts (has search API).
+ * Other sources return { results: [], unsupported: true }.
+ *
+ * Request body:
+ *   sourceId       string    Source to query
+ *   query          string    Search query
+ *   count          number    Max results to return (default 12)
+ *   aspectRatio    string    'all' | 'landscape' | 'portrait' (default 'all')
+ *
+ * Response:
+ *   { results: [{ title, creator, repository, artworkUrl, thumbnailUrl, aspectRatio, source }],
+ *     totalAvailable: number,
+ *     unsupported?: boolean }
+ */
+router.post('/search-preview', async (req, res) => {
+  try {
+    const { sourceId, query = '', count = 12, aspectRatio = 'all' } = req.body;
+
+    if (!sourceId) {
+      return res.status(400).json({ error: 'sourceId is required' });
+    }
+
+    const mod = SOURCE_MODULES[sourceId];
+    if (!mod) {
+      return res.status(404).json({ error: `Unknown source: ${sourceId}` });
+    }
+
+    if (typeof mod.searchPreview !== 'function') {
+      return res.json({ results: [], totalAvailable: 0, unsupported: true });
+    }
+
+    if (!query.trim()) {
+      return res.json({ results: [], totalAvailable: 0 });
+    }
+
+    const result = await mod.searchPreview(query.trim(), { count, aspectRatio });
+    return res.json(result);
+  } catch (err) {
+    console.error('[web-sources/search-preview] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/web-sources/test-cache
 // Clear the test cache image and record.
 router.delete('/test-cache', async (req, res) => {

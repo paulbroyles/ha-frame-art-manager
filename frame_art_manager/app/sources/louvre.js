@@ -488,6 +488,54 @@ async function countArtistArtworks(artistName) {
   }
 }
 
+/**
+ * Return up to `count` search results for a keyword query without downloading images.
+ * Fetches page 1 of the Louvre search HTML, extracts ARK IDs, then fetches each ARK's
+ * JSON record in parallel for metadata and image URL.
+ *
+ * @param {string} query
+ * @param {object} [options]
+ * @param {number} [options.count=12]
+ * @returns {Promise<{ results: Array<{title,creator,thumbnailUrl,artworkUrl,source}>, totalAvailable: number }>}
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12 } = options;
+
+  let arkIds, html;
+  try {
+    ({ arkIds, html } = await fetchSearchPage(1, null, query));
+  } catch (err) {
+    throw new Error(`[louvre] searchPreview failed: ${err.message}`);
+  }
+
+  if (!arkIds.length) return { results: [], totalAvailable: 0 };
+
+  // Estimate total from pagination HTML; fall back to page-count × 20.
+  const maxPages = parseMaxPages(html) ?? 1;
+  const totalAvailable = maxPages * 20;
+
+  const toFetch = arkIds.slice(0, Math.min(count, arkIds.length));
+  const records = await Promise.all(toFetch.map(async (arkId) => {
+    try { return await fetchArkJson(arkId); } catch { return null; }
+  }));
+
+  const results = records
+    .filter(r => r && Array.isArray(r.image) && r.image.some(img => img.urlImage))
+    .slice(0, count)
+    .map(record => {
+      const imageEntry = record.image.find(img => img.urlImage);
+      return {
+        title:        record.title || null,
+        creator:      buildCreatorString(record.creator),
+        thumbnailUrl: imageEntry?.urlImage || null,
+        artworkUrl:   record.url || null,
+        source:       'Musée du Louvre',
+      };
+    });
+
+  return { results, totalAvailable };
+}
+
 module.exports = {
   fetchRandomArtwork,
   fetchByIdentifier,
@@ -495,6 +543,7 @@ module.exports = {
   selectMode,
   getFilterTypes,
   countArtistArtworks,
+  searchPreview,
   metadataFields,
   defaultMapping,
   CATEGORY_TYPES,
