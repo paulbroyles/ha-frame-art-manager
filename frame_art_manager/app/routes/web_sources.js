@@ -504,23 +504,43 @@ async function sendImageToTV(imagePath, deviceId, {
     return 'DEV_CONTENT_ID';
   }
 
-  const response = await axios({
-    method: 'POST',
-    url: `${HA_API_BASE}/services/frame_art_shuffler/send_image?return_response`,
-    headers: {
-      Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    data: {
-      device_id: deviceId,
-      image_path: imagePath,
-      select,
-      ...(select && { screen_on: screenOn }),
-      ...(matte && { matte }),
-      ...(artworkMetadata && { artwork_metadata: artworkMetadata }),
-    },
-    timeout: select ? 60000 : 120000,
-  });
+  const sendStart = Date.now();
+  let response;
+  try {
+    response = await axios({
+      method: 'POST',
+      url: `${HA_API_BASE}/services/frame_art_shuffler/send_image?return_response`,
+      headers: {
+        Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      data: {
+        device_id: deviceId,
+        image_path: imagePath,
+        select,
+        ...(select && { screen_on: screenOn }),
+        ...(matte && { matte }),
+        ...(artworkMetadata && { artwork_metadata: artworkMetadata }),
+      },
+      timeout: select ? 60000 : 120000,
+    });
+  } catch (axiosErr) {
+    const elapsed = Date.now() - sendStart;
+    if (axiosErr.code === 'ECONNABORTED' || axiosErr.message?.includes('timeout')) {
+      console.error(`[sendImageToTV] Timeout after ${elapsed}ms (select=${select}, device=${deviceId})`);
+    } else if (axiosErr.response) {
+      console.error(
+        `[sendImageToTV] HTTP ${axiosErr.response.status} after ${elapsed}ms (select=${select}, device=${deviceId}):`,
+        JSON.stringify(axiosErr.response.data)
+      );
+    } else {
+      console.error(`[sendImageToTV] Network error after ${elapsed}ms (select=${select}, device=${deviceId}): ${axiosErr.message}`);
+    }
+    throw axiosErr;
+  }
+
+  const elapsed = Date.now() - sendStart;
+  console.log(`[sendImageToTV] send_image completed in ${elapsed}ms (select=${select}, device=${deviceId})`);
 
   const serviceResponse = response.data?.service_response || response.data?.response || response.data;
   const contentId = serviceResponse?.content_id;
@@ -1632,8 +1652,13 @@ router.post('/fetch-and-send', async (req, res) => {
       cacheFile: path.basename(cacheFile),
     });
   } catch (error) {
-    const status = error.statusCode || 500;
-    console.error('Error in fetch-and-send:', error.message || error);
+    const status = error.statusCode || (error.response?.status) || 500;
+    const isTimeout = error.code === 'ECONNABORTED' || error.message?.includes('timeout');
+    console.error(
+      `[fetch-and-send] Failed (status=${status}, timeout=${isTimeout}, device=${req.body?.deviceId}):`,
+      error.message || error
+    );
+    if (error.stack && !isTimeout) console.error('[fetch-and-send] Stack:', error.stack);
     res.status(status).json({ error: error.message || 'Failed to fetch and send web source image' });
   }
 });
