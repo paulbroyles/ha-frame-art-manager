@@ -1984,6 +1984,7 @@ router.post('/test-fetch', async (req, res) => {
           { skipLowRes, minResolution, maxAttempts: 5, logTag: 'test-fetch' }
         );
       } catch (err) {
+        console.error('[test-fetch] resolveAndFetch error:', err.message, err.stack?.split('\n').slice(1, 4).join(' | '));
         return res.status(err.statusCode || 500).json({ error: err.message });
       }
       chosenSourceId = resolved.chosenSourceId;
