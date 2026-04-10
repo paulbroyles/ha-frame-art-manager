@@ -245,8 +245,12 @@ function shouldUseSearch(allFilters, textTerm) {
   if (textTerm) return true;
   if (getRequireValues(allFilters, 'century').length > 0) return true;
   if (getRequireValues(allFilters, 'subject').length > 0) return true;
+  // Media filter always uses search (deepcat:) — category browse only returns direct
+  // file members of the top-level category, which is near-zero for broad categories
+  // like Paintings (everything is nested in subcategories).
+  if (getRequireValues(allFilters, 'media').length > 0) return true;
   // Count distinct non-text category filter types with active require values.
-  const activeCategoryTypes = ['media', 'institution'].filter(type =>
+  const activeCategoryTypes = ['institution'].filter(type =>
     getRequireValues(allFilters, type).length > 0
   );
   return activeCategoryTypes.length >= 2;
