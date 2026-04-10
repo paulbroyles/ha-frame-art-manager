@@ -55,18 +55,20 @@ const INSTITUTIONS = [
 // Commons has well-organized subject categories that cut across media types.
 // A subject filter changes the browse gcmtitle, or adds incategory: in search mode.
 
+// Subject categories always use deepcat: in CirrusSearch to traverse subcategories.
+// These top-level Commons categories are hierarchical; direct file membership is sparse.
 const SUBJECT_CATEGORIES = [
   { value: 'Portraits',          label: 'Portraits',          gcmtitle: 'Category:Portraits' },
   { value: 'Landscapes',         label: 'Landscapes',         gcmtitle: 'Category:Landscapes' },
   { value: 'Still lifes',        label: 'Still lifes',        gcmtitle: 'Category:Still lifes' },
-  { value: 'Religious art',      label: 'Religious art',      gcmtitle: 'Category:Religious art' },
-  { value: 'Mythology',          label: 'Mythology',          gcmtitle: 'Category:Mythological art' },
-  { value: 'Genre scenes',       label: 'Genre scenes',       gcmtitle: 'Category:Genre art' },
+  { value: 'Religious art',      label: 'Religious art',      gcmtitle: 'Category:Christian art' },
+  { value: 'Mythology',          label: 'Mythology',          gcmtitle: 'Category:Mythology in art' },
+  { value: 'Genre scenes',       label: 'Genre scenes',       gcmtitle: 'Category:Genre paintings' },
   { value: 'Animals in art',     label: 'Animals',            gcmtitle: 'Category:Animals in art' },
-  { value: 'Botanical art',      label: 'Botanical art',      gcmtitle: 'Category:Botanical illustration' },
+  { value: 'Botanical art',      label: 'Botanical art',      gcmtitle: 'Category:Botanical illustrations' },
   { value: 'Nude art',           label: 'Nude art',           gcmtitle: 'Category:Nude art' },
-  { value: 'Architecture',       label: 'Architecture',       gcmtitle: 'Category:Architecture in art' },
-  { value: 'Maritime art',       label: 'Maritime art',       gcmtitle: 'Category:Maritime art' },
+  { value: 'Architecture',       label: 'Architecture',       gcmtitle: 'Category:Architectural drawings' },
+  { value: 'Marine art',         label: 'Marine art',         gcmtitle: 'Category:Marine art' },
   { value: 'Battle art',         label: 'Battle art',         gcmtitle: 'Category:Battle paintings' },
 ];
 
@@ -197,12 +199,15 @@ function resolveEligibleMedia(allFilters) {
 }
 
 // Determine whether to use CirrusSearch rather than category browse.
-// Forced by: text filters, century filter, or 2+ orthogonal category filters active.
+// Forced by: text filters, century filter, any subject filter (subject categories
+// are hierarchical — deepcat: traversal is required; direct member browse yields nothing),
+// or 2+ orthogonal category filters active.
 function shouldUseSearch(allFilters, textTerm) {
   if (textTerm) return true;
   if (getRequireValues(allFilters, 'century').length > 0) return true;
+  if (getRequireValues(allFilters, 'subject').length > 0) return true;
   // Count distinct non-text category filter types with active require values.
-  const activeCategoryTypes = ['media', 'institution', 'subject'].filter(type =>
+  const activeCategoryTypes = ['media', 'institution'].filter(type =>
     getRequireValues(allFilters, type).length > 0
   );
   return activeCategoryTypes.length >= 2;
@@ -259,11 +264,13 @@ function buildSearchQuery(allFilters, textTerm) {
     parts.push(`incategory:"${stripCategoryPrefix(media.gcmtitle)}"`);
   }
 
-  // Subject
+  // Subject: use deepcat: to traverse the full subcategory tree.
+  // incategory: only matches direct file members, which is rarely populated for
+  // high-level subject categories like "Portraits" or "Landscapes".
   if (subjects.length > 0) {
     const pick  = subjects[Math.floor(Math.random() * subjects.length)];
     const entry = SUBJECT_CATEGORIES.find(s => s.value === pick);
-    if (entry) parts.push(`incategory:"${stripCategoryPrefix(entry.gcmtitle)}"`);
+    if (entry) parts.push(`deepcat:"${stripCategoryPrefix(entry.gcmtitle)}"`);
   }
 
   return parts.join(' ');
@@ -670,7 +677,7 @@ const INSTITUTION_GROUPS = [
 
 const SUBJECT_GROUPS = [
   { name: 'People',        values: ['Portraits', 'Nude art'] },
-  { name: 'Nature',        values: ['Landscapes', 'Animals in art', 'Botanical art', 'Maritime art'] },
+  { name: 'Nature',        values: ['Landscapes', 'Animals in art', 'Botanical art', 'Marine art'] },
   { name: 'Themes',        values: ['Religious art', 'Mythology', 'Genre scenes', 'Battle art'] },
   { name: 'Other',         values: ['Still lifes', 'Architecture'] },
 ];
