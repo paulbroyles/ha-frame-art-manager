@@ -104,8 +104,10 @@ The `worktypes` field on each object record is an array of `{worktype, worktypei
 any object with painted decoration, while `worktype: "Painting"` identifies objects that
 are paintings in the traditional fine-art sense.
 
-**require** → translated to the API `worktype=X|Y` parameter (pre-fetch, efficient).  
-**exclude** → applied post-fetch against the object's `worktypes` array (API has no native exclude param).
+Both **require** and **exclude** are applied post-fetch against the object's `worktypes` array.
+The Harvard `/object` endpoint has no `worktype` filter parameter, so this filter cannot be
+pre-applied at the API level. With a strict worktype filter (e.g. `require: [Painting]`) the
+retry loop may need more rounds to find matching objects.
 
 Curated values (full list at `GET /worktype?apikey=KEY`):
 

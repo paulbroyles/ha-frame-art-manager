@@ -166,8 +166,8 @@ function applySetFilter(allValues, filters, type) {
  *   culture    — restrict/exclude by cultural origin (e.g. 'French', 'Japanese')
  *   century    — restrict/exclude by century (e.g. '17th century', '19th century')
  *   worktype   — restrict/exclude by object type (e.g. 'Painting', 'Fragment')
- *                require: translated to API worktype= param (pre-fetch)
- *                exclude: applied post-fetch against the worktypes array
+ *                both modes applied post-fetch against the worktypes array
+ *                (Harvard /object endpoint has no worktype filter parameter)
  *   artist     — require: text search across artist/people fields (single value)
  *   search     — require: general keyword search (single value, lower priority than artist)
  *
@@ -202,10 +202,14 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     throw new Error('No centuries eligible after applying filters');
   }
 
-  // Worktype: require values go to the API param; exclude values are applied post-fetch.
-  const worktypeRequire = filters
-    .filter(f => f.type === 'worktype' && f.mode === 'require')
-    .flatMap(f => f.values || []);
+  // Worktype: the Harvard /object endpoint does not support a worktype filter parameter,
+  // so both require and exclude are applied post-fetch against the worktypes array.
+  const worktypeRequireSet = new Set(
+    filters
+      .filter(f => f.type === 'worktype' && f.mode === 'require')
+      .flatMap(f => f.values || [])
+      .map(v => v.toLowerCase())
+  );
   const worktypeExcludeSet = new Set(
     filters
       .filter(f => f.type === 'worktype' && f.mode === 'exclude')
@@ -232,9 +236,6 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   }
   if (eligibleCenturies.length < CENTURY_VALUES.length) {
     params.century = eligibleCenturies.join('|');
-  }
-  if (worktypeRequire.length > 0) {
-    params.worktype = worktypeRequire.join('|');
   }
 
   // Text search: artist takes priority over general keyword search.
@@ -269,10 +270,14 @@ async function fetchRandomArtwork(filters = [], options = {}) {
         continue;
       }
 
-      // Post-fetch worktype exclude filter (API has no native exclude param for this).
-      if (worktypeExcludeSet.size > 0) {
+      // Post-fetch worktype filter (API has no worktype filter param; checked against worktypes array).
+      if (worktypeRequireSet.size > 0 || worktypeExcludeSet.size > 0) {
         const objWorktypes = (obj.worktypes || []).map(wt => (wt.worktype || '').toLowerCase());
-        if (objWorktypes.some(wt => worktypeExcludeSet.has(wt))) {
+        if (worktypeRequireSet.size > 0 && !objWorktypes.some(wt => worktypeRequireSet.has(wt))) {
+          console.warn(`[harvard_art_museums] Object ${obj.id} skipped: worktype (${objWorktypes.join(', ')}) not in required set`);
+          continue;
+        }
+        if (worktypeExcludeSet.size > 0 && objWorktypes.some(wt => worktypeExcludeSet.has(wt))) {
           console.warn(`[harvard_art_museums] Object ${obj.id} skipped: excluded worktype (${objWorktypes.join(', ')})`);
           continue;
         }
