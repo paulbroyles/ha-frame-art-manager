@@ -16756,38 +16756,53 @@ function initFilterListInteractions(container, callbacks = {}) {
 }
 
 /**
- * Render non-filter settings for a source: schema-driven boolean toggles
- * plus any source-specific action buttons (e.g. cookie clear).
+ * Render non-filter settings for a source: schema-driven string inputs and
+ * boolean toggles, plus any source-specific action buttons (e.g. cookie clear).
  */
 function renderSourceExtraSettings(sourceId) {
   let html = '';
 
-  // Schema-driven boolean toggles (generic for any source with a settingsSchema)
+  // Schema-driven settings (generic for any source with a settingsSchema)
   const schema = webSourceSettingsSchemas[sourceId];
   if (schema?.fields?.length) {
     const currentSettings = webSourcesConfig?.sources?.[sourceId]?.settings || {};
     for (const field of schema.fields) {
-      if (field.type !== 'boolean') continue;
-      // Check whether the required source module is installed (present in sourceMetadata),
-      // not whether it's enabled as an active web source.
-      const requiredSourceAvailable = !field.requiresSource
-        || !!webSourceMetadata[field.requiresSource];
-      const currentVal = currentSettings?.[field.key] ?? field.default ?? false;
-      const disabledAttr = requiredSourceAvailable ? '' : 'disabled';
-      const disabledNote = requiredSourceAvailable ? '' :
-        ` <em>(requires the ${field.requiresSource} source module to be installed)</em>`;
-      html += `
-        <div style="margin-bottom:12px;padding:0 16px;">
-          <label class="ws-global-label" style="${requiredSourceAvailable ? '' : 'opacity:0.5;'}">
-            <input type="checkbox"
-                   class="ws-boolean-setting"
+      if (field.type === 'string') {
+        const inputType = field.secret ? 'password' : 'text';
+        const currentVal = currentSettings?.[field.key] ?? field.default ?? '';
+        html += `
+          <div style="margin-bottom:12px;padding:0 16px;">
+            <label class="ws-global-label" style="display:block;margin-bottom:4px;">${escapeHtml(field.label)}</label>
+            <input type="${inputType}"
+                   class="ws-string-setting"
                    data-setting-key="${escapeHtml(field.key)}"
-                   ${currentVal ? 'checked' : ''}
-                   ${disabledAttr}>
-            ${escapeHtml(field.label)}
-          </label>
-          <p class="pool-health-description">${escapeHtml(field.description)}${disabledNote}</p>
-        </div>`;
+                   value="${escapeHtml(currentVal)}"
+                   autocomplete="off"
+                   style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">
+            <p class="pool-health-description" style="margin-top:4px;">${escapeHtml(field.description)}</p>
+          </div>`;
+      } else if (field.type === 'boolean') {
+        // Check whether the required source module is installed (present in sourceMetadata),
+        // not whether it's enabled as an active web source.
+        const requiredSourceAvailable = !field.requiresSource
+          || !!webSourceMetadata[field.requiresSource];
+        const currentVal = currentSettings?.[field.key] ?? field.default ?? false;
+        const disabledAttr = requiredSourceAvailable ? '' : 'disabled';
+        const disabledNote = requiredSourceAvailable ? '' :
+          ` <em>(requires the ${field.requiresSource} source module to be installed)</em>`;
+        html += `
+          <div style="margin-bottom:12px;padding:0 16px;">
+            <label class="ws-global-label" style="${requiredSourceAvailable ? '' : 'opacity:0.5;'}">
+              <input type="checkbox"
+                     class="ws-boolean-setting"
+                     data-setting-key="${escapeHtml(field.key)}"
+                     ${currentVal ? 'checked' : ''}
+                     ${disabledAttr}>
+              ${escapeHtml(field.label)}
+            </label>
+            <p class="pool-health-description">${escapeHtml(field.description)}${disabledNote}</p>
+          </div>`;
+      }
     }
   }
 
@@ -17011,17 +17026,22 @@ async function saveWebSourceSettings() {
 }
 
 /**
- * Read non-filter settings from the UI (boolean toggles driven by settingsSchema).
+ * Read non-filter settings from the UI (string inputs and boolean toggles
+ * driven by settingsSchema).
  * Returns settings object or null if no non-filter settings exist for this source.
  */
 function readNonFilterSettingsFromUI(sourceId) {
   const schema = webSourceSettingsSchemas[sourceId];
   if (!schema?.fields?.length) return null;
 
-  const settings = {};
-  const boolFields = schema.fields.filter(f => f.type === 'boolean');
-  if (boolFields.length === 0) return null;
+  const hasStringFields  = schema.fields.some(f => f.type === 'string');
+  const hasBooleanFields = schema.fields.some(f => f.type === 'boolean');
+  if (!hasStringFields && !hasBooleanFields) return null;
 
+  const settings = {};
+  document.querySelectorAll('#web-source-settings-body .ws-string-setting').forEach(input => {
+    settings[input.dataset.settingKey] = input.value;
+  });
   document.querySelectorAll('#web-source-settings-body .ws-boolean-setting').forEach(cb => {
     settings[cb.dataset.settingKey] = cb.checked;
   });
