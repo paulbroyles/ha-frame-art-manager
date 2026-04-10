@@ -14,6 +14,22 @@ const MAX_ROUNDS = 5;
 // CirrusSearch hard-rejects gsroffset >= 10000. We stay safely below.
 const MAX_SEARCH_OFFSET = 9500;
 
+// In-memory cache for CirrusSearch totalhits counts, keyed by query string.
+// Avoids a serial count API call on every fetch for the same filter combination.
+// TTL: 1 hour — counts shift slowly and staleness is harmless (just affects offset range).
+const COUNT_CACHE_TTL_MS = 60 * 60 * 1000;
+const countCache = new Map(); // query → { count, expiresAt }
+
+function getCachedCount(query) {
+  const entry = countCache.get(query);
+  if (!entry || Date.now() > entry.expiresAt) return null;
+  return entry.count;
+}
+
+function setCachedCount(query, count) {
+  countCache.set(query, { count, expiresAt: Date.now() + COUNT_CACHE_TTL_MS });
+}
+
 const EXTMETA_FILTER = 'ObjectName|Artist|DateTimeOriginal|LicenseShortName|Credit|ImageDescription';
 
 // ── Media type categories ─────────────────────────────────────────────────────
@@ -386,34 +402,40 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 
   // In search mode, resolve a random base offset so the full result set is reachable.
   // Without this, every fetch starts at offset 0 and returns the same top results.
+  // The totalhits count is cached per query string (1hr TTL) to avoid a serial API
+  // round-trip on every fetch for the same filter combination.
   let searchBaseOffset = 0;
   if (useSearch) {
     const query = buildSearchQuery(allFilters, textTerm, filterDetails);
     if (query.trim()) {
-      try {
-        const countResponse = await axios.get(WIKIMEDIA_API, {
-          params: {
-            action:      'query',
-            list:        'search',
-            srsearch:    query,
-            srnamespace: 6,
-            srlimit:     1,
-            srinfo:      'totalhits',
-            format:      'json',
-            origin:      '*',
-          },
-          headers: { 'User-Agent': USER_AGENT },
-          timeout: 10000,
-        });
-        const totalhits = countResponse.data.query?.searchinfo?.totalhits ?? 0;
-        // Pick a random starting point within the reachable result set.
-        // Cap at MAX_SEARCH_OFFSET so subsequent round increments stay under the API limit.
-        const searchableCount = Math.max(1, Math.min(totalhits, MAX_SEARCH_OFFSET));
-        searchBaseOffset = Math.floor(Math.random() * searchableCount);
-      } catch {
-        // Non-fatal: fall back to offset 0 if the count call fails.
-        searchBaseOffset = 0;
+      let totalhits = getCachedCount(query);
+      if (totalhits === null) {
+        try {
+          const countResponse = await axios.get(WIKIMEDIA_API, {
+            params: {
+              action:      'query',
+              list:        'search',
+              srsearch:    query,
+              srnamespace: 6,
+              srlimit:     1,
+              srinfo:      'totalhits',
+              format:      'json',
+              origin:      '*',
+            },
+            headers: { 'User-Agent': USER_AGENT },
+            timeout: 10000,
+          });
+          totalhits = countResponse.data.query?.searchinfo?.totalhits ?? 0;
+          setCachedCount(query, totalhits);
+        } catch {
+          // Non-fatal: fall back to offset 0 if the count call fails.
+          totalhits = 0;
+        }
       }
+      // Pick a random starting point within the reachable result set.
+      // Cap at MAX_SEARCH_OFFSET so subsequent round increments stay under the API limit.
+      const searchableCount = Math.max(1, Math.min(totalhits, MAX_SEARCH_OFFSET));
+      searchBaseOffset = Math.floor(Math.random() * searchableCount);
     }
   }
 
