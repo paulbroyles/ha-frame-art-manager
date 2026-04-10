@@ -58,21 +58,32 @@ const INSTITUTIONS = [
 // Commons has well-organized subject categories that cut across media types.
 // A subject filter changes the browse gcmtitle, or adds incategory: in search mode.
 
-// Subject categories always use deepcat: in CirrusSearch to traverse subcategories.
-// These top-level Commons categories are hierarchical; direct file membership is sparse.
+// Subject categories use deepcat: in CirrusSearch to traverse the full subcategory tree.
+// Categories are general/cross-media (not painting-specific) so the subject filter works
+// across all media types — "Landscapes" returns landscape paintings AND landscape photos
+// AND landscape drawings.
+//
+// When a subject is active in search mode, no media clause is added. CirrusSearch
+// intersection of subject deepcat + media deepcat yields near-zero results because
+// Commons organises media-specific subcategories under the subject tree, not as
+// an intersection of separate subject and media trees.
+//
+// `gcmtitle` is used for direct category browse (single-filter mode).
+// `deepcatTitle` is the exact Commons category name for CirrusSearch deepcat:.
+// Pool sizes verified 2026-04-10 using CirrusSearch totalhits.
 const SUBJECT_CATEGORIES = [
-  { value: 'Portraits',          label: 'Portraits',          gcmtitle: 'Category:Portraits' },
-  { value: 'Landscapes',         label: 'Landscapes',         gcmtitle: 'Category:Landscapes' },
-  { value: 'Still lifes',        label: 'Still lifes',        gcmtitle: 'Category:Still lifes' },
-  { value: 'Religious art',      label: 'Religious art',      gcmtitle: 'Category:Christian art' },
-  { value: 'Mythology',          label: 'Mythology',          gcmtitle: 'Category:Mythology in art' },
-  { value: 'Genre scenes',       label: 'Genre scenes',       gcmtitle: 'Category:Genre paintings' },
-  { value: 'Animals in art',     label: 'Animals',            gcmtitle: 'Category:Animals in art' },
-  { value: 'Botanical art',      label: 'Botanical art',      gcmtitle: 'Category:Botanical illustrations' },
-  { value: 'Nude art',           label: 'Nude art',           gcmtitle: 'Category:Nude art' },
-  { value: 'Architecture',       label: 'Architecture',       gcmtitle: 'Category:Architectural drawings' },
-  { value: 'Marine art',         label: 'Marine art',         gcmtitle: 'Category:Marine art' },
-  { value: 'Battle art',         label: 'Battle art',         gcmtitle: 'Category:Battle paintings' },
+  { value: 'Portraits',      label: 'Portraits',      gcmtitle: 'Category:Portraits',             deepcatTitle: 'Portraits',             approxSize: 165000 },
+  { value: 'Landscapes',     label: 'Landscapes',     gcmtitle: 'Category:Landscapes',             deepcatTitle: 'Landscapes',             approxSize: 206000 },
+  { value: 'Still lifes',    label: 'Still lifes',    gcmtitle: 'Category:Still life',             deepcatTitle: 'Still life',             approxSize: 56000  },
+  { value: 'Religious art',  label: 'Religious art',  gcmtitle: 'Category:Religious art',          deepcatTitle: 'Religious art',          approxSize: 107000 },
+  { value: 'Mythology',      label: 'Mythology',      gcmtitle: 'Category:Mythology in art',       deepcatTitle: 'Mythology in art',       approxSize: 85000  },
+  { value: 'Genre scenes',   label: 'Genre scenes',   gcmtitle: 'Category:Genre art',              deepcatTitle: 'Genre art',              approxSize: 59000  },
+  { value: 'Animals',        label: 'Animals',        gcmtitle: 'Category:Animals in art',         deepcatTitle: 'Animals in art',         approxSize: 120000 },
+  { value: 'Botanical art',  label: 'Botanical art',  gcmtitle: 'Category:Botanical illustrations',deepcatTitle: 'Botanical illustrations', approxSize: 158000 },
+  { value: 'Nude art',       label: 'Nude art',       gcmtitle: 'Category:Nude paintings',         deepcatTitle: 'Nude paintings',         approxSize: 28000  },
+  { value: 'Marine art',     label: 'Marine art',     gcmtitle: 'Category:Marine art',             deepcatTitle: 'Marine art',             approxSize: 110000 },
+  { value: 'Battle art',     label: 'Battle art',     gcmtitle: 'Category:History paintings',      deepcatTitle: 'History paintings',      approxSize: 104000 },
+  { value: 'City scenes',    label: 'City scenes',    gcmtitle: 'Category:Cityscapes',             deepcatTitle: 'Cityscapes',             approxSize: 171000 },
 ];
 
 // ── Century values ────────────────────────────────────────────────────────────
@@ -280,27 +291,34 @@ function buildSearchQuery(allFilters, textTerm, filterDetails = true) {
     if (entry) parts.push(`incategory:"${stripCategoryPrefix(entry.gcmtitle)}"`);
   }
 
-  // Century × media (merged into one incategory clause for precision).
-  if (centuries.length > 0) {
-    const century    = centuries[Math.floor(Math.random() * centuries.length)];
-    const hyphenated = centuryToHyphenated(century);
-    const mediaPool  = eligibleMedia.length > 0 ? eligibleMedia : MEDIA_CATEGORIES;
-    const media      = weightedRandom(mediaPool);
-    parts.push(`incategory:"${hyphenated} ${media.centuryPrefix}"`);
-  } else if (eligibleMedia.length > 0 && eligibleMedia.length < MEDIA_CATEGORIES.length) {
-    // Media filter without century: add incategory for the selected media.
-    const media = weightedRandom(eligibleMedia);
-    parts.push(`incategory:"${stripCategoryPrefix(media.gcmtitle)}"`);
-  }
-
-  // Subject: use deepcat: to traverse the full subcategory tree.
-  // incategory: only matches direct file members, which is rarely populated for
-  // high-level subject categories like "Portraits" or "Landscapes".
+  // Subject: use deepcat: with cross-media subject categories.
+  // When subject is active, do NOT also add a media clause — the CirrusSearch intersection
+  // of subject deepcat + media deepcat yields near-zero results. Commons doesn't organise
+  // files at the intersection of independent subject and media category trees; you need to
+  // use subject-specific category names (e.g. "deepcat:Landscapes" returns 206K cross-media
+  // files, while "deepcat:Landscapes + deepcat:Paintings" returns 17).
+  // Institution is the same: don't add a media clause alongside it — institution categories
+  // are independent of the media category tree.
   if (subjects.length > 0) {
     const pick  = subjects[Math.floor(Math.random() * subjects.length)];
     const entry = SUBJECT_CATEGORIES.find(s => s.value === pick);
-    if (entry) parts.push(`deepcat:"${stripCategoryPrefix(entry.gcmtitle)}"`);
+    if (entry) parts.push(`deepcat:"${entry.deepcatTitle}"`);
+  } else if (institutions.length === 0) {
+    // No subject, no institution: apply century × media or plain media filter.
+    // Century × media: merge into a single incategory clause (e.g. "17th-century paintings").
+    if (centuries.length > 0) {
+      const century    = centuries[Math.floor(Math.random() * centuries.length)];
+      const hyphenated = centuryToHyphenated(century);
+      const mediaPool  = eligibleMedia.length > 0 ? eligibleMedia : MEDIA_CATEGORIES;
+      const media      = weightedRandom(mediaPool);
+      parts.push(`incategory:"${hyphenated} ${media.centuryPrefix}"`);
+    } else if (eligibleMedia.length > 0 && eligibleMedia.length < MEDIA_CATEGORIES.length) {
+      // Media filter without century: use deepcat to reach subcategories.
+      const media = weightedRandom(eligibleMedia);
+      parts.push(`deepcat:"${stripCategoryPrefix(media.gcmtitle)}"`);
+    }
   }
+  // Institution with no subject: institution clause already added above; no media clause.
 
   // Exclude detail/closeup images via category exclusion in search mode.
   if (filterDetails) {
@@ -755,9 +773,9 @@ const INSTITUTION_GROUPS = [
 
 const SUBJECT_GROUPS = [
   { name: 'People',        values: ['Portraits', 'Nude art'] },
-  { name: 'Nature',        values: ['Landscapes', 'Animals in art', 'Botanical art', 'Marine art'] },
+  { name: 'Nature',        values: ['Landscapes', 'Animals', 'Botanical art', 'Marine art'] },
   { name: 'Themes',        values: ['Religious art', 'Mythology', 'Genre scenes', 'Battle art'] },
-  { name: 'Other',         values: ['Still lifes', 'Architecture'] },
+  { name: 'Other',         values: ['Still lifes', 'City scenes'] },
 ];
 
 const CENTURY_GROUPS = [
