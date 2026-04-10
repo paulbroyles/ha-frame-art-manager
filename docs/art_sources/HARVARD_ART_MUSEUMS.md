@@ -97,6 +97,30 @@ The full list is available from `GET /culture?apikey=KEY`.
 Controlled vocabulary from the `century` field, in the format `"Nth century"` or
 `"Nth century BCE/CE"`. Our list spans 1st century BCE through the 21st century.
 
+### Worktype (`worktype` filter type)
+
+The `worktypes` field on each object record is an array of `{worktype, worktypeid}` objects.
+`worktype` is more specific than `classification` — "Paintings" (classification) includes
+any object with painted decoration, while `worktype: "Painting"` identifies objects that
+are paintings in the traditional fine-art sense.
+
+**require** → translated to the API `worktype=X|Y` parameter (pre-fetch, efficient).  
+**exclude** → applied post-fetch against the object's `worktypes` array (API has no native exclude param).
+
+Curated values (full list at `GET /worktype?apikey=KEY`):
+
+```
+Fine Art:        Painting, Drawing, Print, Illumination, Map, Poster
+Photography:     Photograph
+Sculpture:       Sculpture
+Decorative Arts: Vessel, Textile, Furniture, Coin, Jewelry
+Other:           Fragment
+```
+
+**Common use case**: when browsing the "Paintings" classification, add `worktype: exclude: [Fragment]`
+to remove painted pottery shards and architectural fragments, or `worktype: require: [Painting]`
+to get only traditional paintings.
+
 ### Artist / Search
 
 Both use the `keyword` parameter, which searches across title, people, and description.

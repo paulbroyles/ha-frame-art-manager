@@ -100,6 +100,40 @@ const CENTURY_CATEGORIES = [
   { name: 'Modern',        values: ['19th century', '20th century', '21st century'] },
 ];
 
+// ── Worktype filter ───────────────────────────────────────────────────────────
+//
+// Harvard's `worktypes` field is an array of {worktype, worktypeid} objects.
+// The API `worktype` query parameter filters by name (pipe-separated OR for require).
+// Exclude is applied post-fetch since the API has no native exclude param for this field.
+//
+// These curated values cover the most common worktypes in the digitised collection.
+// The full reference list is available from GET /worktype?apikey=KEY.
+
+const WORKTYPE_VALUES = [
+  'Painting',
+  'Drawing',
+  'Print',
+  'Photograph',
+  'Sculpture',
+  'Fragment',
+  'Vessel',
+  'Textile',
+  'Furniture',
+  'Coin',
+  'Jewelry',
+  'Illumination',
+  'Map',
+  'Poster',
+];
+
+const WORKTYPE_CATEGORIES = [
+  { name: 'Fine Art',        values: ['Painting', 'Drawing', 'Print', 'Illumination', 'Map', 'Poster'] },
+  { name: 'Photography',     values: ['Photograph'] },
+  { name: 'Sculpture',       values: ['Sculpture'] },
+  { name: 'Decorative Arts', values: ['Vessel', 'Textile', 'Furniture', 'Coin', 'Jewelry'] },
+  { name: 'Other',           values: ['Fragment'] },
+];
+
 // ── Filter helpers ────────────────────────────────────────────────────────────
 
 function applySetFilter(allValues, filters, type) {
@@ -131,6 +165,9 @@ function applySetFilter(allValues, filters, type) {
  *   media      — restrict/exclude classification categories (e.g. 'Paintings', 'Sculpture')
  *   culture    — restrict/exclude by cultural origin (e.g. 'French', 'Japanese')
  *   century    — restrict/exclude by century (e.g. '17th century', '19th century')
+ *   worktype   — restrict/exclude by object type (e.g. 'Painting', 'Fragment')
+ *                require: translated to API worktype= param (pre-fetch)
+ *                exclude: applied post-fetch against the worktypes array
  *   artist     — require: text search across artist/people fields (single value)
  *   search     — require: general keyword search (single value, lower priority than artist)
  *
@@ -165,14 +202,25 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     throw new Error('No centuries eligible after applying filters');
   }
 
+  // Worktype: require values go to the API param; exclude values are applied post-fetch.
+  const worktypeRequire = filters
+    .filter(f => f.type === 'worktype' && f.mode === 'require')
+    .flatMap(f => f.values || []);
+  const worktypeExcludeSet = new Set(
+    filters
+      .filter(f => f.type === 'worktype' && f.mode === 'exclude')
+      .flatMap(f => f.values || [])
+      .map(v => v.toLowerCase())
+  );
+
   // ── Build API params ───────────────────────────────────────────────────────
   const params = {
-    apikey:         apiKey,
-    sort:           'random',
-    hasimage:       1,
+    apikey:          apiKey,
+    sort:            'random',
+    hasimage:        1,
     imagepermission: 1,
-    size:           BATCH_SIZE,
-    fields:         'id,title,people,technique,dated,primaryimageurl,width,height,url,classification,culture,century',
+    size:            BATCH_SIZE,
+    fields:          'id,title,people,technique,dated,primaryimageurl,width,height,url,classification,culture,century,worktypes',
   };
 
   // Pipe-separated OR filter; omit when all values are eligible.
@@ -184,6 +232,9 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   }
   if (eligibleCenturies.length < CENTURY_VALUES.length) {
     params.century = eligibleCenturies.join('|');
+  }
+  if (worktypeRequire.length > 0) {
+    params.worktype = worktypeRequire.join('|');
   }
 
   // Text search: artist takes priority over general keyword search.
@@ -216,6 +267,15 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       if (!obj.primaryimageurl) {
         console.warn(`[harvard_art_museums] Object ${obj.id} skipped: no primary image`);
         continue;
+      }
+
+      // Post-fetch worktype exclude filter (API has no native exclude param for this).
+      if (worktypeExcludeSet.size > 0) {
+        const objWorktypes = (obj.worktypes || []).map(wt => (wt.worktype || '').toLowerCase());
+        if (objWorktypes.some(wt => worktypeExcludeSet.has(wt))) {
+          console.warn(`[harvard_art_museums] Object ${obj.id} skipped: excluded worktype (${objWorktypes.join(', ')})`);
+          continue;
+        }
       }
 
       // Pre-download aspect ratio check using API-provided dimensions (preferred —
@@ -468,7 +528,7 @@ async function countArtistArtworks(artistName, options = {}) {
 function selectMode(filters = []) {
   const hasArtist  = filters.some(f => f.type === 'artist');
   const hasSearch  = filters.some(f => f.type === 'search');
-  const apiFilters = filters.filter(f => ['media', 'culture', 'century', 'search', 'artist'].includes(f.type));
+  const apiFilters = filters.filter(f => ['media', 'culture', 'century', 'worktype', 'search', 'artist'].includes(f.type));
   const postFilters = [];
   const mode = hasArtist ? 'artist_search' : hasSearch ? 'keyword_search' : 'random';
   return { mode, apiFilters, postFilters };
@@ -504,6 +564,15 @@ function getFilterTypes() {
       multiValue:  true,
       groups:      CENTURY_CATEGORIES.map(cat => ({ name: cat.name, values: cat.values })),
       values:      CENTURY_VALUES.map(name => ({ value: name, label: name })),
+    },
+    {
+      type:        'worktype',
+      label:       'Object Type',
+      description: 'Restrict or exclude by object type. Useful for excluding "Fragment" when browsing the Paintings category, or for requiring "Painting" to get only traditional paintings.',
+      modes:       ['require', 'exclude'],
+      multiValue:  true,
+      groups:      WORKTYPE_CATEGORIES.map(cat => ({ name: cat.name, values: cat.values })),
+      values:      WORKTYPE_VALUES.map(name => ({ value: name, label: name })),
     },
     {
       type:        'artist',
@@ -579,4 +648,6 @@ module.exports = {
   MEDIUM_CATEGORIES,
   CULTURE_VALUES,
   CENTURY_VALUES,
+  WORKTYPE_VALUES,
+  WORKTYPE_CATEGORIES,
 };
