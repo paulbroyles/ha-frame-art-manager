@@ -19,4 +19,5 @@ module.exports = {
   access_okeefe:       require('./access_okeefe'),
   nga:                 require('./nga'),
   getty:               require('./getty'),
+  harvard_art_museums: require('./harvard_art_museums'),
 };

@@ -241,6 +241,12 @@ const BUILTIN_SOURCES = {
     description: 'Open-access (CC0) artworks and photographs from the Getty Museum collection (~91,500 works), including paintings, sculpture, manuscripts, and the renowned photography collection',
     type: 'getty',
   },
+  harvard_art_museums: {
+    id: 'harvard_art_museums',
+    name: 'Harvard Art Museums',
+    description: 'Artworks from the Harvard Art Museums collection (~250,000 objects across the Fogg, Busch-Reisinger, and Arthur M. Sackler museums), with rich filtering by culture, century, and category. Requires a free API key.',
+    type: 'harvard_art_museums',
+  },
 };
 
 // ── Config file helpers ───────────────────────────────────────────────────────
