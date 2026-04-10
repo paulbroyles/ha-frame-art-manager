@@ -402,40 +402,44 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 
   // In search mode, resolve a random base offset so the full result set is reachable.
   // Without this, every fetch starts at offset 0 and returns the same top results.
-  // The totalhits count is cached per query string (1hr TTL) to avoid a serial API
-  // round-trip on every fetch for the same filter combination.
+  //
+  // Strategy: use whatever cached count we have immediately (no waiting). If no cached
+  // count exists, fire the count query in parallel with the first batch query so there
+  // is zero serial latency — the count result is stored for the next fetch.
+  // On first-ever fetch for a given query, we use MAX_SEARCH_OFFSET as the range;
+  // subsequent fetches use the accurate cached count.
   let searchBaseOffset = 0;
+  let backgroundCountPromise = null;
   if (useSearch) {
     const query = buildSearchQuery(allFilters, textTerm, filterDetails);
     if (query.trim()) {
-      let totalhits = getCachedCount(query);
-      if (totalhits === null) {
-        try {
-          const countResponse = await axios.get(WIKIMEDIA_API, {
-            params: {
-              action:      'query',
-              list:        'search',
-              srsearch:    query,
-              srnamespace: 6,
-              srlimit:     1,
-              srinfo:      'totalhits',
-              format:      'json',
-              origin:      '*',
-            },
-            headers: { 'User-Agent': USER_AGENT },
-            timeout: 10000,
-          });
-          totalhits = countResponse.data.query?.searchinfo?.totalhits ?? 0;
-          setCachedCount(query, totalhits);
-        } catch {
-          // Non-fatal: fall back to offset 0 if the count call fails.
-          totalhits = 0;
-        }
+      const cachedCount = getCachedCount(query);
+      if (cachedCount !== null) {
+        // Cache hit: use the known count immediately, no extra API call.
+        const searchableCount = Math.max(1, Math.min(cachedCount, MAX_SEARCH_OFFSET));
+        searchBaseOffset = Math.floor(Math.random() * searchableCount);
+      } else {
+        // Cache miss: use MAX_SEARCH_OFFSET for this fetch, fire count in parallel with
+        // the first batch query (it will resolve while the batch is in-flight).
+        searchBaseOffset = Math.floor(Math.random() * MAX_SEARCH_OFFSET);
+        backgroundCountPromise = axios.get(WIKIMEDIA_API, {
+          params: {
+            action:      'query',
+            list:        'search',
+            srsearch:    query,
+            srnamespace: 6,
+            srlimit:     1,
+            srinfo:      'totalhits',
+            format:      'json',
+            origin:      '*',
+          },
+          headers: { 'User-Agent': USER_AGENT },
+          timeout: 10000,
+        }).then(r => {
+          const hits = r.data.query?.searchinfo?.totalhits ?? 0;
+          if (hits > 0) setCachedCount(query, hits);
+        }).catch(() => {});  // non-fatal
       }
-      // Pick a random starting point within the reachable result set.
-      // Cap at MAX_SEARCH_OFFSET so subsequent round increments stay under the API limit.
-      const searchableCount = Math.max(1, Math.min(totalhits, MAX_SEARCH_OFFSET));
-      searchBaseOffset = Math.floor(Math.random() * searchableCount);
     }
   }
 
@@ -924,6 +928,36 @@ const defaultMapping = {
   dateCreated: 'date',
   source:      'museum',
 };
+
+// ── Startup cache warm-up ─────────────────────────────────────────────────────
+//
+// Pre-populate totalhits cache for common filter combinations so the first user
+// fetch doesn't pay the count query latency. Runs asynchronously at module load;
+// failures are silently ignored.
+
+const WARMUP_QUERIES = [
+  // No filters (default random — all media weighted draw uses search when media filter active,
+  // but pure no-filter uses category browse, so warm up the most common single-filter combos)
+  'deepcat:"Paintings" -deepcat:"Details of paintings"',
+  'deepcat:"Photographs" -deepcat:"Details of paintings"',
+  'deepcat:"Landscapes" -deepcat:"Details of paintings"',
+  'deepcat:"Portraits" -deepcat:"Details of paintings"',
+];
+
+(async () => {
+  for (const query of WARMUP_QUERIES) {
+    if (getCachedCount(query) !== null) continue;
+    try {
+      const r = await axios.get(WIKIMEDIA_API, {
+        params: { action: 'query', list: 'search', srsearch: query, srnamespace: 6, srlimit: 1, srinfo: 'totalhits', format: 'json', origin: '*' },
+        headers: { 'User-Agent': USER_AGENT },
+        timeout: 15000,
+      });
+      const hits = r.data.query?.searchinfo?.totalhits ?? 0;
+      if (hits > 0) setCachedCount(query, hits);
+    } catch {}
+  }
+})();
 
 module.exports = {
   fetchRandomArtwork,
