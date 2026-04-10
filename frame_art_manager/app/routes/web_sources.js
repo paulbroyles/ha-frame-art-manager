@@ -1225,18 +1225,21 @@ const MAX_RECENT_WEB_ARTWORKS = 30; // ring-buffer size for per-TV web source re
 /**
  * Given a resolved virtual tag, fetch one artwork from the appropriate source.
  *
- * Handles two cases:
+ * Handles three cases:
  *   - Regular tag (virtualTag.sourceId is set): validate source, merge filter cascade, fetch.
  *   - Unified search (virtualTag.sourceId is null, queryMode: 'search'): fan out to all
  *     search-capable sources in random order, return result from the first that succeeds.
+ *   - Unified artist (virtualTag.sourceId is null, queryMode: 'artist'): try artist-capable
+ *     sources in order (preferred first), return result from the first that succeeds.
  *
  * @param {object} webSources  - Loaded web sources config
  * @param {object} virtualTag  - The resolved virtual tag object
  * @param {string} aspectRatio - Resolved aspect ratio ('all', 'landscape', 'portrait')
+ * @param {object} [retryOpts] - Passed to fetchWithRetry at each fetch point
  * @returns {{ chosenSourceId, fetchResult, mergedFilters, extraOpts }}
  * @throws Errors annotated with .statusCode (400/503)
  */
-async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio) {
+async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio, retryOpts = {}) {
   let chosenSourceId = virtualTag.sourceId;
   let mergedFilters, extraOpts, fetchResult;
 
@@ -1388,6 +1391,64 @@ async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio) {
   return { chosenSourceId, fetchResult, mergedFilters, extraOpts };
 }
 
+/**
+ * Single entry point for all source fetches: resolves source + filters, then
+ * applies fetchWithRetry (orientation, resolution, recency, mood).
+ *
+ * All callers — production (fetchAndProcessWebSource) and test-fetch — go
+ * through this function so there is exactly one code path to maintain.
+ *
+ * @param {object} webSources
+ * @param {object} params
+ * @param {string}   [params.sourceId]     - For direct-source dispatch (mutually exclusive with virtualTag)
+ * @param {object}   [params.virtualTag]   - For virtual-tag dispatch (mutually exclusive with sourceId)
+ * @param {Array}    [params.adHocFilters] - Extra filters merged last (direct-source path only)
+ * @param {string}   params.aspectRatio    - Resolved aspect ratio ('all', 'landscape', 'portrait')
+ * @param {Array}    [params.moodFilters]  - Mood-injected filters; merged after virtual-tag resolution;
+ *                                          when non-empty the pre-fetched result is discarded so the
+ *                                          re-fetch honours the full filter set.
+ * @param {object} [retryOpts]             - Passed to fetchWithRetry (skipLowRes, minResolution,
+ *                                          recentArtworkIds, moodRejectTerms, maxAttempts, logTag)
+ * @returns {{ chosenSourceId, fetchResult, mergedFilters, extraOpts }}
+ * @throws Errors annotated with .statusCode
+ */
+async function resolveAndFetch(webSources, { sourceId, virtualTag, adHocFilters, aspectRatio, moodFilters = [] }, retryOpts = {}) {
+  let chosenSourceId, mergedFilters, extraOpts, prefetchedResult = null;
+
+  if (virtualTag) {
+    ({ chosenSourceId, fetchResult: prefetchedResult, mergedFilters, extraOpts }
+      = await fetchFromVirtualTag(webSources, virtualTag, aspectRatio));
+    // Inject mood filters; discard prefetch so re-fetch uses the full combined filter set.
+    if (moodFilters.length > 0) {
+      mergedFilters = mergeFilterCascade(mergedFilters, moodFilters);
+      prefetchedResult = null;
+    }
+  } else {
+    // Direct-source dispatch.
+    if (!sourceId) throw Object.assign(new Error('sourceId is required for direct-source fetch'), { statusCode: 400 });
+    if (!isSourceCompatible(sourceId, aspectRatio)) {
+      throw Object.assign(
+        new Error(`Source "${sourceId}" is not compatible with the current orientation filter (${aspectRatio})`),
+        { statusCode: 400 }
+      );
+    }
+    if (!BUILTIN_SOURCES[sourceId]) throw Object.assign(new Error(`Unknown source: ${sourceId}`), { statusCode: 400 });
+    if (!SOURCE_FETCHERS[sourceId]) throw Object.assign(new Error(`Source "${sourceId}" is not yet implemented`), { statusCode: 400 });
+    chosenSourceId = sourceId;
+    const filterLevels = [webSources.globalFilters || [], webSources.sources[chosenSourceId]?.filters || [], adHocFilters || []];
+    if (moodFilters.length > 0) filterLevels.push(moodFilters);
+    mergedFilters = mergeFilterCascade(...filterLevels);
+    extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
+  }
+
+  const fetchResult = await fetchWithRetry(SOURCE_FETCHERS[chosenSourceId], mergedFilters, { aspectRatio, ...extraOpts }, {
+    prefetchedResult,
+    ...retryOpts,
+  });
+
+  return { chosenSourceId, fetchResult, mergedFilters, extraOpts };
+}
+
 async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId, activeMoods = [], moodKeyword = null }) {
   const webSources = await readWebSourcesConfig(req.frameArtPath);
   const aspectRatio = resolveAspectRatioFilter(webSources, tvOrientation);
@@ -1405,12 +1466,9 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
   const moodRejectTerms = activeMoodDefs.flatMap(m => m.reject_terms || []).map(t => t.toLowerCase());
   const moodFilters = activeMoodDefs.flatMap(m => m.filters || []);
 
-  // Resolve virtual tag → sourceId + extra filters.
-  // A mood keyword search overrides virtualTagId, behaving as a unified keyword search.
+  // Resolve virtual tag (mood keyword search acts as a synthetic unified search tag).
   let virtualTag = null;
-  let chosenSourceId = sourceId;
   if (moodKeyword) {
-    // Treat as a synthetic unified keyword search virtual tag.
     virtualTag = { id: '__mood_search__', sourceId: null, queryMode: 'search', queryParams: { keyword: moodKeyword }, filters: [] };
   } else if (virtualTagId) {
     virtualTag = webSources.virtualTags[virtualTagId];
@@ -1419,65 +1477,22 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
       err.statusCode = 404;
       throw err;
     }
-    chosenSourceId = virtualTag.sourceId;
   }
 
-  let prefetchedResult = null;
-  let mergedFilters, extraOpts;
-
-  if (virtualTag) {
-    // Virtual tag dispatch (including synthetic mood keyword tag) —
-    // handles regular, unified-search, and unified-artist tags.
-    ({ chosenSourceId, fetchResult: prefetchedResult, mergedFilters, extraOpts }
-      = await fetchFromVirtualTag(webSources, virtualTag, aspectRatio));
-  } else {
-    // Direct source selection (no virtual tag).
-    if (!chosenSourceId) {
-      const err = new Error('Either virtualTagId, moodKeyword, or sourceId is required.');
-      err.statusCode = 400;
-      throw err;
-    }
-    if (!isSourceCompatible(chosenSourceId, aspectRatio)) {
-      const err = new Error(`Source "${chosenSourceId}" is not compatible with the current orientation filter (${aspectRatio})`);
-      err.statusCode = 400;
-      throw err;
-    }
-    if (!BUILTIN_SOURCES[chosenSourceId]) {
-      const err = new Error(`Unknown source: ${chosenSourceId}`);
-      err.statusCode = 400;
-      throw err;
-    }
-    if (!SOURCE_FETCHERS[chosenSourceId]) {
-      const err = new Error(`Source "${chosenSourceId}" is not yet implemented`);
-      err.statusCode = 400;
-      throw err;
-    }
-    mergedFilters = mergeFilterCascade(
-      webSources.globalFilters || [],
-      webSources.sources[chosenSourceId]?.filters || [],
-      []
-    );
-    extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
+  if (!virtualTag && !sourceId) {
+    const err = new Error('Either virtualTagId, moodKeyword, or sourceId is required.');
+    err.statusCode = 400;
+    throw err;
   }
 
-  // Inject active mood filters into the merged filter cascade.
-  // These are the same filter cascade objects as virtual tag filters, so they
-  // slot into the existing infrastructure (e.g., color filters for Google Arts).
-  if (moodFilters.length > 0) {
-    mergedFilters = mergeFilterCascade(mergedFilters, moodFilters);
-    // Discard the prefetched result so the retry loop fetches with the full filter set.
-    prefetchedResult = null;
-  }
-
-  const fetcher = SOURCE_FETCHERS[chosenSourceId];
   const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
   const recentArtworkIds = new Set(webSources.webSourceRecency?.[deviceId] || []);
 
-  const fetchResult = await fetchWithRetry(fetcher, mergedFilters, { aspectRatio, ...extraOpts }, {
-    skipLowRes, minResolution, maxAttempts: 5,
-    prefetchedResult, recentArtworkIds, moodRejectTerms,
-    logTag: 'web_sources',
-  });
+  const { chosenSourceId, fetchResult } = await resolveAndFetch(
+    webSources,
+    { sourceId, virtualTag, aspectRatio, moodFilters },
+    { skipLowRes, minResolution, maxAttempts: 5, recentArtworkIds, moodRejectTerms, logTag: 'web_sources' }
+  );
   const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
   const orientation = tvOrientation || 'landscape';
@@ -1923,6 +1938,8 @@ router.post('/test-fetch', async (req, res) => {
     let chosenSourceId, imageBuffer, contentType, artMetadata;
     const fetchTrace = { aspectRatio };
 
+    const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
+
     if (specificImage && specificImage.trim()) {
       // Fetch a specific image rather than a random one.
       fetchTrace.path = 'specific';
@@ -1934,56 +1951,44 @@ router.post('/test-fetch', async (req, res) => {
         const firstTagSource = Object.values(webSources.virtualTags)[0]?.sourceId;
         chosenSourceId = firstTagSource || Object.keys(SOURCE_MODULES)[0];
       }
-    } else if (adHocSourceId) {
-      // Ad-hoc mode: source + inline filters, no virtual tag needed.
-      chosenSourceId = adHocSourceId;
-      const fetcher = SOURCE_FETCHERS[chosenSourceId];
-      if (!fetcher) {
-        return res.status(400).json({ error: `Source "${chosenSourceId}" is not yet implemented` });
-      }
-      const globalFilters = webSources.globalFilters || [];
-      const sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
-      const mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, adHocFilters || []);
-      const sourceModule = SOURCE_MODULES[chosenSourceId];
-      const modeInfo = sourceModule?.selectMode?.(mergedFilters) || { mode: 'unknown' };
-      fetchTrace.path = 'ad-hoc';
-      fetchTrace.mode = modeInfo.mode;
-      fetchTrace.globalFilters = globalFilters;
-      fetchTrace.sourceFilters = sourceFilters;
-      fetchTrace.adHocFilters = adHocFilters || [];
-      fetchTrace.mergedFilters = mergedFilters;
-      const extraOpts = sourceModule?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
-      const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
-      const testFetchResult = await fetchWithRetry(fetcher, mergedFilters, { aspectRatio, ...extraOpts }, {
-        skipLowRes, minResolution, maxAttempts: 5, logTag: 'test-fetch',
-      });
-      ({ imageBuffer, contentType, metadata: artMetadata } = testFetchResult);
     } else {
-      // Virtual tag determines source — delegate to shared dispatch helper.
-      let vtFetch;
+      // All random fetches (ad-hoc source or virtual tag) go through resolveAndFetch.
+      let resolved;
       try {
-        vtFetch = await fetchFromVirtualTag(webSources, virtualTag, aspectRatio);
+        resolved = await resolveAndFetch(
+          webSources,
+          { sourceId: adHocSourceId, virtualTag, adHocFilters, aspectRatio },
+          { skipLowRes, minResolution, maxAttempts: 5, logTag: 'test-fetch' }
+        );
       } catch (err) {
         return res.status(err.statusCode || 500).json({ error: err.message });
       }
-      chosenSourceId = vtFetch.chosenSourceId;
-      imageBuffer    = vtFetch.fetchResult.imageBuffer;
-      contentType    = vtFetch.fetchResult.contentType;
-      artMetadata    = vtFetch.fetchResult.metadata;
-      const modeInfo = SOURCE_MODULES[chosenSourceId]?.selectMode?.(vtFetch.mergedFilters) || { mode: 'unknown' };
-      fetchTrace.virtualTagId = virtualTagId;
+      chosenSourceId = resolved.chosenSourceId;
+      ({ imageBuffer, contentType } = resolved.fetchResult);
+      artMetadata = resolved.fetchResult.metadata;
+
+      // Populate fetch trace.
+      const modeInfo = SOURCE_MODULES[chosenSourceId]?.selectMode?.(resolved.mergedFilters) || { mode: 'unknown' };
       fetchTrace.mode = modeInfo.mode;
-      if (!virtualTag.sourceId && virtualTag.queryMode === 'search') {
+      if (adHocSourceId) {
+        fetchTrace.path = 'ad-hoc';
+        fetchTrace.globalFilters = webSources.globalFilters || [];
+        fetchTrace.sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
+        fetchTrace.adHocFilters = adHocFilters || [];
+        fetchTrace.mergedFilters = resolved.mergedFilters;
+      } else if (virtualTag && !virtualTag.sourceId && virtualTag.queryMode === 'search') {
         fetchTrace.path = 'unified-search';
+        fetchTrace.virtualTagId = virtualTagId;
         fetchTrace.keyword = virtualTag.queryParams?.keyword;
         fetchTrace.sourceId = chosenSourceId;
-        fetchTrace.mergedFilters = vtFetch.mergedFilters;
+        fetchTrace.mergedFilters = resolved.mergedFilters;
       } else {
         fetchTrace.path = 'virtual-tag';
+        fetchTrace.virtualTagId = virtualTagId;
         fetchTrace.globalFilters = webSources.globalFilters || [];
         fetchTrace.sourceFilters = webSources.sources[chosenSourceId]?.filters || [];
         fetchTrace.tagFilters = virtualTag?.filters || [];
-        fetchTrace.mergedFilters = vtFetch.mergedFilters;
+        fetchTrace.mergedFilters = resolved.mergedFilters;
       }
     }
 
