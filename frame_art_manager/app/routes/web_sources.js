@@ -669,6 +669,98 @@ function isSourceCompatible(sourceId, aspectRatio) {
   return true;
 }
 
+/**
+ * Fetch from a source with retry logic for orientation, resolution, recency, and mood filters.
+ *
+ * @param {Function} fetcher - Source fetchRandomArtwork function
+ * @param {Array}    filters - Merged filter cascade to pass to the fetcher
+ * @param {object}   fetchOptions - Options passed directly to the fetcher (aspectRatio, extraOpts, …)
+ * @param {object}   [retryOpts]
+ * @param {boolean}  [retryOpts.skipLowRes=false]
+ * @param {number}   [retryOpts.minResolution=1080]
+ * @param {number}   [retryOpts.maxAttempts=5]
+ * @param {object}   [retryOpts.prefetchedResult=null] - Reused on first attempt (avoids redundant fetch)
+ * @param {Set}      [retryOpts.recentArtworkIds=new Set()]
+ * @param {string[]} [retryOpts.moodRejectTerms=[]]
+ * @param {string}   [retryOpts.logTag='web_sources'] - Prefix for console.warn messages
+ * @returns {Promise<object>} fetchResult ({ imageBuffer, contentType, metadata })
+ */
+async function fetchWithRetry(fetcher, filters, fetchOptions, {
+  skipLowRes = false, minResolution = 1080, maxAttempts = 5,
+  prefetchedResult = null, recentArtworkIds = new Set(), moodRejectTerms = [],
+  logTag = 'web_sources',
+} = {}) {
+  const { aspectRatio = 'all' } = fetchOptions;
+  let fetchResult;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    // On the first attempt, reuse any pre-fetched result to avoid a redundant round-trip.
+    fetchResult = (attempt === 0 && prefetchedResult)
+      ? prefetchedResult
+      : await fetcher(filters, fetchOptions);
+    const isLast = attempt === maxAttempts - 1;
+
+    // Resolve image dimensions once for both resolution and orientation checks.
+    const needsMetadata = skipLowRes || aspectRatio !== 'all';
+    if (needsMetadata) {
+      const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
+
+      if (skipLowRes) {
+        const shortSide = Math.min(width, height);
+        if (shortSide < minResolution) {
+          if (!isLast) {
+            console.warn(`[${logTag}] Low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${maxAttempts})`);
+            continue;
+          }
+          console.warn(`[${logTag}] All ${maxAttempts} attempts returned low-res images; using last result`);
+        }
+      }
+
+      if (aspectRatio !== 'all') {
+        const isLandscape = width > height;
+        const orientationMatches = (aspectRatio === 'landscape' && isLandscape)
+                                 || (aspectRatio === 'portrait'  && !isLandscape);
+        if (!orientationMatches) {
+          if (!isLast) {
+            console.warn(`[${logTag}] Wrong orientation (${width}×${height}, wanted ${aspectRatio}); retrying (attempt ${attempt + 1}/${maxAttempts})`);
+            continue;
+          }
+          console.warn(`[${logTag}] All ${maxAttempts} attempts returned wrong orientation; using last result`);
+        }
+      }
+    }
+
+    if (recentArtworkIds.size > 0) {
+      const artworkId = fetchResult.metadata?.artworkUrl;
+      if (artworkId && recentArtworkIds.has(artworkId)) {
+        if (!isLast) {
+          console.log(`[${logTag}] Recently shown artwork; retrying (attempt ${attempt + 1}/${maxAttempts})`);
+          continue;
+        }
+        console.log(`[${logTag}] All ${maxAttempts} attempts returned recently shown artwork; using last result`);
+      }
+    }
+
+    // Best-effort mood reject_terms filter — falls through on last attempt.
+    if (moodRejectTerms.length > 0) {
+      const metaStr = [
+        fetchResult.metadata?.title,
+        fetchResult.metadata?.description,
+        fetchResult.metadata?.creator_name,
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (moodRejectTerms.some(term => metaStr.includes(term))) {
+        if (!isLast) {
+          console.warn(`[${logTag}] Mood reject_terms matched metadata; retrying (attempt ${attempt + 1}/${maxAttempts})`);
+          continue;
+        }
+        console.warn(`[${logTag}] All ${maxAttempts} attempts matched mood reject_terms; using last result`);
+      }
+    }
+
+    break;
+  }
+  return fetchResult;
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 // GET /api/web-sources/config
@@ -1378,84 +1470,14 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
   }
 
   const fetcher = SOURCE_FETCHERS[chosenSourceId];
-
-  // Fetch, with optional retry when:
-  //   - image orientation doesn't match the aspect ratio filter (route-level fallback for
-  //     all sources — catches anything a source's internal check misses)
-  //   - image is below minimum resolution (skipLowRes)
-  //   - image was recently shown on this TV (recency deduplication)
-  //   - image metadata contains mood reject_terms (best-effort post-fetch filter)
   const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
   const recentArtworkIds = new Set(webSources.webSourceRecency?.[deviceId] || []);
-  const MAX_FETCH_ATTEMPTS = 5;
-  let fetchResult;
-  for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt++) {
-    // On the first attempt for a virtual tag, reuse the result already fetched
-    // by fetchFromVirtualTag to avoid a redundant round-trip to the source.
-    fetchResult = (attempt === 0 && prefetchedResult) ? prefetchedResult : await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
-    const isLast = attempt === MAX_FETCH_ATTEMPTS - 1;
 
-    // Resolve image dimensions once for both checks (avoids calling sharp twice).
-    const needsMetadata = skipLowRes || aspectRatio !== 'all';
-    if (needsMetadata) {
-      const { width, height } = await sharp(fetchResult.imageBuffer).metadata();
-
-      if (skipLowRes) {
-        const shortSide = Math.min(width, height);
-        if (shortSide < minResolution) {
-          if (!isLast) {
-            console.warn(`[web_sources] Low-res image (${width}×${height}, short side ${shortSide} < ${minResolution}); retrying (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS})`);
-            continue;
-          }
-          console.warn(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts returned low-res images; using last result`);
-        }
-      }
-
-      if (aspectRatio !== 'all') {
-        const isLandscape = width > height;
-        const orientationMatches = (aspectRatio === 'landscape' && isLandscape)
-                                 || (aspectRatio === 'portrait'  && !isLandscape);
-        if (!orientationMatches) {
-          if (!isLast) {
-            console.warn(`[web_sources] Wrong orientation (${width}×${height}, wanted ${aspectRatio}); retrying (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS})`);
-            continue;
-          }
-          console.warn(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts returned wrong orientation; using last result`);
-        }
-      }
-    }
-
-    if (recentArtworkIds.size > 0) {
-      const artworkId = fetchResult.metadata?.artworkUrl;
-      if (artworkId && recentArtworkIds.has(artworkId)) {
-        if (!isLast) {
-          console.log(`[web_sources] Recently shown artwork; retrying (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS})`);
-          continue;
-        }
-        console.log(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts returned recently shown artwork; using last result`);
-      }
-    }
-
-    // Best-effort mood reject_terms filter: skip images whose metadata contains
-    // any of the reject terms. Falls through on the last attempt so we always
-    // return something rather than failing the shuffle.
-    if (moodRejectTerms.length > 0) {
-      const metaStr = [
-        fetchResult.metadata?.title,
-        fetchResult.metadata?.description,
-        fetchResult.metadata?.creator_name,
-      ].filter(Boolean).join(' ').toLowerCase();
-      if (moodRejectTerms.some(term => metaStr.includes(term))) {
-        if (!isLast) {
-          console.warn(`[web_sources] Mood reject_terms matched metadata; retrying (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS})`);
-          continue;
-        }
-        console.warn(`[web_sources] All ${MAX_FETCH_ATTEMPTS} attempts matched mood reject_terms; using last result`);
-      }
-    }
-
-    break;
-  }
+  const fetchResult = await fetchWithRetry(fetcher, mergedFilters, { aspectRatio, ...extraOpts }, {
+    skipLowRes, minResolution, maxAttempts: 5,
+    prefetchedResult, recentArtworkIds, moodRejectTerms,
+    logTag: 'web_sources',
+  });
   const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
   const orientation = tvOrientation || 'landscape';
@@ -1931,20 +1953,10 @@ router.post('/test-fetch', async (req, res) => {
       fetchTrace.adHocFilters = adHocFilters || [];
       fetchTrace.mergedFilters = mergedFilters;
       const extraOpts = sourceModule?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
-      // Retry loop so orientation filter works even when a source's internal check misses.
-      const MAX_TEST_RETRIES = 5;
-      let testFetchResult;
-      for (let attempt = 0; attempt < MAX_TEST_RETRIES; attempt++) {
-        testFetchResult = await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
-        if (aspectRatio === 'all') break;
-        const { width, height } = await sharp(testFetchResult.imageBuffer).metadata();
-        const isLandscape = width > height;
-        const matches = (aspectRatio === 'landscape' && isLandscape) || (aspectRatio === 'portrait' && !isLandscape);
-        if (matches) break;
-        if (attempt === MAX_TEST_RETRIES - 1) {
-          console.warn(`[test-fetch] All ${MAX_TEST_RETRIES} attempts returned wrong orientation (wanted ${aspectRatio}); using last result`);
-        }
-      }
+      const { skipLowRes, minResolution = 1080 } = webSources.imageProcessing;
+      const testFetchResult = await fetchWithRetry(fetcher, mergedFilters, { aspectRatio, ...extraOpts }, {
+        skipLowRes, minResolution, maxAttempts: 5, logTag: 'test-fetch',
+      });
       ({ imageBuffer, contentType, metadata: artMetadata } = testFetchResult);
     } else {
       // Virtual tag determines source — delegate to shared dispatch helper.
@@ -2347,3 +2359,7 @@ module.exports.clearCacheForDevice = clearCacheForDevice;
 module.exports.readWebSourcesConfig = readWebSourcesConfig;
 module.exports.writeWebSourcesConfig = writeWebSourcesConfig;
 module.exports.getArtistCounts = getArtistCounts;
+module.exports.resolveAspectRatioFilter = resolveAspectRatioFilter;
+module.exports.isSourceCompatible = isSourceCompatible;
+module.exports.mergeFilterCascade = mergeFilterCascade;
+module.exports.fetchWithRetry = fetchWithRetry;

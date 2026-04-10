@@ -276,12 +276,21 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       continue;
     }
 
-    // Filter by aspect ratio before downloading (aspectRatio is in the API response).
+    // Filter by aspect ratio before downloading.
+    // Prefer pixel dimensions (width/height) from the API — more reliable than the
+    // aspectRatio float field. Exclude artworks with unknown dimensions rather than
+    // letting them through: portrait images with null aspectRatio were slipping past
+    // and forcing the route-level retry to exhaust all attempts.
     const eligible = aspectRatio === 'all'
       ? edges
       : edges.filter(({ node }) => {
-          if (!node?.image?.aspectRatio) return true; // unknown — allow
-          const isLandscape = node.image.aspectRatio > 1;
+          const img = node?.image;
+          if (img?.width && img?.height) {
+            const isLandscape = img.width > img.height;
+            return aspectRatio === 'landscape' ? isLandscape : !isLandscape;
+          }
+          if (!img?.aspectRatio) return false; // unknown — skip when filtering
+          const isLandscape = img.aspectRatio > 1;
           return aspectRatio === 'landscape' ? isLandscape : !isLandscape;
         });
 
