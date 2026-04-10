@@ -63,6 +63,8 @@ module.exports = {
   searchPreview,
   selectMode,
   getFilterTypes,
+  settingsSchema:  commons.settingsSchema,
+  getExtraOptions: commons.getExtraOptions,
   metadataFields:  commons.metadataFields,
   defaultMapping:  commons.defaultMapping,
 };

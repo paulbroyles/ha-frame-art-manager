@@ -179,6 +179,31 @@ function getRequireValues(filters, type) {
     .flatMap(f => f.values || []);
 }
 
+// ── Detail image detection ────────────────────────────────────────────────────
+//
+// Many Commons uploads include detail/closeup images alongside the full work.
+// These are undesirable for display. We detect them via:
+//   1. Filename keyword matching (fast, pre-download).
+//   2. -deepcat:"Details of paintings" in CirrusSearch queries (search mode only).
+//
+// Common naming conventions for detail images:
+//   - Keyword: "detail", "détail", "Detail", "signature", "signé", "fragment",
+//     "closeup", "close-up", "inscription", "verso", "recto", "label", "stamp"
+//   - Numbered suffix: filename ends in _02, _03, … (full work is _01 or unsuffixed)
+//   - Parenthetical suffix: "(detail)", "(2)", "(3)"
+//
+// False-positive risk is low: these patterns are very specific to detail images
+// and rarely appear in titles of standalone works.
+
+const DETAIL_TITLE_RE = /\b(detail|d[eé]tail|closeup|close[- ]up|signature|sign[eé]|fragment|verso|recto|inscription|label|stamp)\b|\([2-9]\)|[_ -]0[2-9](?:\.|$)/i;
+
+function isLikelyDetailImage(title) {
+  if (!title) return false;
+  // Strip "File:" prefix and file extension for matching.
+  const name = title.replace(/^File:/i, '').replace(/\.[^.]+$/, '');
+  return DETAIL_TITLE_RE.test(name);
+}
+
 // ── Filter resolution ─────────────────────────────────────────────────────────
 
 function resolveEligibleMedia(allFilters) {
@@ -235,7 +260,8 @@ function resolveGcmtitle(allFilters) {
 
 // Build the CirrusSearch query for search mode.
 // Century × media produces merged incategory clauses (e.g. "17th-century paintings").
-function buildSearchQuery(allFilters, textTerm) {
+// filterDetails adds -deepcat:"Details of paintings" to exclude detail/closeup images.
+function buildSearchQuery(allFilters, textTerm, filterDetails = true) {
   const parts = [];
   if (textTerm) parts.push(textTerm);
 
@@ -273,6 +299,11 @@ function buildSearchQuery(allFilters, textTerm) {
     if (entry) parts.push(`deepcat:"${stripCategoryPrefix(entry.gcmtitle)}"`);
   }
 
+  // Exclude detail/closeup images via category exclusion in search mode.
+  if (filterDetails) {
+    parts.push('-deepcat:"Details of paintings"');
+  }
+
   return parts.join(' ');
 }
 
@@ -298,16 +329,18 @@ function buildSearchQuery(allFilters, textTerm) {
  *   search      — require: general keyword search
  *
  * Options:
- *   aspectRatio  — 'all' | 'landscape' | 'portrait'
- *   sourceLabel  — override the 'source' metadata field (used by wrapper sources)
- *   preFilters   — filters pre-injected by wrapper sources (prepended before user filters)
+ *   aspectRatio   — 'all' | 'landscape' | 'portrait'
+ *   sourceLabel   — override the 'source' metadata field (used by wrapper sources)
+ *   preFilters    — filters pre-injected by wrapper sources (prepended before user filters)
+ *   filterDetails — if true (default), skip detail/closeup images via filename patterns
+ *                   and -deepcat:"Details of paintings" in search queries
  *
  * @param {Array<{type, mode, values}>} [filters=[]]
  * @param {object} [options]
  * @returns {{ imageBuffer, contentType, metadata }}
  */
 async function fetchRandomArtwork(filters = [], options = {}) {
-  const { aspectRatio = 'all', sourceLabel = 'Wikimedia Commons', preFilters = [] } = options;
+  const { aspectRatio = 'all', sourceLabel = 'Wikimedia Commons', preFilters = [], filterDetails = true } = options;
   const allFilters = [...preFilters, ...filters];
 
   const artistTerm = getRequireValues(allFilters, 'artist')[0] || null;
@@ -330,7 +363,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     let pages;
 
     if (useSearch) {
-      const query = buildSearchQuery(allFilters, textTerm);
+      const query = buildSearchQuery(allFilters, textTerm, filterDetails);
       if (!query.trim()) break;
       try {
         const response = await axios.get(WIKIMEDIA_API, {
@@ -392,6 +425,13 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       const mime = imageinfo.mime || '';
       if (!mime.startsWith('image/') || mime === 'image/svg+xml') {
         console.warn(`[wikimedia_commons] ${page.title} skipped: unsupported type ${mime}`);
+        continue;
+      }
+
+      // Detail image filter: skip closeups, signatures, and numbered detail images.
+      // Applied post-fetch in all modes; search mode also excludes via -deepcat: query.
+      if (filterDetails && isLikelyDetailImage(page.title)) {
+        console.warn(`[wikimedia_commons] ${page.title} skipped: likely detail image`);
         continue;
       }
 
@@ -767,6 +807,26 @@ function getFilterTypes() {
   ];
 }
 
+// ── Settings schema ───────────────────────────────────────────────────────────
+
+const settingsSchema = {
+  fields: [
+    {
+      key:         'filterDetails',
+      type:        'boolean',
+      default:     true,
+      label:       'Filter detail images',
+      description: 'Skip closeups, signatures, and numbered detail images based on filename patterns. Also excludes the "Details of paintings" category in search mode.',
+    },
+  ],
+};
+
+function getExtraOptions(settings) {
+  return {
+    filterDetails: settings?.filterDetails !== false,  // default true when unset
+  };
+}
+
 // ── Metadata declarations ─────────────────────────────────────────────────────
 
 const metadataFields = [
@@ -791,6 +851,8 @@ module.exports = {
   searchPreview,
   selectMode,
   getFilterTypes,
+  settingsSchema,
+  getExtraOptions,
   metadataFields,
   defaultMapping,
   // Exported for use by thin wrappers.
