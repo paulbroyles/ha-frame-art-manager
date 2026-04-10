@@ -1426,12 +1426,6 @@ async function resolveAndFetch(webSources, { sourceId, virtualTag, adHocFilters,
   } else {
     // Direct-source dispatch.
     if (!sourceId) throw Object.assign(new Error('sourceId is required for direct-source fetch'), { statusCode: 400 });
-    if (!isSourceCompatible(sourceId, aspectRatio)) {
-      throw Object.assign(
-        new Error(`Source "${sourceId}" is not compatible with the current orientation filter (${aspectRatio})`),
-        { statusCode: 400 }
-      );
-    }
     if (!BUILTIN_SOURCES[sourceId]) throw Object.assign(new Error(`Unknown source: ${sourceId}`), { statusCode: 400 });
     if (!SOURCE_FETCHERS[sourceId]) throw Object.assign(new Error(`Source "${sourceId}" is not yet implemented`), { statusCode: 400 });
     chosenSourceId = sourceId;
@@ -1441,7 +1435,30 @@ async function resolveAndFetch(webSources, { sourceId, virtualTag, adHocFilters,
     extraOpts = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
   }
 
-  const fetchResult = await fetchWithRetry(SOURCE_FETCHERS[chosenSourceId], mergedFilters, { aspectRatio, ...extraOpts }, {
+  // The orientation filter can arrive three ways:
+  //   1. Stored config (globalFilters or aspectRatioFilter) — already resolved into aspectRatio
+  //   2. Ad-hoc test UI — sent as { type:'orientation', mode:'require', values:['landscape'] }
+  //      inside adHocFilters, then merged into mergedFilters above
+  //   3. Virtual-tag filters — same as (2) but from the tag definition
+  // Cases 2 & 3 would end up in mergedFilters but were never applied to the fetch. Extract them now.
+  const orientationFromFilters = mergedFilters
+    .find(f => f.type === 'orientation' && f.mode === 'require')?.values?.[0];
+  const effectiveAspectRatio = (orientationFromFilters === 'landscape' || orientationFromFilters === 'portrait')
+    ? orientationFromFilters
+    : aspectRatio;
+
+  // Orientation is a route-level concept; strip it from source-level filters so sources
+  // don't receive an unknown filter type.
+  const sourceFilters = mergedFilters.filter(f => f.type !== 'orientation');
+
+  if (!isSourceCompatible(chosenSourceId, effectiveAspectRatio)) {
+    throw Object.assign(
+      new Error(`Source "${chosenSourceId}" is not compatible with the current orientation filter (${effectiveAspectRatio})`),
+      { statusCode: 400 }
+    );
+  }
+
+  const fetchResult = await fetchWithRetry(SOURCE_FETCHERS[chosenSourceId], sourceFilters, { aspectRatio: effectiveAspectRatio, ...extraOpts }, {
     prefetchedResult,
     ...retryOpts,
   });
