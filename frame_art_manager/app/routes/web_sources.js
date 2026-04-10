@@ -247,6 +247,18 @@ const BUILTIN_SOURCES = {
     description: 'Artworks from the Harvard Art Museums collection (~250,000 objects across the Fogg, Busch-Reisinger, and Arthur M. Sackler museums), with rich filtering by culture, century, and category. Requires a free API key.',
     type: 'harvard_art_museums',
   },
+  wikimedia_commons: {
+    id: 'wikimedia_commons',
+    name: 'Wikimedia Commons',
+    description: 'Millions of freely licensed art images from Wikimedia Commons. Browse by media type (Paintings, Photographs, Sculptures, …), institution (Rijksmuseum, Louvre, Wellcome Collection, …), subject (Portraits, Landscapes, Still lifes, …), century, or license. No API key required.',
+    type: 'wikimedia_commons',
+  },
+  paris_musees: {
+    id: 'paris_musees',
+    name: 'Paris Musées',
+    description: 'CC0 artworks from Paris\'s fourteen municipal museums (~326,000 works via Wikimedia Commons), including the Petit Palais, Musée Carnavalet, Musée d\'Art Moderne, Musée Bourdelle, and more. No API key required.',
+    type: 'paris_musees',
+  },
 };
 
 // ── Config file helpers ───────────────────────────────────────────────────────

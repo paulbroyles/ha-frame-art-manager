@@ -20,4 +20,6 @@ module.exports = {
   nga:                 require('./nga'),
   getty:               require('./getty'),
   harvard_art_museums: require('./harvard_art_museums'),
+  wikimedia_commons:   require('./wikimedia_commons'),
+  paris_musees:        require('./paris_musees'),
 };
