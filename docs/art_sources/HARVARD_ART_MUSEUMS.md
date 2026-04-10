@@ -35,7 +35,7 @@ Returns a paginated list of object records matching the given parameters.
 | `apikey` | UUID string | Required on every request |
 | `sort` | `random` | Returns a freshly shuffled page on each call |
 | `hasimage` | `1` | Only objects with at least one image |
-| `imagepermission` | `1` | Only images that can be displayed freely (open access) |
+| `worktype` | string | Pipe-separated lowercase worktype names (e.g. `painting\|drawing`) |
 | `size` | integer | Records per page; our default is 10 (`BATCH_SIZE`) |
 | `fields` | comma-separated | Requested fields (see below) |
 | `classification` | string | Pipe-separated OR filter; e.g. `Paintings\|Drawings` |
@@ -104,10 +104,12 @@ The `worktypes` field on each object record is an array of `{worktype, worktypei
 any object with painted decoration, while `worktype: "Painting"` identifies objects that
 are paintings in the traditional fine-art sense.
 
-Both **require** and **exclude** are applied post-fetch against the object's `worktypes` array.
-The Harvard `/object` endpoint has no `worktype` filter parameter, so this filter cannot be
-pre-applied at the API level. With a strict worktype filter (e.g. `require: [Painting]`) the
-retry loop may need more rounds to find matching objects.
+**require** → API `worktype=` parameter (pipe-separated, **lowercase** — e.g. `painting`, not `Painting`),
+plus a post-fetch confirmation against the `worktypes` array.  
+**exclude** → post-fetch only against `worktypes` (API has no exclude/NOT support for this field).
+
+**Important**: worktype names in the Harvard API are lowercase (`"painting"`, `"vessel"`). The
+source lowercases values before sending them to the API.
 
 Curated values (full list at `GET /worktype?apikey=KEY`):
 

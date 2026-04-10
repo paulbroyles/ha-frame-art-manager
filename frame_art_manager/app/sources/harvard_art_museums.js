@@ -166,8 +166,8 @@ function applySetFilter(allValues, filters, type) {
  *   culture    — restrict/exclude by cultural origin (e.g. 'French', 'Japanese')
  *   century    — restrict/exclude by century (e.g. '17th century', '19th century')
  *   worktype   — restrict/exclude by object type (e.g. 'Painting', 'Fragment')
- *                both modes applied post-fetch against the worktypes array
- *                (Harvard /object endpoint has no worktype filter parameter)
+ *                require: API worktype= param (lowercase) + post-fetch confirmation
+ *                exclude: post-fetch only against worktypes array (API has no exclude param)
  *   artist     — require: text search across artist/people fields (single value)
  *   search     — require: general keyword search (single value, lower priority than artist)
  *
@@ -218,13 +218,14 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   );
 
   // ── Build API params ───────────────────────────────────────────────────────
+  // Note: `imagepermission` is not a valid query parameter (only a response field
+  // `imagepermissionlevel`). Image permission is checked post-fetch instead.
   const params = {
-    apikey:          apiKey,
-    sort:            'random',
-    hasimage:        1,
-    imagepermission: 1,
-    size:            BATCH_SIZE,
-    fields:          'id,title,people,technique,dated,primaryimageurl,width,height,url,classification,culture,century,worktypes',
+    apikey:  apiKey,
+    sort:    'random',
+    hasimage: 1,
+    size:    BATCH_SIZE,
+    fields:  'id,title,people,technique,dated,primaryimageurl,width,height,url,classification,culture,century,worktypes,imagepermissionlevel',
   };
 
   // Pipe-separated OR filter; omit when all values are eligible.
@@ -236,6 +237,12 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   }
   if (eligibleCenturies.length < CENTURY_VALUES.length) {
     params.century = eligibleCenturies.join('|');
+  }
+
+  // Worktype require: API supports worktype= filter with pipe-separated lowercase names.
+  // Values are lowercase in the API (e.g. "painting", not "Painting").
+  if (worktypeRequireSet.size > 0) {
+    params.worktype = [...worktypeRequireSet].join('|');  // already lowercased
   }
 
   // Text search: artist takes priority over general keyword search.
@@ -270,7 +277,15 @@ async function fetchRandomArtwork(filters = [], options = {}) {
         continue;
       }
 
-      // Post-fetch worktype filter (API has no worktype filter param; checked against worktypes array).
+      // Image permission check. imagepermissionlevel: 0 = unrestricted, 1 = max 256px, 2 = no display.
+      // The API has no filter parameter for this; we check post-fetch.
+      if (obj.imagepermissionlevel !== undefined && obj.imagepermissionlevel !== 0) {
+        console.warn(`[harvard_art_museums] Object ${obj.id} skipped: imagepermissionlevel=${obj.imagepermissionlevel}`);
+        continue;
+      }
+
+      // Post-fetch worktype filter. Require is also handled at the API level (worktype= param,
+      // lowercase), but we re-check here for accuracy. Exclude is post-fetch only (no API support).
       if (worktypeRequireSet.size > 0 || worktypeExcludeSet.size > 0) {
         const objWorktypes = (obj.worktypes || []).map(wt => (wt.worktype || '').toLowerCase());
         if (worktypeRequireSet.size > 0 && !objWorktypes.some(wt => worktypeRequireSet.has(wt))) {
