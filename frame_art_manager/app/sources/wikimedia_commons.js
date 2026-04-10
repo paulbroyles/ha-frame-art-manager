@@ -11,6 +11,9 @@ const USER_AGENT = 'frame-art-manager/1.0 (home art display system; https://gith
 const BATCH_SIZE = 10;
 const MAX_ROUNDS = 5;
 
+// CirrusSearch hard-rejects gsroffset >= 10000. We stay safely below.
+const MAX_SEARCH_OFFSET = 9500;
+
 const EXTMETA_FILTER = 'ObjectName|Artist|DateTimeOriginal|LicenseShortName|Credit|ImageDescription';
 
 // ── Media type categories ─────────────────────────────────────────────────────
@@ -359,12 +362,47 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     throw new Error('No media types eligible after applying filters');
   }
 
+  // In search mode, resolve a random base offset so the full result set is reachable.
+  // Without this, every fetch starts at offset 0 and returns the same top results.
+  let searchBaseOffset = 0;
+  if (useSearch) {
+    const query = buildSearchQuery(allFilters, textTerm, filterDetails);
+    if (query.trim()) {
+      try {
+        const countResponse = await axios.get(WIKIMEDIA_API, {
+          params: {
+            action:      'query',
+            list:        'search',
+            srsearch:    query,
+            srnamespace: 6,
+            srlimit:     1,
+            srinfo:      'totalhits',
+            format:      'json',
+            origin:      '*',
+          },
+          headers: { 'User-Agent': USER_AGENT },
+          timeout: 10000,
+        });
+        const totalhits = countResponse.data.query?.searchinfo?.totalhits ?? 0;
+        // Pick a random starting point within the reachable result set.
+        // Cap at MAX_SEARCH_OFFSET so subsequent round increments stay under the API limit.
+        const searchableCount = Math.max(1, Math.min(totalhits, MAX_SEARCH_OFFSET));
+        searchBaseOffset = Math.floor(Math.random() * searchableCount);
+      } catch {
+        // Non-fatal: fall back to offset 0 if the count call fails.
+        searchBaseOffset = 0;
+      }
+    }
+  }
+
   for (let round = 0; round < MAX_ROUNDS; round++) {
     let pages;
 
     if (useSearch) {
       const query = buildSearchQuery(allFilters, textTerm, filterDetails);
       if (!query.trim()) break;
+      // Advance sequentially from the random base, wrapping around within the reachable range.
+      const offset = (searchBaseOffset + round * BATCH_SIZE) % (MAX_SEARCH_OFFSET + BATCH_SIZE);
       try {
         const response = await axios.get(WIKIMEDIA_API, {
           params: {
@@ -373,7 +411,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
             gsrsearch:    query,
             gsrnamespace: 6,
             gsrlimit:     BATCH_SIZE,
-            gsroffset:    round * BATCH_SIZE,
+            gsroffset:    offset,
             ...iiParams(),
             format:       'json',
             origin:       '*',
