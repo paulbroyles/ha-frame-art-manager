@@ -352,6 +352,47 @@ async function getFilterTotal(boolClause) {
   return response.data.pagination?.total ?? 0;
 }
 
+/**
+ * Pick a random artwork ID using a full-text keyword search.
+ * Not pooled — arbitrary queries are too numerous to pre-cache.
+ * Capped at the first 1000 results (AIC's `from` limit).
+ */
+async function pickRandomSearchId(filters, keyword) {
+  const boolClause = buildEsFilter(filters);
+
+  // Get total matching count.
+  const countBody = {
+    q: keyword,
+    query: { bool: boolClause },
+    size: 0,
+    _source: false,
+  };
+  const countResp = await axios.post(`${API_BASE}/artworks/search`, countBody, {
+    headers: { ...HEADERS, 'Content-Type': 'application/json' },
+    timeout: 10000,
+  });
+  const total = countResp.data.pagination?.total ?? 0;
+  if (total === 0) throw new Error(`[aic] No artworks found for "${keyword}"`);
+
+  const from = Math.floor(Math.random() * Math.min(total, 1000));
+  const body = {
+    q: keyword,
+    query: { bool: boolClause },
+    from,
+    size: 1,
+    sort: [{ id: { order: 'asc' } }],
+    fields: ['id'],
+    _source: false,
+  };
+  const resp = await axios.post(`${API_BASE}/artworks/search`, body, {
+    headers: { ...HEADERS, 'Content-Type': 'application/json' },
+    timeout: 10000,
+  });
+  const obj = resp.data.data?.[0];
+  if (!obj) throw new Error(`[aic] No artworks found for "${keyword}"`);
+  return obj.id;
+}
+
 // ── Image fetching ─────────────────────────────────────────────────────────────
 
 /**
@@ -388,11 +429,14 @@ async function buildImageUrl(imageId, orientation) {
 async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all' } = options;
   const orientation = aspectRatio === 'portrait' ? 'portrait' : 'landscape';
+  const keyword = getFilterValues(filters, 'search', 'require')[0] || null;
 
   const MAX_CANDIDATES = 10;
 
   for (let attempt = 0; attempt < MAX_CANDIDATES; attempt++) {
-    const id = await pickRandomId(filters);
+    const id = keyword
+      ? await pickRandomSearchId(filters, keyword)
+      : await pickRandomId(filters);
 
     let obj;
     try {
@@ -611,6 +655,15 @@ function getFilterTypes() {
       type:        'artist',
       label:       'Artist',
       description: 'Filter by artist name (exact match from AIC records).',
+      modes:       ['require'],
+      multiValue:  false,
+      values:      [],
+      inputStyle:  'search',
+    },
+    {
+      type:        'search',
+      label:       'Search',
+      description: 'Search by title, artist, subject, medium, or style keywords.',
       modes:       ['require'],
       multiValue:  false,
       values:      [],
