@@ -48,10 +48,12 @@ const AAT_CREDIT_LINE      = 'https://vocab.getty.edu/aat/300026687';
 const AAT_DESCRIPTION      = 'https://vocab.getty.edu/aat/300435416';
 
 // Local museum term URIs (used in referred_to_by.classified_as.id)
-const LOCAL_MATERIALS_DESC     = 'https://data.okeeffemuseum.org/terms/materials_description';
-const LOCAL_MEASUREMENT_DESC   = 'https://data.okeeffemuseum.org/terms/measurement_description';
-const LOCAL_CAPTION_TITLE_DATE = 'https://data.okeeffemuseum.org/terms/caption_title_date';
-const LOCAL_CAPTION_COPYRIGHT  = 'https://data.okeeffemuseum.org/terms/caption_copyright';
+const LOCAL_MATERIALS_DESC          = 'https://data.okeeffemuseum.org/terms/materials_description';
+const LOCAL_MEASUREMENT_DESC        = 'https://data.okeeffemuseum.org/terms/measurement_description';
+const LOCAL_CAPTION_TITLE_DATE      = 'https://data.okeeffemuseum.org/terms/caption_title_date';
+const LOCAL_CAPTION_COPYRIGHT       = 'https://data.okeeffemuseum.org/terms/caption_copyright';
+// Note: 'instituion' is a typo in the Access O'Keeffe data — reproduced exactly.
+const LOCAL_CAPTION_HOLDING_INST    = 'https://data.okeeffemuseum.org/terms/caption_instituion';
 
 // ── Object type filter definitions ───────────────────────────────────────────
 
@@ -164,12 +166,13 @@ function extractMetadata(obj, repoId) {
     }
   }
 
-  const medium      = getReferred(obj, LOCAL_MATERIALS_DESC);
-  const dimensions  = getReferred(obj, LOCAL_MEASUREMENT_DESC);
-  const creditLine  = getReferred(obj, AAT_CREDIT_LINE);
-  const description = getReferred(obj, AAT_DESCRIPTION);
-  const copyright   = getReferred(obj, LOCAL_CAPTION_COPYRIGHT);
-  const accessionNumber = getIdentified(obj, AAT_ACCESSION_NUMBER);
+  const medium             = getReferred(obj, LOCAL_MATERIALS_DESC);
+  const dimensions         = getReferred(obj, LOCAL_MEASUREMENT_DESC);
+  const creditLine         = getReferred(obj, AAT_CREDIT_LINE);
+  const description        = getReferred(obj, AAT_DESCRIPTION);
+  const copyright          = getReferred(obj, LOCAL_CAPTION_COPYRIGHT);
+  const holdingInstitution = getReferred(obj, LOCAL_CAPTION_HOLDING_INST);
+  const accessionNumber    = getIdentified(obj, AAT_ACCESSION_NUMBER);
 
   return {
     title,
@@ -179,6 +182,7 @@ function extractMetadata(obj, repoId) {
     dimensions,
     creditLine,
     accessionNumber,
+    holdingInstitution,
     description,
     copyright,
     artworkUrl: `${BASE_URL}/object/${repoId}/`,
@@ -460,24 +464,26 @@ const metadataFields = [
   { key: 'dateCreated',     label: 'Date',             description: 'Date of creation (e.g. "1932", "ca. 1920–25")' },
   { key: 'medium',          label: 'Medium',           description: 'Materials and technique (e.g. "Oil on canvas")' },
   { key: 'dimensions',      label: 'Dimensions',       description: 'Physical dimensions (e.g. "24 x 36 inches")' },
-  { key: 'creditLine',      label: 'Credit Line',      description: 'Acquisition credit' },
-  { key: 'accessionNumber', label: 'Accession Number', description: 'Museum accession number' },
-  { key: 'description',     label: 'Description',      description: 'Curatorial description of the artwork' },
-  { key: 'copyright',       label: 'Copyright',        description: 'Copyright notice (e.g. "© Georgia O\'Keeffe Museum")' },
-  { key: 'source',          label: 'Source',           description: "Always \"Access O'Keeffe\"" },
+  { key: 'creditLine',         label: 'Credit Line',         description: 'Acquisition credit' },
+  { key: 'holdingInstitution', label: 'Holding Institution', description: 'Museum or institution that holds the work' },
+  { key: 'accessionNumber',    label: 'Accession Number',    description: 'Museum accession number' },
+  { key: 'description',        label: 'Description',         description: 'Curatorial description of the artwork' },
+  { key: 'copyright',          label: 'Copyright',           description: 'Copyright notice (e.g. "© Georgia O\'Keeffe Museum")' },
+  { key: 'source',             label: 'Source',              description: "Always \"Access O'Keeffe\"" },
 ];
 
 const defaultMapping = {
-  title:           'title',
-  creator:         'artist',
-  dateCreated:     'date',
-  medium:          'medium',
-  dimensions:      'dimensions',
-  creditLine:      'credit_line',
-  accessionNumber: null,
-  description:     'description',
-  copyright:       null,
-  source:          null,
+  title:              'title',
+  creator:            'artist',
+  dateCreated:        'date',
+  medium:             'medium',
+  dimensions:         'dimensions',
+  creditLine:         'credit_line',
+  holdingInstitution: 'museum',
+  accessionNumber:    null,
+  description:        'description',
+  copyright:          null,
+  source:             null,
 };
 
 // ── Collection index ──────────────────────────────────────────────────────────

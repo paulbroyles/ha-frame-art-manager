@@ -537,7 +537,7 @@ const defaultMapping = {
   dateCreated:     'date',
   culture:         null,
   accessionNumber: null,
-  source:          null,
+  source:          'museum',
 };
 
 /**

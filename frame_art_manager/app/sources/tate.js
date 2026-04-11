@@ -353,7 +353,8 @@ async function fetchRandomArtwork(filters = [], options = {}) {
         dateCreated:     obj.dateText             || null,
         dimensions:      obj.dimensions           || null,
         creditLine:      obj.creditLine           || null,
-        gallery:         obj.display_gallery_name || null,
+        gallery:      obj.display_gallery_name || null,
+        institution:  obj.display_gallery_name || 'Tate',
         artworkUrl,
         source: 'Tate',
       },
@@ -613,7 +614,8 @@ const metadataFields = [
   { key: 'dateCreated',     label: 'Date',           description: 'Human-readable date (e.g. "c.1850")' },
   { key: 'dimensions',      label: 'Dimensions',     description: 'Physical dimensions string' },
   { key: 'creditLine',      label: 'Credit Line',    description: 'Acquisition credit' },
-  { key: 'gallery',         label: 'Gallery',        description: 'Gallery within Tate where the work is displayed' },
+  { key: 'gallery',         label: 'Gallery',        description: 'Gallery within Tate where the work is currently displayed (null if not on display)' },
+  { key: 'institution',     label: 'Institution',    description: 'Specific Tate gallery (e.g. "Tate Britain", "Tate Modern"); falls back to "Tate" when not on display' },
   { key: 'source',          label: 'Source',         description: 'Always "Tate"' },
 ];
 
@@ -627,7 +629,8 @@ const defaultMapping = {
   dimensions:      null,
   creditLine:      null,
   gallery:         null,
-  source:          'museum',
+  institution:     'museum',
+  source:          null,
 };
 
 module.exports = {

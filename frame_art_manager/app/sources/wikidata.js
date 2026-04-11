@@ -795,7 +795,8 @@ const defaultMapping = {
   title:       'title',
   creator:     { entity: 'creator', attribute: 'name' },
   dateCreated: 'date',
-  source:      'museum',
+  collection:  'museum',
+  source:      null,
 };
 
 // ── Startup pool warm-up ───────────────────────────────────────────────────────

@@ -680,7 +680,7 @@ const defaultMapping = {
   medium:      'medium',
   dimensions:  'dimensions',
   creditLine:  'credit_line',
-  source:      null,
+  source:      'museum',
 };
 
 /**

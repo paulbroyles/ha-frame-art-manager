@@ -55,6 +55,11 @@ function getFilterTypes() {
   return commons.getFilterTypes().filter(f => f.type !== 'institution');
 }
 
+// Paris Musées passes sourceLabel: 'Paris Musées' into every fetch, so the
+// `source` field always contains the institution name. Override commons'
+// defaultMapping to map it to `museum`.
+const defaultMapping = { ...commons.defaultMapping, source: 'museum' };
+
 module.exports = {
   fetchRandomArtwork,
   fetchByIdentifier,
@@ -66,5 +71,5 @@ module.exports = {
   settingsSchema:  commons.settingsSchema,
   getExtraOptions: commons.getExtraOptions,
   metadataFields:  commons.metadataFields,
-  defaultMapping:  commons.defaultMapping,
+  defaultMapping,
 };
