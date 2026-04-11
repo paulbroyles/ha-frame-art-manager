@@ -265,6 +265,12 @@ const BUILTIN_SOURCES = {
     description: 'Paintings and artworks from Wikidata\'s structured knowledge base (~400,000 paintings with images). Filter by art movement (Impressionism, Baroque, …), genre (portrait, landscape, …), collection (Rijksmuseum, Louvre, …), century, or artist. Results are curated and noise-free. No API key required.',
     type: 'wikidata',
   },
+  art_institute_chicago: {
+    id: 'art_institute_chicago',
+    name: 'Art Institute of Chicago',
+    description: 'Public-domain artworks from the Art Institute of Chicago (~58,000 works with accessible images), including paintings, prints, drawings, photographs, sculpture, textiles, and more. High-resolution IIIF images. No API key required.',
+    type: 'art_institute_chicago',
+  },
 };
 
 // ── Config file helpers ───────────────────────────────────────────────────────

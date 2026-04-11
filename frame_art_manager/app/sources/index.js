@@ -22,5 +22,6 @@ module.exports = {
   harvard_art_museums: require('./harvard_art_museums'),
   wikimedia_commons:   require('./wikimedia_commons'),
   paris_musees:        require('./paris_musees'),
-  wikidata:            require('./wikidata'),
+  wikidata:                require('./wikidata'),
+  art_institute_chicago:   require('./art_institute_chicago'),
 };
