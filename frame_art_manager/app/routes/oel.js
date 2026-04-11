@@ -12,12 +12,17 @@
  *
  * GET /api/oel/templates/:id
  *   Returns the full template definition.
+ *
+ * GET /api/oel/calibrate
+ *   TEMPORARY — compares opentype.js vs PIL text measurements.
+ *   Remove once MEASURE_SLACK in layoutEngine.js is confirmed correct.
  */
 
-const express  = require('express');
-const path     = require('path');
-const fs       = require('fs').promises;
-const router   = express.Router();
+const express        = require('express');
+const path           = require('path');
+const fs             = require('fs').promises;
+const { execFile }   = require('child_process');
+const router         = express.Router();
 
 const { layoutPlacard }        = require('../oel/layoutEngine');
 const { ensureFontsInstalled } = require('../oel/fontManager');
@@ -123,6 +128,71 @@ router.get('/templates/:id', async (req, res) => {
   } catch {
     return res.status(404).json({ error: `Template '${req.params.id}' not found` });
   }
+});
+
+/**
+ * GET /api/oel/calibrate
+ *
+ * TEMPORARY calibration endpoint. Runs calibrate_measurements.py inside the
+ * container (PIL measurements), then compares against opentype.js measurements
+ * for the same test cases. Returns per-case ratio and offset data.
+ *
+ * Remove this route once MEASURE_SLACK in layoutEngine.js is confirmed.
+ */
+router.get('/calibrate', async (req, res) => {
+  const { measureText } = require('../oel/fontManager');
+  const scriptPath = path.join(__dirname, '..', 'oel', 'calibrate_measurements.py');
+
+  // Run the Python script and parse its JSON output.
+  let pilResults;
+  try {
+    pilResults = await new Promise((resolve, reject) => {
+      execFile('python3', [scriptPath], { timeout: 15000 }, (err, stdout, stderr) => {
+        if (err) return reject(new Error(`python3 failed: ${err.message}\n${stderr}`));
+        try { resolve(JSON.parse(stdout)); }
+        catch (e) { reject(new Error(`Failed to parse Python output: ${stdout}`)); }
+      });
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  // Measure the same cases with opentype.js.
+  const comparison = [];
+  for (const tc of pilResults) {
+    if (tc.error) { comparison.push(tc); continue; }
+    const otWidth = await measureText(tc.font, tc.text, tc.size);
+    const diff    = otWidth - tc.pil_width;
+    const ratio   = tc.pil_width > 0 ? otWidth / tc.pil_width : null;
+    comparison.push({
+      font:      tc.font,
+      text:      tc.text,
+      size:      tc.size,
+      ot_width:  Math.round(otWidth * 100) / 100,
+      pil_width: tc.pil_width,
+      diff:      Math.round(diff * 100) / 100,
+      ratio:     ratio !== null ? Math.round(ratio * 10000) / 10000 : null,
+    });
+  }
+
+  const diffs  = comparison.filter(c => c.diff != null).map(c => c.diff);
+  const ratios = comparison.filter(c => c.ratio != null).map(c => c.ratio);
+  const mean   = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+  const max    = arr => Math.max(...arr);
+  const min    = arr => Math.min(...arr);
+
+  return res.json({
+    summary: {
+      mean_diff:  Math.round(mean(diffs)  * 100) / 100,
+      max_diff:   Math.round(max(diffs)   * 100) / 100,
+      min_diff:   Math.round(min(diffs)   * 100) / 100,
+      mean_ratio: Math.round(mean(ratios) * 10000) / 10000,
+      max_ratio:  Math.round(max(ratios)  * 10000) / 10000,
+      min_ratio:  Math.round(min(ratios)  * 10000) / 10000,
+      note: 'positive diff = opentype.js wider than PIL; negative = opentype.js narrower',
+    },
+    cases: comparison,
+  });
 });
 
 module.exports = router;
