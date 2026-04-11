@@ -26,19 +26,33 @@ The strategy varies based on which filters are active:
 | Active filters | Strategy |
 |---|---|
 | None | Weighted random draw across all `MEDIA_CATEGORIES`; random sort-key prefix browse |
-| Media only | Weighted random draw among required media categories; sort-key browse |
+| Media only | CirrusSearch with `deepcat:` on the media category |
 | Institution only | Sort-key browse on institution category |
-| Subject only | Sort-key browse on subject category |
-| Institution + Media, or Subject + Media | CirrusSearch with `incategory:` for each |
-| Century (any combination) | CirrusSearch; century × media merged into one `incategory:"17th-century paintings"` |
-| Artist / Search | CirrusSearch with text term + `incategory:` scoping from other filters |
+| Subject only | CirrusSearch with `deepcat:` on the subject category |
+| Institution + Media, or Subject + Media | CirrusSearch with one `deepcat:` clause (subject or media) + optional institution scope |
+| Century (any combination) | CirrusSearch; century × media merged into `incategory:"17th-century paintings"` |
+| Artist / Search | CirrusSearch with text term + `deepcat:` scoping from other filters |
 
 **Category browse** uses `generator=categorymembers` with a random uppercase letter A–Z as
 `gcmstartsortkeyprefix`, scattering the starting point across the sorted filename list.
 
-**CirrusSearch** uses `generator=search` with successive `gsroffset` increments across rounds.
+**CirrusSearch** uses `generator=search` with `deepcat:` traversal and successive
+`gsroffset` increments across rounds. Initial offset is a random value within the
+total result count (cache hit) or within `MAX_SEARCH_OFFSET=9500` (cache miss).
 
 Up to `MAX_ROUNDS=5` rounds × `BATCH_SIZE=10` candidates = 50 tries per fetch.
+
+### Why `deepcat:` instead of `incategory:`
+
+`incategory:` matches only *direct* file members of a category. Top-level Commons categories
+like `Category:Paintings` or `Category:Landscapes` contain almost no direct files — everything
+is organized in deep subcategory trees. Switching from `incategory:` to `deepcat:` is the
+difference between 0–5 results and 200,000+ results.
+
+**`deepcat:` costs**: Each CirrusSearch query with `deepcat:` takes ~4 seconds server-side.
+This is inherent to Wikimedia's category traversal and cannot be reduced. Each fetch round
+is a separate query, so 5 rounds = ~20 seconds worst case (in practice: 1–2 rounds for
+common queries).
 
 ---
 
@@ -46,7 +60,7 @@ Up to `MAX_ROUNDS=5` rounds × `BATCH_SIZE=10` candidates = 50 tries per fetch.
 
 ### Media Type (`media`)
 
-Maps to Wikimedia Commons category browse or `incategory:` search clause.
+Maps to a `deepcat:` CirrusSearch clause (always forces search mode).
 
 | Value | Commons category |
 |---|---|
@@ -64,8 +78,9 @@ Modes: **require**, **exclude**
 
 ### Institution (`institution`)
 
-Restricts browse to a specific museum/collection category. When combined with a media or
-subject filter, switches to CirrusSearch mode with multiple `incategory:` clauses.
+Restricts browse to a specific museum/collection category. In search mode, adds an
+`incategory:` clause (institution categories have sufficient direct members or are
+used in combination with other clauses).
 
 | Institution | Commons category |
 |---|---|
@@ -85,8 +100,13 @@ Modes: **require** only
 
 ### Subject (`subject`)
 
-Restricts browse to a subject/theme category. Single active subject uses direct category
-browse; combined with other category filters uses `incategory:` search.
+Restricts to a subject/theme category via `deepcat:` (always forces search mode).
+
+**Important limitation**: When a subject filter is active, no media-type clause is added
+to the query. Intersecting `deepcat:"Landscapes"` with `deepcat:"Paintings"` returns
+~17 results because Commons files are generally not members of *both* independent
+subject and media category trees. `deepcat:"Landscapes"` alone returns ~206,000 results.
+The subject filter therefore narrows by theme but does not also filter by media type.
 
 | Value | Commons category |
 |---|---|
@@ -94,13 +114,13 @@ browse; combined with other category filters uses `incategory:` search.
 | Landscapes | `Category:Landscapes` |
 | Still lifes | `Category:Still lifes` |
 | Religious art | `Category:Religious art` |
-| Mythology | `Category:Mythological art` |
+| Mythology | `Category:Mythology in art` |
 | Genre scenes | `Category:Genre art` |
 | Animals | `Category:Animals in art` |
-| Botanical art | `Category:Botanical illustration` |
+| Botanical art | `Category:Botanical illustrations` |
 | Nude art | `Category:Nude art` |
-| Architecture | `Category:Architecture in art` |
-| Maritime art | `Category:Maritime art` |
+| Architecture | `Category:Architectural drawings` |
+| Maritime art | `Category:Marine art` |
 | Battle art | `Category:Battle paintings` |
 
 Modes: **require** only
@@ -131,8 +151,20 @@ Modes: **require**, **exclude**
 
 ### Artist / Search
 
-Both use CirrusSearch with the text term combined with any active `incategory:` clauses
+Both use CirrusSearch with the text term combined with any active `deepcat:` clauses
 from other filters. Artist takes priority when both are present.
+
+### Detail Image Filter (`filterDetails`)
+
+Enabled by default (toggle in source settings). Rejects files whose titles match a
+regex for common detail-image naming patterns:
+
+```
+\b(detail|détail|closeup|close-up|signature|signé|fragment|verso|recto|inscription|label|stamp)\b
+|\([2-9]\)|[_ -]0[2-9](?:\.|$)
+```
+
+In search mode, also injects `-deepcat:"Details of paintings"` into the query string.
 
 ---
 
@@ -175,14 +207,54 @@ To add a new institution wrapper, create a new source file following the pattern
 
 ## Known Limitations
 
-- **Category name accuracy**: Commons category names are hardcoded in `MEDIA_CATEGORIES`,
-  `INSTITUTIONS`, and `SUBJECT_CATEGORIES`. If a category is renamed or doesn't exist, the
-  API returns empty results. Verify at `https://commons.wikimedia.org/wiki/Special:Search`.
-- **`incategory:` depth**: CirrusSearch's `incategory:` matches direct category membership
-  only. Files in subcategories won't appear in search results; category browse is unaffected.
-- **Century category availability**: Not all `"17th-century drawings"` style categories exist
-  on Commons. Missing categories return empty results; the next round picks a different random
-  media type.
-- **License post-filtering**: The license filter cannot be applied before download; each
-  rejected file costs a full API round-trip.
-- **No medium field**: Commons extmetadata does not include object medium in a structured form.
+### Result quality noise
+
+Commons is a general-purpose media repository, not a curated art collection. Even with
+media-type and subject filters, results routinely include:
+
+- **Photos of people painting** — e.g. "Artist at work" photos filed under `Category:Paintings`
+- **In-situ mural photographs** — photos of murals on walls with surrounding scenery
+- **"Own work" uploads** — amateur and hobbyist works uploaded by their creators
+- **Metadata-only or reproduction files** — text documents, labels, stamps filed alongside artwork
+
+For use cases requiring curated art, Wikidata SPARQL (`wikidata.js`) offers
+structured metadata filtering (movement, genre, P31 type) that avoids most of this noise.
+
+### Category intersection
+
+Commons files are generally members of *either* a subject category tree *or* a media
+category tree — not both. Intersecting `deepcat:"Landscapes"` × `deepcat:"Paintings"`
+returns ~17 files; each alone returns 200K+. The source works around this by applying
+only one `deepcat:` clause per query when subject is active.
+
+### `deepcat:` performance
+
+Every CirrusSearch query with `deepcat:` takes ~4 seconds server-side. This cannot be
+reduced. A first fetch (cold count cache) may wait up to 4 seconds before the first
+result batch. Subsequent fetches within the 1hr count cache window start immediately.
+
+### `incategory:` depth
+
+For non-deepcat contexts (institution browse, century categories), `incategory:` matches
+only direct category members. Files in subcategories won't appear. This is intentional
+for institution browse (institution categories tend to have direct file members) but
+would be wrong for media/subject filters (hence `deepcat:` there).
+
+### Category name accuracy
+
+Commons category names are hardcoded. If a category is renamed or doesn't exist, the
+API returns empty results. Verify at `https://commons.wikimedia.org/wiki/Special:Search`.
+
+### Century category availability
+
+Not all `"17th-century drawings"` style categories exist on Commons. Missing categories
+return empty results; the next round picks a different random media type.
+
+### License post-filtering
+
+The license filter cannot be applied before download; each rejected file costs a full
+API round-trip.
+
+### No medium field
+
+Commons extmetadata does not include object medium in a structured form.

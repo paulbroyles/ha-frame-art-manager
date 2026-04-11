@@ -259,6 +259,12 @@ const BUILTIN_SOURCES = {
     description: 'CC0 artworks from Paris\'s fourteen municipal museums (~326,000 works via Wikimedia Commons), including the Petit Palais, Musée Carnavalet, Musée d\'Art Moderne, Musée Bourdelle, and more. No API key required.',
     type: 'paris_musees',
   },
+  wikidata: {
+    id: 'wikidata',
+    name: 'Wikidata',
+    description: 'Paintings and artworks from Wikidata\'s structured knowledge base (~400,000 paintings with images). Filter by art movement (Impressionism, Baroque, …), genre (portrait, landscape, …), collection (Rijksmuseum, Louvre, …), century, or artist. Results are curated and noise-free. No API key required.',
+    type: 'wikidata',
+  },
 };
 
 // ── Config file helpers ───────────────────────────────────────────────────────
