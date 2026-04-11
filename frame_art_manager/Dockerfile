@@ -12,6 +12,8 @@ RUN apk add --no-cache \
     git-lfs \
     openssh-client \
     python3 \
+    py3-pip \
+    py3-pillow \
     make \
     g++ \
     jq \
