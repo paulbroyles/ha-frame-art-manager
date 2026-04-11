@@ -2,6 +2,7 @@ const axios = require('axios');
 const sharp = require('sharp');
 const { CookieJar } = require('tough-cookie');
 const { dezoomify } = require('../utils/dezoomify');
+const { googleCdnSuffix } = require('../utils/thumbSize');
 
 const { mergePreferContent } = require('../utils/merge');
 
@@ -341,12 +342,9 @@ function buildPtToken(offset) {
 
 const BASE_URL = 'https://artsandculture.google.com';
 
-// Download dimensions: 25% above 4K in the cover-crop anchor dimension so frame
-// removal can trim up to ~20% per side and still leave a native-4K image.
 // No -c suffix: Google preserves the original aspect ratio (fit-within, no crop).
-//   =h2700  (2160 × 1.25) — used when image is wider than 16:9 (height is anchor)
-//   =w4800  (3840 × 1.25) — used when image is narrower than 16:9 (width is anchor)
-const LANDSCAPE_RATIO = 16 / 9;
+// Sizing via googleCdnSuffix(): picks =wN or =hN based on whether the source is wider
+// or narrower than the target aspect ratio, using shared headroom constants from thumbSize.js.
 
 /**
  * Build a Google image-serving URL that downloads at original aspect ratio with
@@ -357,12 +355,7 @@ const LANDSCAPE_RATIO = 16 / 9;
  * @param {number|null} aspectRatio - width/height (from cobject metadata), or null if unknown
  */
 function buildDownloadUrl(imageBase, aspectRatio) {
-  if (aspectRatio !== null && aspectRatio > LANDSCAPE_RATIO) {
-    // Wider than 16:9: height is the cover-crop anchor
-    return `${imageBase}=h2700`;
-  }
-  // Narrower/equal: width is the cover-crop anchor; also the safe default for unknown ratio
-  return `${imageBase}=w4800`;
+  return `${imageBase}${googleCdnSuffix(aspectRatio)}`;
 }
 
 const HTTP_HEADERS = {

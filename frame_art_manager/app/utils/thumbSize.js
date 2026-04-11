@@ -37,8 +37,12 @@ const TV_TARGETS = {
  * independent in value but used differently:
  *   landscape → request width=THUMB_LONG_EDGE (width is long edge)
  *   portrait  → request height=THUMB_LONG_EDGE (height is long edge)
+ *
+ * THUMB_SHORT_EDGE is the short axis equivalent (2160 × HEADROOM_FACTOR = 2592).
+ * Used when constraining by height for landscape, or width for portrait.
  */
-const THUMB_LONG_EDGE = Math.round(TV_TARGETS.landscape.w * HEADROOM_FACTOR);  // 4608
+const THUMB_LONG_EDGE  = Math.round(TV_TARGETS.landscape.w * HEADROOM_FACTOR);  // 4608
+const THUMB_SHORT_EDGE = Math.round(TV_TARGETS.landscape.h * HEADROOM_FACTOR);  // 2592
 
 /**
  * Compute the optimal thumbnail width to request for a source image with known dimensions.
@@ -128,6 +132,28 @@ function adjustThumbWidth(thumbUrl, newWidth) {
 }
 
 /**
+ * Build a Google image-serving CDN size suffix (=wN or =hN).
+ *
+ * Google's image CDN accepts a single dimension; this picks the constraining axis
+ * for cover-fit against the TV target and returns the appropriate suffix. The same
+ * logic as thumbWidthFor() but expressed as a CDN suffix rather than a pixel count.
+ *
+ * @param {number|null} srcAspect               Source width/height ratio (null = use width)
+ * @param {'landscape'|'portrait'} [orientation='landscape']
+ * @param {object} [target]                     Override target dims; defaults to standard 4K
+ * @returns {string}  e.g. "=w4608" or "=h2592"
+ */
+function googleCdnSuffix(srcAspect, orientation = 'landscape', target) {
+  const { w: targetW, h: targetH } = { ...TV_TARGETS[orientation] || TV_TARGETS.landscape, ...target };
+  if (srcAspect !== null && srcAspect > targetW / targetH) {
+    // Wide source: height is the cover-crop anchor
+    return `=h${Math.round(targetH * HEADROOM_FACTOR)}`;
+  }
+  // Narrow/unknown: width is the cover-crop anchor (safe default)
+  return `=w${Math.round(targetW * HEADROOM_FACTOR)}`;
+}
+
+/**
  * Build the query parameter for a Wikimedia Special:FilePath thumb request.
  *
  * Special:FilePath supports ?width=N (scales by width) and ?height=N (scales by height).
@@ -144,8 +170,10 @@ function thumbSpecialFileParam(orientation = 'landscape') {
 
 module.exports = {
   THUMB_LONG_EDGE,
+  THUMB_SHORT_EDGE,
   thumbWidthFor,
   iiifBoundingBox,
+  googleCdnSuffix,
   adjustThumbWidth,
   thumbSpecialFileParam,
 };

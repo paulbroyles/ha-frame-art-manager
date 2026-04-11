@@ -1,6 +1,7 @@
 'use strict';
 const axios = require('axios');
 const fs = require('fs').promises;
+const { THUMB_LONG_EDGE, thumbWidthFor } = require('../utils/thumbSize');
 
 // GitHub dataset: MuseumofModernArt/collection — snapshot of the full MoMA collection.
 // 160,269 total records; ~93,188 have an ImageURL. Updated by MoMA periodically.
@@ -93,16 +94,17 @@ function extractFileId(imageUrl) {
 }
 
 /**
- * Build a 2000×2000 MoMA Dragonfly image URL from a file ID.
+ * Build a MoMA Dragonfly image URL from a file ID at a given max edge size.
  * sha validation is not enforced by Dragonfly — the URL works without it.
  *
- * @param {string} fileId - Dragonfly file ID (e.g. "619222")
- * @returns {string} Image URL serving up to 2000×2000 pixels
+ * @param {string} fileId  - Dragonfly file ID (e.g. "619222")
+ * @param {number} maxEdge - Bounding box side in pixels (default: THUMB_LONG_EDGE)
+ * @returns {string} Image URL serving up to maxEdge×maxEdge pixels
  */
-function buildImageUrl(fileId) {
+function buildImageUrl(fileId, maxEdge = THUMB_LONG_EDGE) {
   // The string "\\u003e" in JS is 6 literal chars: \, u, 0, 0, 3, e.
   // This matches the literal \u003e bytes that Dragonfly expects in the instruction JSON.
-  const raw = `[["f","${fileId}"],["p","convert","-quality 90 -resize 2000x2000\\u003e"]]`;
+  const raw = `[["f","${fileId}"],["p","convert","-quality 90 -resize ${maxEdge}x${maxEdge}\\u003e"]]`;
   const b64 = Buffer.from(raw, 'ascii').toString('base64').replace(/=+$/, '');
   return `https://www.moma.org/media/${b64}.jpg`;
 }
@@ -373,10 +375,15 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     throw new Error('No MoMA artworks match the selected filters');
   }
 
+  const orientation = aspectRatio === 'portrait' ? 'portrait' : 'landscape';
   const MAX_ATTEMPTS = 10;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const artwork = pool[Math.floor(Math.random() * pool.length)];
-    const imageUrl = buildImageUrl(artwork.fid);
+    // Physical dims (cm) give us the aspect ratio — units cancel in thumbWidthFor.
+    const maxEdge = artwork.w && artwork.h
+      ? thumbWidthFor(artwork.w, artwork.h, orientation)
+      : THUMB_LONG_EDGE;
+    const imageUrl = buildImageUrl(artwork.fid, maxEdge);
 
     let imageBuffer, contentType;
     try {
@@ -428,7 +435,11 @@ async function fetchByIdentifier(identifier) {
     throw new Error(`MoMA object ${objectId} not found in index (no public image in dataset)`);
   }
 
-  const imageUrl = buildImageUrl(artwork.fid);
+  // No orientation context in fetchByIdentifier — use square fallback (safe for any aspect ratio).
+  const maxEdge = artwork.w && artwork.h
+    ? thumbWidthFor(artwork.w, artwork.h, 'landscape')
+    : THUMB_LONG_EDGE;
+  const imageUrl = buildImageUrl(artwork.fid, maxEdge);
   let imageBuffer, contentType;
   try {
     const resp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
