@@ -338,6 +338,7 @@ A running list of real images that exposed crop algorithm weaknesses, kept as gr
 |---|---|---|---|---|
 | [P.S. Krøyer — Summer Evening on Skagen's Beach (1899)](https://commons.wikimedia.org/wiki/File:P_S_Kr%C3%B8yer_1899_-_Sommeraften_ved_Skagens_strand._Kunstneren_og_hans_hustru.jpg) | Wikimedia Commons | Catastrophic vertical overcrop | Smooth sky+sand, both low-variance → coherence scan hit `maxCropFrac` on top+bottom and accepted the cap as a crop result | Unresolved; tracked under `maxCropFrac as failure signal` below |
 | [Gabrielle d'Estrées et une de ses sœurs (c.1594)](https://www.wikidata.org/wiki/Q542066) | Wikidata | Crop centered on blank space between two figures | coherenceCrop centroid attracted to low-contrast skin/background region between figures; tiny 1:1-pixel extraction window (9.7% of image) magnified the error | Partially mitigated by `minCoverageFrac` guard (falls back to center crop when extraction < 25% of cover-fit area) |
+| [George Bellows — Nude with Fan (1920)](https://www.wikidata.org/wiki/Q132133824) | Wikidata | Figure's head cropped out; side-clipping loses subject | coherenceCrop extracts 1:1-pixel window (3840×2160) from full-res portrait image; this clips the figure horizontally and the centroid (drawn to torso) clips the head vertically. Preserving width and cropping only from the bottom would be acceptable. | Unresolved; tracked under `coherenceCrop extraction scale` below |
 
 ---
 

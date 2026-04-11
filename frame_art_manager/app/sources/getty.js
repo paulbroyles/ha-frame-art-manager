@@ -1,6 +1,7 @@
 'use strict';
 const axios = require('axios');
 const sharp = require('sharp');
+const { iiifBoundingBox } = require('../utils/thumbSize');
 
 // J. Paul Getty Museum — Los Angeles, California
 // Open Content Program: ~91,500 CC0 public-domain images
@@ -274,7 +275,23 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       const uuid = item.manifest?.thumbUuid;
       if (!uuid) continue;
 
-      const imageUrl = `${IIIF_IMAGE_BASE}/${uuid}/full/!4800,4800/0/default.jpg`;
+      // Fetch info.json for source dims — lightweight, enables precise thumbnail sizing
+      // and lets us skip downloading mismatched-orientation images.
+      let iiifWidth = null, iiifHeight = null;
+      try {
+        const infoResp = await axios.get(`${IIIF_IMAGE_BASE}/${uuid}/info.json`, { timeout: 10000 });
+        iiifWidth  = infoResp.data.width  || null;
+        iiifHeight = infoResp.data.height || null;
+      } catch {
+        // Proceed without dims
+      }
+      if (aspectRatio !== 'all' && iiifWidth && iiifHeight) {
+        const isLandscape = iiifWidth > iiifHeight;
+        if (aspectRatio === 'landscape' && !isLandscape) continue;
+        if (aspectRatio === 'portrait'  &&  isLandscape) continue;
+      }
+
+      const imageUrl = `${IIIF_IMAGE_BASE}/${uuid}/full/!${iiifBoundingBox(aspectRatio !== 'all' ? aspectRatio : 'landscape', iiifWidth, iiifHeight)}/0/default.jpg`;
       let imageBuffer;
       try {
         const imgResp = await axios.get(imageUrl, {
@@ -287,7 +304,8 @@ async function fetchRandomArtwork(filters = [], options = {}) {
         continue;
       }
 
-      if (aspectRatio !== 'all') {
+      if (aspectRatio !== 'all' && (!iiifWidth || !iiifHeight)) {
+        // info.json unavailable — fall back to post-download check via sharp
         const { width, height } = await sharp(imageBuffer).metadata();
         const isLandscape = width > height;
         if (aspectRatio === 'landscape' && !isLandscape) continue;
@@ -358,11 +376,30 @@ async function fetchByIdentifier(identifier, options = {}) {
   const uuid = item.manifest?.thumbUuid;
   if (!uuid) throw new Error(`Getty object "${slug}" has no image`);
 
-  const imageUrl = `${IIIF_IMAGE_BASE}/${uuid}/full/!4800,4800/0/default.jpg`;
+  let iiifWidth = null, iiifHeight = null;
+  try {
+    const infoResp = await axios.get(`${IIIF_IMAGE_BASE}/${uuid}/info.json`, { timeout: 10000 });
+    iiifWidth  = infoResp.data.width  || null;
+    iiifHeight = infoResp.data.height || null;
+  } catch {
+    // Proceed without dims
+  }
+  if (aspectRatio !== 'all' && iiifWidth && iiifHeight) {
+    const isLandscape = iiifWidth > iiifHeight;
+    if (aspectRatio === 'landscape' && !isLandscape) {
+      throw new Error(`Object ${slug} is portrait; landscape filter cannot be satisfied`);
+    }
+    if (aspectRatio === 'portrait' && isLandscape) {
+      throw new Error(`Object ${slug} is landscape; portrait filter cannot be satisfied`);
+    }
+  }
+
+  const imageUrl = `${IIIF_IMAGE_BASE}/${uuid}/full/!${iiifBoundingBox(aspectRatio !== 'all' ? aspectRatio : 'landscape', iiifWidth, iiifHeight)}/0/default.jpg`;
   const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 45000 });
   const imageBuffer = Buffer.from(imgResp.data);
 
-  if (aspectRatio !== 'all') {
+  if (aspectRatio !== 'all' && (!iiifWidth || !iiifHeight)) {
+    // info.json unavailable — fall back to post-download check
     const { width, height } = await sharp(imageBuffer).metadata();
     const isLandscape = width > height;
     if (aspectRatio === 'landscape' && !isLandscape) {

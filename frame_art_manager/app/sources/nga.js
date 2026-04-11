@@ -1,5 +1,6 @@
 'use strict';
 const axios = require('axios');
+const { iiifBoundingBox } = require('../utils/thumbSize');
 
 // National Gallery of Art — Washington, D.C.
 // Open data: https://github.com/NationalGalleryOfArt/opendata
@@ -437,7 +438,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     const idx = Math.floor(Math.random() * pool.length);
     const record = pool[idx];
 
-    const imageUrl = `${record.iiifUrl}/full/!4800,4800/0/default.jpg`;
+    const imageUrl = `${record.iiifUrl}/full/!${iiifBoundingBox(aspectRatio !== 'all' ? aspectRatio : 'landscape', record.width, record.height)}/0/default.jpg`;
     let imageBuffer;
     try {
       const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 45000 });
@@ -511,7 +512,7 @@ async function fetchByIdentifier(identifier, options = {}) {
     }
   }
 
-  const imageUrl = `${record.iiifUrl}/full/!4800,4800/0/default.jpg`;
+  const imageUrl = `${record.iiifUrl}/full/!${iiifBoundingBox(aspectRatio !== 'all' ? aspectRatio : 'landscape', record.width, record.height)}/0/default.jpg`;
   let imageBuffer;
   try {
     const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 45000 });

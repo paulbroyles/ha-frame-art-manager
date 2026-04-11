@@ -8,6 +8,8 @@ const WIKIMEDIA_API = 'https://commons.wikimedia.org/w/api.php';
 // Wikimedia policy requires a descriptive User-Agent on all API and image requests.
 const USER_AGENT = 'frame-art-manager/1.0 (home art display system; https://github.com/home-assistant)';
 
+const { THUMB_LONG_EDGE, thumbWidthFor, adjustThumbWidth } = require('../utils/thumbSize');
+
 const BATCH_SIZE = 10;
 const MAX_ROUNDS = 5;
 
@@ -460,7 +462,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
             gsrnamespace: 6,
             gsrlimit:     BATCH_SIZE,
             gsroffset:    offset,
-            ...iiParams(),
+            ...iiParams(THUMB_LONG_EDGE),
             format:       'json',
             origin:       '*',
           },
@@ -484,7 +486,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
             gcmtype:               'file',
             gcmlimit:              BATCH_SIZE,
             gcmstartsortkeyprefix: randomSortKeyPrefix(),
-            ...iiParams(),
+            ...iiParams(THUMB_LONG_EDGE),
             format:                'json',
             origin:                '*',
           },
@@ -543,9 +545,20 @@ async function fetchRandomArtwork(filters = [], options = {}) {
         }
       }
 
+      // Prefer a thumbnail over the full-res original (originals can be 50–100 MB TIFFs).
+      // The batch request fetched thumburls at THUMB_LONG_EDGE. Now that we've selected a
+      // specific image and know its source dimensions and the output orientation, rewrite the
+      // thumburl to the precisely computed width so we don't over- or under-fetch.
+      let downloadUrl = imageinfo.url;  // full-res fallback
+      if (imageinfo.thumburl) {
+        const tw = (imageinfo.width && imageinfo.height)
+          ? thumbWidthFor(imageinfo.width, imageinfo.height, aspectRatio === 'portrait' ? 'portrait' : 'landscape')
+          : THUMB_LONG_EDGE;
+        downloadUrl = adjustThumbWidth(imageinfo.thumburl, tw);
+      }
       let imageBuffer, contentType;
       try {
-        const imageResponse = await axios.get(imageinfo.url, {
+        const imageResponse = await axios.get(downloadUrl, {
           responseType: 'arraybuffer',
           timeout:      30000,
           headers:      { 'User-Agent': USER_AGENT },
@@ -617,7 +630,7 @@ function canHandleIdentifier(identifier) {
  * @returns {{ imageBuffer, contentType, metadata }}
  */
 async function fetchByIdentifier(identifier, options = {}) {
-  const { sourceLabel = 'Wikimedia Commons' } = options;
+  const { sourceLabel = 'Wikimedia Commons', tvOrientation = 'landscape' } = options;
 
   const match = identifier.trim().match(/wiki\/(File:[^#?]+)/i);
   if (!match) throw new Error('Could not extract file title from Wikimedia Commons URL');
@@ -629,7 +642,7 @@ async function fetchByIdentifier(identifier, options = {}) {
       params: {
         action:  'query',
         titles:  fileTitle,
-        ...iiParams(),
+        ...iiParams(THUMB_LONG_EDGE),
         format:  'json',
         origin:  '*',
       },
@@ -644,9 +657,10 @@ async function fetchByIdentifier(identifier, options = {}) {
   const imageinfo = page?.imageinfo?.[0];
   if (!imageinfo?.url) throw new Error(`No image URL found for ${fileTitle}`);
 
+  const downloadUrl = imageinfo.thumburl || imageinfo.url;
   let imageBuffer, contentType;
   try {
-    const imageResponse = await axios.get(imageinfo.url, {
+    const imageResponse = await axios.get(downloadUrl, {
       responseType: 'arraybuffer',
       timeout:      30000,
       headers:      { 'User-Agent': USER_AGENT },

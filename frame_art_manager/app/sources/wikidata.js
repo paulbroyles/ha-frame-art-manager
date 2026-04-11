@@ -31,6 +31,8 @@ const SPARQL_ENDPOINT = 'https://query.wikidata.org/sparql';
 const ENTITY_API      = 'https://www.wikidata.org/w/api.php';
 const USER_AGENT      = 'frame-art-manager/1.0 (home art display system; https://github.com/home-assistant)';
 
+const { thumbSpecialFileParam } = require('../utils/thumbSize');
+
 const POOL_MAX_SIZE      = 10000;
 const POOL_TTL_MS        = 6  * 60 * 60 * 1000;   // 6 hours — pool composition shifts slowly
 
@@ -473,10 +475,14 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       continue;
     }
 
-    // Download the image. The Special:FilePath URL redirects to upload.wikimedia.org.
+    // Download a thumbnail rather than the full-res original.
+    // Special:FilePath?width=N (landscape) or ?height=N (portrait) redirects to a JPEG thumb
+    // at that long-edge size. Originals can be 50–100 MB TIFFs; ~4608px is sufficient for 4K output.
+    const sizeParam = thumbSpecialFileParam(aspectRatio === 'portrait' ? 'portrait' : 'landscape');
+    const thumbUrl = imageUrl.includes('?') ? `${imageUrl}&${sizeParam}` : `${imageUrl}?${sizeParam}`;
     let imageBuffer, contentType;
     try {
-      const resp = await axios.get(imageUrl, {
+      const resp = await axios.get(thumbUrl, {
         responseType: 'arraybuffer',
         timeout:      IMAGE_TIMEOUT_MS,
         headers:      { 'User-Agent': USER_AGENT },
@@ -585,9 +591,11 @@ async function fetchByIdentifier(identifier, options = {}) {
   const imageUrl = firstValue(bindings, 'image');
   if (!imageUrl) throw new Error(`No image found for Wikidata item ${qid}`);
 
+  const sizeParam = thumbSpecialFileParam(options.tvOrientation === 'portrait' ? 'portrait' : 'landscape');
+  const thumbUrl = imageUrl.includes('?') ? `${imageUrl}&${sizeParam}` : `${imageUrl}?${sizeParam}`;
   let imageBuffer, contentType;
   try {
-    const resp = await axios.get(imageUrl, {
+    const resp = await axios.get(thumbUrl, {
       responseType: 'arraybuffer',
       timeout:      IMAGE_TIMEOUT_MS,
       headers:      { 'User-Agent': USER_AGENT },

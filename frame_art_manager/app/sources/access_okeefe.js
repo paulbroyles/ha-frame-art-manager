@@ -2,6 +2,7 @@
 const fs    = require('fs').promises;
 const path  = require('path');
 const axios = require('axios');
+const { iiifBoundingBox } = require('../utils/thumbSize');
 
 // Access O'Keeffe — Georgia O'Keeffe Museum collection
 // https://access-ok.okeeffemuseum.org/object/
@@ -304,26 +305,24 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       if (!types.some(t => eligibleTypes.has(t))) continue;
     }
 
-    // Aspect ratio check via IIIF info.json (only when filtering is active — skip the
-    // extra round trip when aspectRatio is 'all')
-    if (aspectRatio !== 'all') {
-      let iiifWidth = null, iiifHeight = null;
-      try {
-        const infoResp = await axios.get(`${iiifServiceUrl}/info.json`, { timeout: 10000 });
-        iiifWidth  = infoResp.data.width;
-        iiifHeight = infoResp.data.height;
-      } catch {
-        // Proceed without dimension info; aspect ratio check skipped
-      }
-      if (iiifWidth && iiifHeight) {
-        const isLandscape = iiifWidth >= iiifHeight;
-        if (aspectRatio === 'landscape' && !isLandscape) continue;
-        if (aspectRatio === 'portrait'  &&  isLandscape) continue;
-      }
+    // Fetch info.json for source dims — used for both aspect ratio filtering and precise
+    // thumbnail sizing. Lightweight (~1KB); worth the round-trip to avoid over- or under-fetching.
+    let iiifWidth = null, iiifHeight = null;
+    try {
+      const infoResp = await axios.get(`${iiifServiceUrl}/info.json`, { timeout: 10000 });
+      iiifWidth  = infoResp.data.width  || null;
+      iiifHeight = infoResp.data.height || null;
+    } catch {
+      // Proceed without dimension info
+    }
+    if (aspectRatio !== 'all' && iiifWidth && iiifHeight) {
+      const isLandscape = iiifWidth >= iiifHeight;
+      if (aspectRatio === 'landscape' && !isLandscape) continue;
+      if (aspectRatio === 'portrait'  &&  isLandscape) continue;
     }
 
-    // Download image — slightly oversized to allow pipeline cropping headroom
-    const imageUrl = `${iiifServiceUrl}/full/!4800,4800/0/default.jpg`;
+    // Download image — sized to cover the 4K output target with headroom
+    const imageUrl = `${iiifServiceUrl}/full/!${iiifBoundingBox(aspectRatio !== 'all' ? aspectRatio : 'landscape', iiifWidth, iiifHeight)}/0/default.jpg`;
     let imageBuffer;
     try {
       const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 60000 });
@@ -385,27 +384,26 @@ async function fetchByIdentifier(identifier, options = {}) {
   const iiifServiceUrl = extractIIIFServiceUrl(obj);
   if (!iiifServiceUrl) throw new Error(`Object ${repoId} has no image`);
 
-  // Aspect ratio check via IIIF info.json
-  if (aspectRatio !== 'all') {
-    try {
-      const infoResp = await axios.get(`${iiifServiceUrl}/info.json`, { timeout: 10000 });
-      const { width, height } = infoResp.data;
-      if (width && height) {
-        const isLandscape = width >= height;
-        if (aspectRatio === 'landscape' && !isLandscape) {
-          throw new Error(`Object ${repoId} is portrait; landscape filter cannot be satisfied`);
-        }
-        if (aspectRatio === 'portrait' && isLandscape) {
-          throw new Error(`Object ${repoId} is landscape; portrait filter cannot be satisfied`);
-        }
-      }
-    } catch (e) {
-      if (e.message.includes('cannot be satisfied')) throw e;
-      // info.json failure: proceed anyway
+  // Fetch info.json for source dims — used for both aspect ratio check and thumbnail sizing.
+  let iiifWidth = null, iiifHeight = null;
+  try {
+    const infoResp = await axios.get(`${iiifServiceUrl}/info.json`, { timeout: 10000 });
+    iiifWidth  = infoResp.data.width  || null;
+    iiifHeight = infoResp.data.height || null;
+  } catch {
+    // info.json failure: proceed without dims
+  }
+  if (aspectRatio !== 'all' && iiifWidth && iiifHeight) {
+    const isLandscape = iiifWidth >= iiifHeight;
+    if (aspectRatio === 'landscape' && !isLandscape) {
+      throw new Error(`Object ${repoId} is portrait; landscape filter cannot be satisfied`);
+    }
+    if (aspectRatio === 'portrait' && isLandscape) {
+      throw new Error(`Object ${repoId} is landscape; portrait filter cannot be satisfied`);
     }
   }
 
-  const imageUrl = `${iiifServiceUrl}/full/!4800,4800/0/default.jpg`;
+  const imageUrl = `${iiifServiceUrl}/full/!${iiifBoundingBox(aspectRatio !== 'all' ? aspectRatio : 'landscape', iiifWidth, iiifHeight)}/0/default.jpg`;
   let imageBuffer;
   try {
     const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 60000 });
