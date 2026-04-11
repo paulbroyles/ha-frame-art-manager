@@ -439,21 +439,30 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   const { aspectRatio = 'all', sourceLabel = 'Wikidata', preFilters = [] } = options;
   const allFilters = [...preFilters, ...filters];
 
-  // Resolve artist filter to a Wikidata QID.
-  const artistName = getRequireValues(allFilters, 'artist')[0] || null;
-  let creatorQid   = null;
-  if (artistName) {
-    creatorQid = await resolveCreatorQid(artistName);
-    if (!creatorQid) {
-      console.warn(`[wikidata] Could not resolve artist "${artistName}" to a QID — ignoring artist filter`);
+  const searchKeyword = getRequireValues(allFilters, 'search')[0] || null;
+
+  let candidates;
+  if (searchKeyword) {
+    // Keyword search — bypass pool; use wbsearchentities + P18 validation.
+    // Other structural filters (movement, century, etc.) are not applied in
+    // search mode; the keyword provides the primary narrowing.
+    candidates = await getSearchCandidates(searchKeyword);
+    candidates = candidates.slice(0, MAX_ROUNDS * 3);
+  } else {
+    // Resolve artist filter to a Wikidata QID.
+    const artistName = getRequireValues(allFilters, 'artist')[0] || null;
+    let creatorQid   = null;
+    if (artistName) {
+      creatorQid = await resolveCreatorQid(artistName);
+      if (!creatorQid) {
+        console.warn(`[wikidata] Could not resolve artist "${artistName}" to a QID — ignoring artist filter`);
+      }
     }
+
+    // Get (or build) the QID pool for this filter combination.
+    const pool = await getPool(allFilters, creatorQid);
+    candidates = [...pool].sort(() => Math.random() - 0.5).slice(0, MAX_ROUNDS * 3);
   }
-
-  // Get (or build) the QID pool for this filter combination.
-  const pool = await getPool(allFilters, creatorQid);
-
-  // Try up to MAX_ROUNDS random QIDs from the pool.
-  const candidates = [...pool].sort(() => Math.random() - 0.5).slice(0, MAX_ROUNDS * 3);
 
   for (const qid of candidates) {
     // Fast single-item metadata + image URL query.
@@ -549,6 +558,100 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     `Could not find a suitable${aspectRatio !== 'all' ? ` ${aspectRatio}` : ''} ` +
     `artwork from Wikidata after trying ${Math.min(candidates.length, MAX_ROUNDS * 3)} candidates`
   );
+}
+
+// ── searchPreview + keyword search helpers ────────────────────────────────────
+
+/**
+ * Fetch candidate QIDs matching a keyword using wbsearchentities, then filter
+ * to those that have a P18 image via SPARQL VALUES query.
+ *
+ * Returns a shuffled array of QID strings (e.g. ["Q12345", "Q67890"]).
+ * When search is active, other structural filters (movement, century, etc.)
+ * are not applied — the keyword provides the primary narrowing.
+ */
+async function getSearchCandidates(keyword) {
+  // Step 1: wbsearchentities — searches labels and aliases.
+  const searchResp = await axios.get(ENTITY_API, {
+    params: {
+      action:   'wbsearchentities',
+      search:   keyword,
+      type:     'item',
+      language: 'en',
+      limit:    50,
+      format:   'json',
+      origin:   '*',
+    },
+    headers: { 'User-Agent': USER_AGENT },
+    timeout: 10000,
+  });
+
+  const candidates = (searchResp.data.search || []).map(r => r.id);
+  if (candidates.length === 0) throw new Error(`[wikidata] No items found for "${keyword}"`);
+
+  // Step 2: SPARQL VALUES query — keep only items with a P18 image.
+  const valuesClause = candidates.map(q => `wd:${q}`).join(' ');
+  const query = `SELECT ?item WHERE { VALUES ?item { ${valuesClause} } ?item wdt:P18 []. }`;
+  const bindings = await sparqlQuery(query, 15000);
+
+  const qids = bindings
+    .map(b => b.item?.value?.replace('http://www.wikidata.org/entity/', ''))
+    .filter(Boolean);
+
+  if (qids.length === 0) throw new Error(`[wikidata] No items with images found for "${keyword}"`);
+
+  // Shuffle so successive fetches don't always hit the same top result.
+  return qids.sort(() => Math.random() - 0.5);
+}
+
+/**
+ * Return up to `count` search result previews for the given query.
+ */
+async function searchPreview(query, options = {}) {
+  const { count = 12 } = options;
+
+  const searchResp = await axios.get(ENTITY_API, {
+    params: {
+      action:   'wbsearchentities',
+      search:   query,
+      type:     'item',
+      language: 'en',
+      limit:    Math.min(count * 4, 50),  // over-fetch — many won't have images
+      format:   'json',
+      origin:   '*',
+    },
+    headers: { 'User-Agent': USER_AGENT },
+    timeout: 10000,
+  });
+
+  const candidates = (searchResp.data.search || []).map(r => r.id);
+  if (candidates.length === 0) return { results: [], totalAvailable: 0 };
+
+  const valuesClause = candidates.map(q => `wd:${q}`).join(' ');
+  const sparql = `
+SELECT ?item ?image ?itemLabel ?creatorLabel WHERE {
+  VALUES ?item { ${valuesClause} }
+  ?item wdt:P18 ?image.
+  OPTIONAL { ?item wdt:P170 ?creator }
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+}
+LIMIT ${count}`.trim();
+
+  const bindings = await sparqlQuery(sparql, 15000);
+
+  const results = bindings.map(b => {
+    const qid = b.item?.value?.replace('http://www.wikidata.org/entity/', '') || null;
+    const imageUrl = b.image?.value || null;
+    return {
+      title:        b.itemLabel?.value || null,
+      creator:      b.creatorLabel?.value || null,
+      thumbnailUrl: imageUrl ? `${imageUrl}?width=200` : null,
+      artworkUrl:   qid ? `https://www.wikidata.org/wiki/${qid}` : null,
+      source:       'Wikidata',
+    };
+  });
+
+  return { results, totalAvailable: results.length };
 }
 
 // ── fetchByIdentifier ─────────────────────────────────────────────────────────
@@ -776,6 +879,15 @@ function getFilterTypes() {
       values:      [],
       inputStyle:  'search',
     },
+    {
+      type:        'search',
+      label:       'Search',
+      description: 'Search by artwork title, artist name, or subject. Uses Wikidata entity search (labels and aliases).',
+      modes:       ['require'],
+      multiValue:  false,
+      values:      [],
+      inputStyle:  'search',
+    },
   ];
 }
 
@@ -819,6 +931,7 @@ module.exports = {
   fetchRandomArtwork,
   fetchByIdentifier,
   canHandleIdentifier,
+  searchPreview,
   countArtistArtworks,
   selectMode,
   getFilterTypes,
