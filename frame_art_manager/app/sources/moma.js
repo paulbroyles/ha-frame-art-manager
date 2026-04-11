@@ -1,7 +1,11 @@
 'use strict';
 const axios = require('axios');
 const fs = require('fs').promises;
-const { THUMB_LONG_EDGE, thumbWidthFor } = require('../utils/thumbSize');
+const { thumbWidthFor } = require('../utils/thumbSize');
+
+// MoMA's Dragonfly image service enforces a server-side size cap; requests above
+// this return HTTP 400. 2000px is the known maximum the service accepts.
+const DRAGONFLY_MAX_EDGE = 2000;
 
 // GitHub dataset: MuseumofModernArt/collection — snapshot of the full MoMA collection.
 // 160,269 total records; ~93,188 have an ImageURL. Updated by MoMA periodically.
@@ -98,10 +102,11 @@ function extractFileId(imageUrl) {
  * sha validation is not enforced by Dragonfly — the URL works without it.
  *
  * @param {string} fileId  - Dragonfly file ID (e.g. "619222")
- * @param {number} maxEdge - Bounding box side in pixels (default: THUMB_LONG_EDGE)
+ * @param {number} maxEdge - Bounding box side in pixels (capped at DRAGONFLY_MAX_EDGE)
  * @returns {string} Image URL serving up to maxEdge×maxEdge pixels
  */
-function buildImageUrl(fileId, maxEdge = THUMB_LONG_EDGE) {
+function buildImageUrl(fileId, maxEdge = DRAGONFLY_MAX_EDGE) {
+  maxEdge = Math.min(maxEdge, DRAGONFLY_MAX_EDGE);
   // The string "\\u003e" in JS is 6 literal chars: \, u, 0, 0, 3, e.
   // This matches the literal \u003e bytes that Dragonfly expects in the instruction JSON.
   const raw = `[["f","${fileId}"],["p","convert","-quality 90 -resize ${maxEdge}x${maxEdge}\\u003e"]]`;
