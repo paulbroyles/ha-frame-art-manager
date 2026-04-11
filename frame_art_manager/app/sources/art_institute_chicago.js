@@ -34,10 +34,10 @@ const HEADERS    = { 'User-Agent': USER_AGENT, 'AIC-User-Agent': USER_AGENT };
 
 // Fields requested from the artworks API.
 const ARTWORK_FIELDS = [
-  'id', 'title', 'artist_display', 'date_display', 'medium_display',
+  'id', 'title', 'artist_display', 'artist_title', 'date_display', 'medium_display',
   'dimensions', 'image_id', 'is_public_domain', 'department_title',
   'artwork_type_title', 'place_of_origin', 'description', 'credit_line',
-  'artwork_type_id',
+  'style_title', 'style_titles',
 ].join(',');
 
 // Search page size — max 100 per AIC API limits.
@@ -49,66 +49,214 @@ const POOL_TTL_MS = 24 * 60 * 60 * 1000;
 // Pool cache: key → { ids: number[], fetchedAt: number }
 const poolCache = new Map();
 
-// ── Artwork type filters ───────────────────────────────────────────────────────
-//
-// `artwork_type_title` is a controlled vocabulary. The most common values among
-// public-domain artworks with images (from aggregation, early 2026):
-//
-//   24,189 Print               7,567 Drawing and Watercolor
-//    5,809 Textile             3,778 Photograph
-//    2,758 Ceramics            1,795 Painting
-//    1,780 Glass               1,737 Costume and Accessories
-//    1,662 Vessel              1,324 Sculpture
-//    1,220 Coin                1,082 Metalwork
-//      589 Decorative Arts       494 Arms
-//      418 Medals               384 Furniture
-//      337 Armor                303 Religious/Ritual Object
-//      249 Book                 228 Miniature Painting
-//
-// We expose the highest-value display-friendly types as user-selectable filters.
+// ── Data tables ────────────────────────────────────────────────────────────────
 
+// Artwork type controlled vocabulary — public-domain counts (early 2026).
+// Only display-friendly types exposed.
 const ARTWORK_TYPES = [
-  { value: 'Painting',              label: 'Paintings',               count: 1795  },
-  { value: 'Print',                 label: 'Prints',                  count: 24189 },
-  { value: 'Drawing and Watercolor',label: 'Drawings & Watercolors',  count: 7567  },
-  { value: 'Photograph',            label: 'Photographs',             count: 3778  },
-  { value: 'Sculpture',             label: 'Sculpture',               count: 1324  },
-  { value: 'Textile',               label: 'Textiles',                count: 5809  },
-  { value: 'Ceramics',              label: 'Ceramics',                count: 2758  },
-  { value: 'Miniature Painting',    label: 'Miniature Paintings',     count: 228   },
+  { value: 'Painting',               label: 'Paintings',              count: 1795  },
+  { value: 'Print',                  label: 'Prints',                 count: 24189 },
+  { value: 'Drawing and Watercolor', label: 'Drawings & Watercolors', count: 7567  },
+  { value: 'Photograph',             label: 'Photographs',            count: 3778  },
+  { value: 'Sculpture',              label: 'Sculpture',              count: 1324  },
+  { value: 'Textile',                label: 'Textiles',               count: 5809  },
+  { value: 'Ceramics',               label: 'Ceramics',               count: 2758  },
+  { value: 'Miniature Painting',     label: 'Miniature Paintings',    count: 228   },
 ];
+
+// AIC curatorial departments — public-domain image counts (early 2026).
+const DEPARTMENTS = [
+  { value: 'Prints and Drawings',                  label: 'Prints & Drawings',            count: 25062 },
+  { value: 'Arts of Asia',                         label: 'Arts of Asia',                 count: 9718  },
+  { value: 'Textiles',                             label: 'Textiles',                     count: 6903  },
+  { value: 'Applied Arts of Europe',               label: 'Applied Arts of Europe',       count: 4981  },
+  { value: 'Photography and Media',                label: 'Photography & Media',          count: 3776  },
+  { value: 'Arts of the Americas',                 label: 'Arts of the Americas',         count: 2720  },
+  { value: 'Arts of Greece, Rome, and Byzantium',  label: 'Greece, Rome & Byzantium',     count: 2029  },
+  { value: 'Painting and Sculpture of Europe',     label: 'Painting & Sculpture (Europe)',count: 1988  },
+  { value: 'Arts of Africa',                       label: 'Arts of Africa',               count: 1087  },
+  { value: 'Architecture and Design',              label: 'Architecture & Design',        count: 276   },
+  { value: 'Modern Art',                           label: 'Modern Art',                   count: 24    },
+];
+
+// Art movements/styles — counts are from style_titles array field (early 2026).
+// Filtered against style_titles (all tagged styles, not just primary) for broader coverage.
+const STYLES = [
+  { value: 'Impressionism',     label: 'Impressionism',     count: 179 },
+  { value: 'Renaissance',       label: 'Renaissance',       count: 165 },
+  { value: 'Pictorialism',      label: 'Pictorialism',      count: 156 },
+  { value: 'Folk Art',          label: 'Folk Art',          count: 127 },
+  { value: 'Realism',           label: 'Realism',           count: 80  },
+  { value: 'Post-Impressionism',label: 'Post-Impressionism',count: 76  },
+  { value: 'Rococo',            label: 'Rococo',            count: 63  },
+  { value: 'Modernism',         label: 'Modernism',         count: 58  },
+  { value: 'Neoclassicism',     label: 'Neoclassicism',     count: 44  },
+  { value: 'Baroque',           label: 'Baroque',           count: 34  },
+  { value: 'Art Nouveau',       label: 'Art Nouveau',       count: 21  },
+  { value: 'Barbizon School',   label: 'Barbizon School',   count: 19  },
+  { value: 'Mannerism',         label: 'Mannerism',         count: 15  },
+  { value: 'Flemish',           label: 'Flemish',           count: 6   },
+  { value: 'Symbolism',         label: 'Symbolism',         count: 3   },
+  { value: 'Pre-Raphaelite',    label: 'Pre-Raphaelite',    count: 2   },
+  { value: 'Hudson River School',label:'Hudson River School',count: 2  },
+];
+
+// Date periods — mapped to date_start range queries.
+// Counts based on artworks with date_start in range (early 2026).
+const CENTURIES = [
+  { value: 'ancient',      label: 'Ancient & Medieval (before 1400)', startYear: null, endYear: 1399, count: 6616  },
+  { value: '15th century', label: '15th century (1400–1499)',          startYear: 1400, endYear: 1499, count: 1265  },
+  { value: '16th century', label: '16th century (1500–1599)',          startYear: 1500, endYear: 1599, count: 4361  },
+  { value: '17th century', label: '17th century (1600–1699)',          startYear: 1600, endYear: 1699, count: 6082  },
+  { value: '18th century', label: '18th century (1700–1799)',          startYear: 1700, endYear: 1799, count: 12356 },
+  { value: '19th century', label: '19th century (1800–1899)',          startYear: 1800, endYear: 1899, count: 25316 },
+  { value: '20th century', label: '20th century (1900–1999)',          startYear: 1900, endYear: 1999, count: 2328  },
+];
+
+// Place of origin — AIC stores as lowercase strings.
+// Displayed with capitalized labels; values match place_of_origin.keyword exactly.
+const PLACES = [
+  { value: 'france',        label: 'France',         count: 11019 },
+  { value: 'japan',         label: 'Japan',          count: 7556  },
+  { value: 'england',       label: 'England',        count: 5940  },
+  { value: 'united states', label: 'United States',  count: 4960  },
+  { value: 'italy',         label: 'Italy',          count: 4584  },
+  { value: 'germany',       label: 'Germany',        count: 2330  },
+  { value: 'china',         label: 'China',          count: 2242  },
+  { value: 'netherlands',   label: 'Netherlands',    count: 1686  },
+  { value: 'egypt',         label: 'Egypt',          count: 1216  },
+  { value: 'flanders',      label: 'Flanders',       count: 978   },
+  { value: 'holland',       label: 'Holland',        count: 833   },
+  { value: 'peru',          label: 'Peru',           count: 786   },
+  { value: 'spain',         label: 'Spain',          count: 647   },
+  { value: 'sweden',        label: 'Sweden',         count: 531   },
+  { value: 'scotland',      label: 'Scotland',       count: 428   },
+  { value: 'mexico',        label: 'Mexico',         count: 367   },
+  { value: 'india',         label: 'India',          count: 272   },
+  { value: 'turkey',        label: 'Turkey',         count: 255   },
+  { value: 'greece',        label: 'Greece',         count: 242   },
+  { value: 'iran',          label: 'Iran',           count: 234   },
+];
+
+const DEPARTMENT_GROUPS = [
+  { name: 'Fine Art',  values: ['Painting and Sculpture of Europe', 'Prints and Drawings', 'Photography and Media', 'Modern Art'] },
+  { name: 'Decorative', values: ['Applied Arts of Europe', 'Textiles', 'Architecture and Design'] },
+  { name: 'World',     values: ['Arts of Asia', 'Arts of the Americas', 'Arts of Greece, Rome, and Byzantium', 'Arts of Africa'] },
+];
+
+const STYLE_GROUPS = [
+  { name: 'Renaissance & Early Modern', values: ['Renaissance', 'Mannerism', 'Baroque', 'Flemish', 'Rococo'] },
+  { name: '19th Century',               values: ['Neoclassicism', 'Romanticism', 'Realism', 'Barbizon School', 'Hudson River School', 'Pre-Raphaelite', 'Impressionism', 'Post-Impressionism', 'Symbolism', 'Art Nouveau', 'Pictorialism'] },
+  { name: 'Other',                      values: ['Folk Art', 'Modernism'] },
+];
+
+const CENTURY_GROUPS = [
+  { name: 'Pre-Modern',  values: ['ancient', '15th century', '16th century'] },
+  { name: 'Early Modern',values: ['17th century', '18th century'] },
+  { name: 'Modern',      values: ['19th century', '20th century'] },
+];
+
+// ── Filter helpers ─────────────────────────────────────────────────────────────
+
+function getFilterValues(filters, type, mode) {
+  return filters
+    .filter(f => f.type === type && f.mode === mode)
+    .flatMap(f => f.values || []);
+}
 
 // ── Pool cache helpers ─────────────────────────────────────────────────────────
 
 function poolCacheKey(filters) {
-  const types = getRequireValues(filters, 'type').slice().sort();
-  return types.length ? `type:${types.join(',')}` : 'all';
-}
-
-function getRequireValues(filters, type) {
-  return filters
-    .filter(f => f.type === type && f.mode === 'require')
-    .flatMap(f => f.values || []);
+  const parts = [];
+  for (const ft of ['type', 'department', 'style', 'century', 'place', 'artist']) {
+    const req = getFilterValues(filters, ft, 'require').slice().sort();
+    const exc = getFilterValues(filters, ft, 'exclude').slice().sort();
+    if (req.length) parts.push(`${ft}+${req.join(',')}`);
+    if (exc.length) parts.push(`${ft}-${exc.join(',')}`);
+  }
+  return parts.length ? parts.join('|') : 'all';
 }
 
 /**
- * Build the Elasticsearch filter clause for the given filters.
+ * Build the Elasticsearch bool clause for the given filters.
  * Always includes `is_public_domain: true` and `exists: image_id`.
+ * Returns { filter: [], must_not: [] } suitable for use as a bool query body.
  */
 function buildEsFilter(filters) {
-  const esFilters = [
+  const filter  = [
     { term: { is_public_domain: true } },
     { exists: { field: 'image_id' } },
   ];
+  const mustNot = [];
 
-  const types = getRequireValues(filters, 'type');
-  if (types.length === 1) {
-    esFilters.push({ term: { 'artwork_type_title.keyword': types[0] } });
-  } else if (types.length > 1) {
-    esFilters.push({ terms: { 'artwork_type_title.keyword': types } });
+  // Artwork type
+  const typeReq = getFilterValues(filters, 'type', 'require');
+  const typeExc = getFilterValues(filters, 'type', 'exclude');
+  if (typeReq.length === 1) filter.push({ term: { 'artwork_type_title.keyword': typeReq[0] } });
+  else if (typeReq.length > 1) filter.push({ terms: { 'artwork_type_title.keyword': typeReq } });
+  for (const v of typeExc) mustNot.push({ term: { 'artwork_type_title.keyword': v } });
+
+  // Department
+  const deptReq = getFilterValues(filters, 'department', 'require');
+  const deptExc = getFilterValues(filters, 'department', 'exclude');
+  if (deptReq.length === 1) filter.push({ term: { 'department_title.keyword': deptReq[0] } });
+  else if (deptReq.length > 1) filter.push({ terms: { 'department_title.keyword': deptReq } });
+  for (const v of deptExc) mustNot.push({ term: { 'department_title.keyword': v } });
+
+  // Style — matches against style_titles array field for broader coverage than style_title (primary only).
+  // Multiple require values → OR (any of the styles).
+  const styleReq = getFilterValues(filters, 'style', 'require');
+  const styleExc = getFilterValues(filters, 'style', 'exclude');
+  if (styleReq.length === 1) {
+    filter.push({ term: { 'style_titles.keyword': styleReq[0] } });
+  } else if (styleReq.length > 1) {
+    filter.push({ bool: {
+      should: styleReq.map(v => ({ term: { 'style_titles.keyword': v } })),
+      minimum_should_match: 1,
+    }});
+  }
+  for (const v of styleExc) mustNot.push({ term: { 'style_titles.keyword': v } });
+
+  // Century — date_start range. Multiple require values → OR.
+  const centuryReq = getFilterValues(filters, 'century', 'require');
+  const centuryExc = getFilterValues(filters, 'century', 'exclude');
+  if (centuryReq.length > 0) {
+    const ranges = centuryReq.map(v => CENTURIES.find(c => c.value === v)).filter(Boolean);
+    const toRange = r => {
+      const rc = {};
+      if (r.startYear !== null) rc.gte = r.startYear;
+      if (r.endYear   !== null) rc.lte = r.endYear;
+      return { range: { date_start: rc } };
+    };
+    if (ranges.length === 1) {
+      filter.push(toRange(ranges[0]));
+    } else {
+      filter.push({ bool: { should: ranges.map(toRange), minimum_should_match: 1 } });
+    }
+  }
+  for (const v of centuryExc) {
+    const r = CENTURIES.find(c => c.value === v);
+    if (r) {
+      const rc = {};
+      if (r.startYear !== null) rc.gte = r.startYear;
+      if (r.endYear   !== null) rc.lte = r.endYear;
+      mustNot.push({ range: { date_start: rc } });
+    }
   }
 
-  return esFilters;
+  // Place of origin
+  const placeReq = getFilterValues(filters, 'place', 'require');
+  const placeExc = getFilterValues(filters, 'place', 'exclude');
+  if (placeReq.length === 1) filter.push({ term: { 'place_of_origin.keyword': placeReq[0] } });
+  else if (placeReq.length > 1) filter.push({ terms: { 'place_of_origin.keyword': placeReq } });
+  for (const v of placeExc) mustNot.push({ term: { 'place_of_origin.keyword': v } });
+
+  // Artist (exact artist_title match; populated via suggestArtists)
+  const artistReq = getFilterValues(filters, 'artist', 'require');
+  if (artistReq.length === 1) filter.push({ term: { 'artist_title.keyword': artistReq[0] } });
+  else if (artistReq.length > 1) filter.push({ terms: { 'artist_title.keyword': artistReq } });
+
+  return { filter, must_not: mustNot };
 }
 
 /**
@@ -128,7 +276,7 @@ async function buildPool(filters) {
 
   while (true) {
     const body = {
-      query: { bool: { filter: buildEsFilter(filters) } },
+      query: { bool: buildEsFilter(filters) },
       size: PAGE_SIZE,
       sort: [{ id: { order: 'asc' } }],
       fields: ['id'],
@@ -174,12 +322,12 @@ async function pickRandomId(filters) {
   }
 
   // Pool not yet built — fall back to random offset in first 1000 results.
-  const esFilters = buildEsFilter(filters);
-  const total = await getFilterTotal(esFilters);
+  const boolClause = buildEsFilter(filters);
+  const total = await getFilterTotal(boolClause);
   const from  = Math.floor(Math.random() * Math.min(total, 1000));
 
   const body = {
-    query: { bool: { filter: esFilters } },
+    query: { bool: boolClause },
     from,
     size: 1,
     sort: [{ id: { order: 'asc' } }],
@@ -195,8 +343,8 @@ async function pickRandomId(filters) {
   return obj.id;
 }
 
-async function getFilterTotal(esFilters) {
-  const body = { query: { bool: { filter: esFilters } }, size: 0, _source: false };
+async function getFilterTotal(boolClause) {
+  const body = { query: { bool: boolClause }, size: 0, _source: false };
   const response = await axios.post(`${API_BASE}/artworks/search`, body, {
     headers: { ...HEADERS, 'Content-Type': 'application/json' },
     timeout: 10000,
@@ -211,7 +359,6 @@ async function getFilterTotal(esFilters) {
  * Fetches info.json first to get native dimensions for an accurate bounding box.
  */
 async function buildImageUrl(imageId, orientation) {
-  // Fetch IIIF info.json for native dimensions.
   let nativeW, nativeH;
   try {
     const info = await axios.get(`${IIIF_BASE}/${imageId}/info.json`, {
@@ -220,7 +367,6 @@ async function buildImageUrl(imageId, orientation) {
     nativeW = info.data.width;
     nativeH = info.data.height;
   } catch {
-    // If info.json fails, request a safe bounding box without native dims.
     nativeW = null;
     nativeH = null;
   }
@@ -389,15 +535,16 @@ function buildMetadata(obj) {
   const creatorBio   = artistLines[1]?.trim() || null;
 
   return {
-    title:       obj.title       || null,
+    title:       obj.title         || null,
     creator:     creatorName,
     creatorBio,
     dateCreated: obj.date_display  || null,
     medium:      obj.medium_display || null,
-    dimensions:  obj.dimensions  || null,
+    dimensions:  obj.dimensions    || null,
+    style:       obj.style_title   || null,
     department:  obj.department_title || null,
     description: obj.description ? stripHtml(obj.description) : null,
-    creditLine:  obj.credit_line || null,
+    creditLine:  obj.credit_line   || null,
     artworkUrl:  `https://www.artic.edu/artworks/${obj.id}`,
     source:      'Art Institute of Chicago',
   };
@@ -425,6 +572,50 @@ function getFilterTypes() {
       multiValue:  true,
       values:      ARTWORK_TYPES.map(({ value, label, count }) => ({ value, label, count })),
     },
+    {
+      type:        'department',
+      label:       'Department',
+      description: 'Restrict or exclude by AIC curatorial department.',
+      modes:       ['require', 'exclude'],
+      multiValue:  true,
+      groups:      DEPARTMENT_GROUPS,
+      values:      DEPARTMENTS.map(({ value, label, count }) => ({ value, label, count })),
+    },
+    {
+      type:        'style',
+      label:       'Art Movement / Style',
+      description: 'Restrict or exclude by art movement or style. Matches any tagged style, not just the primary one.',
+      modes:       ['require', 'exclude'],
+      multiValue:  true,
+      groups:      STYLE_GROUPS,
+      values:      STYLES.map(({ value, label, count }) => ({ value, label, count })),
+    },
+    {
+      type:        'century',
+      label:       'Period',
+      description: 'Restrict or exclude by creation date period (based on date_start year).',
+      modes:       ['require', 'exclude'],
+      multiValue:  true,
+      groups:      CENTURY_GROUPS,
+      values:      CENTURIES.map(({ value, label, count }) => ({ value, label, count })),
+    },
+    {
+      type:        'place',
+      label:       'Place of Origin',
+      description: 'Restrict or exclude by country or region of origin.',
+      modes:       ['require', 'exclude'],
+      multiValue:  true,
+      values:      PLACES.map(({ value, label, count }) => ({ value, label, count })),
+    },
+    {
+      type:        'artist',
+      label:       'Artist',
+      description: 'Filter by artist name (exact match from AIC records).',
+      modes:       ['require'],
+      multiValue:  false,
+      values:      [],
+      inputStyle:  'search',
+    },
   ];
 }
 
@@ -433,17 +624,15 @@ function getFilterTypes() {
 async function suggestArtists(query, options = {}) {
   const { count = 10 } = options;
 
-  // Search the agents endpoint for artists.
   const response = await axios.get(`${API_BASE}/agents/search`, {
     params: { q: query, limit: count * 2, fields: 'id,title,birth_date,death_date' },
     headers: HEADERS,
     timeout: 10000,
   });
 
-  // Filter to those who have public-domain artworks.
   const agents = response.data.data || [];
   return agents
-    .filter(a => a.title && !/^(museum|collection|gallery|trust|foundation|estate)/i.test(a.title))
+    .filter(a => a.title && !/^(museum|collection|gallery|trust|foundation|estate|institute|school of)/i.test(a.title))
     .slice(0, count)
     .map(a => ({
       name: a.title,
@@ -454,10 +643,10 @@ async function suggestArtists(query, options = {}) {
 
 async function countArtistArtworks(artistName, options = {}) {
   const body = {
-    q: artistName,
     query: { bool: { filter: [
       { term: { is_public_domain: true } },
       { exists: { field: 'image_id' } },
+      { term: { 'artist_title.keyword': artistName } },
     ]}},
     size: 0,
     _source: false,
@@ -478,6 +667,7 @@ const metadataFields = [
   { key: 'dateCreated', label: 'Date',        description: 'Human-readable date (e.g. "1884–86")' },
   { key: 'medium',      label: 'Medium',      description: 'Materials and technique' },
   { key: 'dimensions',  label: 'Dimensions',  description: 'Physical dimensions' },
+  { key: 'style',       label: 'Style',       description: 'Primary art movement or style' },
   { key: 'department',  label: 'Department',  description: 'AIC curatorial department' },
   { key: 'creditLine',  label: 'Credit Line', description: 'Acquisition or gift credit' },
   { key: 'description', label: 'Description', description: 'Curatorial description' },
@@ -491,6 +681,7 @@ const defaultMapping = {
   dateCreated: 'date',
   medium:      'medium',
   dimensions:  'dimensions',
+  style:       null,
   department:  null,
   creditLine:  'credit_line',
   description: 'description',
