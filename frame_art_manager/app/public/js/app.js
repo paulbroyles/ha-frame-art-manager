@@ -13533,29 +13533,50 @@ function startTagsetEdit(row) {
   select.focus();
 }
 
-// Show a toast notification
-function showToast(message, duration = 3000) {
+// Show a toast notification.
+// `typeOrDuration`: pass 'error' for an error toast (click-to-dismiss, red),
+// or a number (ms) for a timed toast. Default: 3000ms.
+function showToast(message, typeOrDuration = 3000) {
   // Remove any existing toast
   const existingToast = document.querySelector('.toast-notification');
-  if (existingToast) {
-    existingToast.remove();
-  }
+  if (existingToast) existingToast.remove();
+
+  const isError = typeOrDuration === 'error';
+  const duration = isError ? null : (typeof typeOrDuration === 'number' ? typeOrDuration : 3000);
 
   const toast = document.createElement('div');
-  toast.className = 'toast-notification';
-  toast.textContent = message;
+  toast.className = 'toast-notification' + (isError ? ' toast-error' : '');
+
+  if (isError) {
+    // Error toasts: show full message + dismiss button. Stay until dismissed.
+    const text = document.createElement('span');
+    text.textContent = message;
+    const close = document.createElement('button');
+    close.textContent = '✕';
+    close.className = 'toast-dismiss';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.addEventListener('click', () => {
+      toast.classList.remove('show');
+      setTimeout(() => toast.remove(), 300);
+    });
+    toast.appendChild(text);
+    toast.appendChild(close);
+  } else {
+    toast.textContent = message;
+  }
+
   document.body.appendChild(toast);
 
-  // Trigger animation
   requestAnimationFrame(() => {
     toast.classList.add('show');
   });
 
-  // Remove after duration
-  setTimeout(() => {
-    toast.classList.remove('show');
-    setTimeout(() => toast.remove(), 300);
-  }, duration);
+  if (duration !== null) {
+    setTimeout(() => {
+      toast.classList.remove('show');
+      setTimeout(() => toast.remove(), 300);
+    }, duration);
+  }
 }
 
 // ============================================================================

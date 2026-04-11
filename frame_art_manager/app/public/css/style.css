@@ -10705,6 +10705,31 @@ body.dropdown-open .image-card:hover {
   opacity: 1;
 }
 
+.toast-notification.toast-error {
+  background: #9b2c2c;
+  padding: 12px 16px 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(480px, 90vw);
+  text-align: left;
+}
+
+.toast-dismiss {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.toast-dismiss:hover {
+  color: white;
+}
+
 /* Tagset dropdown in TV assignments */
 .tagset-select {
   padding: 6px 10px;
