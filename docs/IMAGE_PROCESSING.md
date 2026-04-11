@@ -330,10 +330,27 @@ utils/
 
 ## Future Work
 
+## Known Crop Failures
+
+A running list of real images that exposed crop algorithm weaknesses, kept as ground-truth test cases for future improvements.
+
+| Image | Source | Failure mode | Root cause | Status |
+|---|---|---|---|---|
+| [P.S. Krøyer — Summer Evening on Skagen's Beach (1899)](https://commons.wikimedia.org/wiki/File:P_S_Kr%C3%B8yer_1899_-_Sommeraften_ved_Skagens_strand._Kunstneren_og_hans_hustru.jpg) | Wikimedia Commons | Catastrophic vertical overcrop | Smooth sky+sand, both low-variance → coherence scan hit `maxCropFrac` on top+bottom and accepted the cap as a crop result | Unresolved; tracked under `maxCropFrac as failure signal` below |
+| [Gabrielle d'Estrées et une de ses sœurs (c.1594)](https://www.wikidata.org/wiki/Q542066) | Wikidata | Crop centered on blank space between two figures | coherenceCrop centroid attracted to low-contrast skin/background region between figures; tiny 1:1-pixel extraction window (9.7% of image) magnified the error | Partially mitigated by `minCoverageFrac` guard (falls back to center crop when extraction < 25% of cover-fit area) |
+
+---
+
+## Future Work
+
 **`maxCropFrac` as failure signal**: Every variance-based preprocessor has a hard cap (`maxCropFrac`, default 0.25–0.30) that limits how much can be cropped per edge. Currently, reaching the cap is treated as a successful crop result. It should instead be treated as a failure: the scanner was still seeing "frame material" at the cap boundary, meaning it never found a genuine interior-to-frame transition — it was probably scanning into painting content. The correct response when the cap is hit is to reject the crop on that edge (return 0 for that edge, not the cap value), or to discard the preprocessor's output entirely and return the original buffer. This change would have prevented the catastrophic overcrop of low-variance paintings like Krøyer's *Summer Evening on Skagen's Beach* (P.S. Krøyer, 1899 — atmospheric sky + sand, both very low variance, scan hit cap on top and bottom). Apply to all preprocessors that use `maxCropFrac`: `coherence_scan`, `variance_scan`, `region_compare`, `corner_consensus`, `mean_profile`, `tile_color`, `symmetric_scan`, `adaptive_scan`.
 
 **Per-source pipeline configuration**: Currently image processing settings (preprocessor, crop engine, options) are global. Sources that never serve framed images (e.g. Wikimedia Commons, institutional uploads) should be able to specify more conservative preprocessing options or a different preprocessor without affecting sources where frame detection is valuable. Implementation note: cannot skip preprocessing entirely even for frameless sources — the pipeline still needs to crop to the target 4K resolution. The per-source config should allow overriding `preProcessorOptions` (e.g. lower `coherenceThreshold`, lower `maxCropFrac`) or selecting a different preprocessor, not suppressing the crop-to-target step. Likely implementation: add an optional `imageProcessingOverrides` object to each BUILTIN_SOURCES entry that gets merged into the global config at fetch time.
 
 **Raw buffer pipeline**: Pass raw pixel data (`{ data, info }`) between phases instead of encoding/decoding between each phase. This would save ~240ms per image (the Phase 1 encode + Phase 2 decode round-trip). The pre-processor interface would need a parallel raw-buffer path while keeping the current `async (buffer, options) → Buffer` interface for compatibility.
+
+**coherenceCrop centroid quality for symmetric/multi-subject compositions**: The variance-weighted centroid works well for single-subject paintings but fails on symmetric compositions (two figures side by side, bilateral symmetry) and paintings where the most visually complex region is not the intended focal point. When two subjects have equal variance, the centroid lands between them. Possible improvements: (1) face/saliency detection to anchor the centroid to a detected subject region; (2) multi-centroid sampling (find the N highest-variance peaks and pick the one furthest from blank regions); (3) require the centroid to fall within a minimum-variance region (reject centroids that land in low-variance zones like skin or sky). The `minCoverageFrac` guard (fallback to center crop) is a conservative safety net but does not fix the centroid — it just prevents catastrophic crops on very large images.
+
+**coherenceCrop extraction scale for large images**: coherenceCrop extracts exactly `targetW × targetH` pixels from the original at 1:1 scale. For high-res images (e.g. 10000×7500 → 3840×2160 target), this means using only ~10% of the image area. Any centroid error is magnified in proportion to how much the image exceeds the target size. The correct behavior for a large image with no frame to remove would be to scale down first and then crop (cover-fit style), not to extract a tiny 1:1 patch. Consider making the extraction window scale-aware: use the cover-fit extraction area as the minimum window size, and only zoom in further when a focus window (from `ml_subject` or `peak_variance`) specifically requests it.
 
 **Option 3 — ML segmentation**: See `docs/ROADMAP.md`. Using ONNX Runtime + a fine-tuned segmentation model (SAM or SegFormer) to handle irregular and ornate frames that defeat variance-based approaches.

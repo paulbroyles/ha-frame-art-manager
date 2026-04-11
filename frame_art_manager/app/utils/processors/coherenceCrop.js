@@ -54,6 +54,7 @@ async function coherenceCropProcessor(context, {
   borderWeight = 0.2,
   borderBandFrac = 0.12,
   attentionWindow = 1.0,
+  minCoverageFrac = 0.25,
 } = {}) {
   const t0 = Date.now();
 
@@ -211,9 +212,44 @@ async function coherenceCropProcessor(context, {
     ` → extract(left=${extractLeft},top=${extractTop} ${extractW}×${extractH}) → ${targetW}×${targetH}`
   );
 
+  // Minimum coverage guard.
+  //
+  // coherenceCrop extracts a window of exactly targetW×targetH pixels from the
+  // original image (1:1 scale). For very large source images this can be a tiny
+  // fraction of the total area — which magnifies centroid errors catastrophically.
+  // Example: Gabrielle d'Estrées (10703×7961) → 3840×2160 target: the extraction
+  // covers only 9.7% of the original image. A centroid landing on the empty space
+  // between two figures then crops out nearly all painting content.
+  //
+  // Guard: compare extractW×extractH against what a natural cover-fit would use —
+  // the largest rectangle at the target aspect ratio that fits inside the source.
+  // If the extraction covers less than minCoverageFrac of the cover-fit area,
+  // fall back to a center cover-fit (the same as Sharp's built-in behaviour).
+  //
+  // coverFitW/H in original coords: scale = max(targetW/origW, targetH/origH);
+  //   coverFitW = min(origW, targetW/scale), coverFitH = min(origH, targetH/scale).
+  const coverFitScale = Math.max(targetW / origW, targetH / origH);
+  const coverFitW     = Math.min(origW, targetW / coverFitScale);
+  const coverFitH     = Math.min(origH, targetH / coverFitScale);
+  const coverFitArea  = coverFitW * coverFitH;
+  const extractArea   = extractW * extractH;
+  const coverageRatio = coverFitArea > 0 ? extractArea / coverFitArea : 1;
+
+  let usedFallback = false;
   // Step 6: extract and resize to target.
   let result;
-  if (extractLeft === 0 && extractTop === 0 && extractW === origW && extractH === origH) {
+  if (coverageRatio < minCoverageFrac) {
+    // Extraction window too small relative to the natural crop size — the centroid
+    // is likely wrong. Fall back to a center cover-fit over the full image.
+    console.warn(
+      `[coherence_crop] coverage ${(coverageRatio * 100).toFixed(1)}% < ${(minCoverageFrac * 100).toFixed(0)}% threshold ` +
+      `(extract ${extractW}×${extractH} vs cover-fit ${Math.round(coverFitW)}×${Math.round(coverFitH)}) — falling back to center crop`
+    );
+    result = await sharp(context.buffer)
+      .resize(targetW, targetH, { fit: 'cover', position: 'centre' })
+      .toBuffer();
+    usedFallback = true;
+  } else if (extractLeft === 0 && extractTop === 0 && extractW === origW && extractH === origH) {
     result = await sharp(context.buffer)
       .resize(targetW, targetH, { fit: 'cover', position: effectiveStrategy })
       .toBuffer();
@@ -231,12 +267,13 @@ async function coherenceCropProcessor(context, {
   context.height = targetH;
 
   context.debug.coherence_crop = {
-    timing:      { total: tEnd - t0, decode: tDecode - t0, centroid: tCentroid - tDecode, encode: tEnd - tCentroid },
-    centroid:    { tileX: cx, tileY: cy, origX: origCx, origY: origCy, offsetX: centerOffsetX, offsetY: centerOffsetY },
-    focusSource: focusSource || null,
-    extract:     { left: extractLeft, top: extractTop, width: extractW, height: extractH },
-    strategy: effectiveStrategy,
-    borderWeight: bw,
+    timing:        { total: tEnd - t0, decode: tDecode - t0, centroid: tCentroid - tDecode, encode: tEnd - tCentroid },
+    centroid:      { tileX: cx, tileY: cy, origX: origCx, origY: origCy, offsetX: centerOffsetX, offsetY: centerOffsetY },
+    focusSource:   focusSource || null,
+    extract:       { left: extractLeft, top: extractTop, width: extractW, height: extractH },
+    coverage:      { ratio: coverageRatio, fallback: usedFallback },
+    strategy:      effectiveStrategy,
+    borderWeight:  bw,
     borderBandFrac,
     attentionWindow: effectiveWinScale,
   };

@@ -151,6 +151,8 @@ const IMAGE_PROCESSING_SCHEMA = {
           description: 'Width of the downweighted border band as a fraction of image size per side (0–0.5). Increase if frame material is still attracting the centroid.' },
         { key: 'attentionWindow', label: 'Attention Window', type: 'number', default: 1.0,
           description: 'Extract a region this many times larger than the target, then let Sharp attention find the best sub-crop. Values > 1 (e.g. 1.3–1.5) help locate faces and subjects that low-variance coherence may miss.' },
+        { key: 'minCoverageFrac', label: 'Min Coverage Fraction', type: 'number', default: 0.25,
+          description: 'Safety threshold (0–1): if the extraction window covers less than this fraction of what a natural cover-fit would use, fall back to center crop. Catches catastrophic crops on large high-res images with a mis-placed centroid. Lower = more permissive; higher = stricter fallback.' },
       ] },
     { value: 'frame_aware_crop', label: 'Frame-Aware Crop — detect frame and fit to TV aspect ratio in one informed pass',
       replaces: ['frame_detect', 'aspect_crop'],
