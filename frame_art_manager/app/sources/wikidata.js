@@ -446,7 +446,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     // Keyword search — bypass pool; use wbsearchentities + P18 validation.
     // Other structural filters (movement, century, etc.) are not applied in
     // search mode; the keyword provides the primary narrowing.
-    candidates = await getSearchCandidates(searchKeyword);
+    candidates = await getSearchCandidates(searchKeyword, allFilters);
     candidates = candidates.slice(0, MAX_ROUNDS * 3);
   } else {
     // Resolve artist filter to a Wikidata QID.
@@ -563,87 +563,146 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 // ── searchPreview + keyword search helpers ────────────────────────────────────
 
 /**
- * Fetch candidate QIDs matching a keyword using wbsearchentities, then filter
- * to those that have a P18 image via SPARQL VALUES query.
+ * Build SPARQL filter clauses from structural filters (media, movement, genre,
+ * institution, century) for use inside a search query. Returns an array of
+ * SPARQL triple/filter lines to inject into a WHERE block.
  *
- * Returns a shuffled array of QID strings (e.g. ["Q12345", "Q67890"]).
- * When search is active, other structural filters (movement, century, etc.)
- * are not applied — the keyword provides the primary narrowing.
+ * Note: Wikidata descriptions are brief ("painting by Claude Monet, 1890"),
+ * not rich curatorial text. The mwapi search indexes labels AND descriptions,
+ * so artist names and artwork titles embedded in descriptions are searchable,
+ * but subject/content queries ("bridge at sunset") won't match.
  */
-async function getSearchCandidates(keyword) {
-  // Step 1: wbsearchentities — searches labels and aliases.
-  const searchResp = await axios.get(ENTITY_API, {
-    params: {
-      action:   'wbsearchentities',
-      search:   keyword,
-      type:     'item',
-      language: 'en',
-      limit:    50,
-      format:   'json',
-      origin:   '*',
-    },
-    headers: { 'User-Agent': USER_AGENT },
-    timeout: 10000,
-  });
+function buildStructuralFilterLines(filters) {
+  const lines = [];
 
-  const candidates = (searchResp.data.search || []).map(r => r.id);
-  if (candidates.length === 0) throw new Error(`[wikidata] No items found for "${keyword}"`);
+  const mediaRequired = getRequireValues(filters, 'media');
+  const movements     = getRequireValues(filters, 'movement');
+  const genres        = getRequireValues(filters, 'genre');
+  const institutions  = getRequireValues(filters, 'institution');
+  const centuries     = getRequireValues(filters, 'century');
 
-  // Step 2: SPARQL VALUES query — keep only items with a P18 image.
-  const valuesClause = candidates.map(q => `wd:${q}`).join(' ');
-  const query = `SELECT ?item WHERE { VALUES ?item { ${valuesClause} } ?item wdt:P18 []. }`;
-  const bindings = await sparqlQuery(query, 15000);
+  // Media type (P31)
+  if (mediaRequired.length > 0) {
+    const qids = mediaRequired.map(v => MEDIA_TYPES.find(m => m.value === v)?.qid).filter(Boolean);
+    if (qids.length === 1) {
+      lines.push(`  ?item wdt:P31 wd:${qids[0]}.`);
+    } else if (qids.length > 1) {
+      lines.push(`  VALUES ?mediaType { ${qids.map(q => `wd:${q}`).join(' ')} }`);
+      lines.push(`  ?item wdt:P31 ?mediaType.`);
+    }
+  }
 
+  // Movement (P135)
+  if (movements.length > 0) {
+    const qids = movements.map(v => MOVEMENTS.find(m => m.value === v)?.qid).filter(Boolean);
+    if (qids.length === 1) lines.push(`  ?item wdt:P135 wd:${qids[0]}.`);
+    else if (qids.length > 1) {
+      lines.push(`  VALUES ?movement { ${qids.map(q => `wd:${q}`).join(' ')} }`);
+      lines.push(`  ?item wdt:P135 ?movement.`);
+    }
+  }
+
+  // Genre (P136)
+  if (genres.length > 0) {
+    const qids = genres.map(v => GENRES.find(g => g.value === v)?.qid).filter(Boolean);
+    if (qids.length === 1) lines.push(`  ?item wdt:P136 wd:${qids[0]}.`);
+    else if (qids.length > 1) {
+      lines.push(`  VALUES ?genre { ${qids.map(q => `wd:${q}`).join(' ')} }`);
+      lines.push(`  ?item wdt:P136 ?genre.`);
+    }
+  }
+
+  // Institution (P195)
+  if (institutions.length > 0) {
+    const qids = institutions.map(v => INSTITUTIONS.find(i => i.value === v)?.qid).filter(Boolean);
+    if (qids.length === 1) lines.push(`  ?item wdt:P195 wd:${qids[0]}.`);
+    else if (qids.length > 1) {
+      lines.push(`  VALUES ?inst { ${qids.map(q => `wd:${q}`).join(' ')} }`);
+      lines.push(`  ?item wdt:P195 ?inst.`);
+    }
+  }
+
+  // Century (P571 inception year range)
+  if (centuries.length > 0) {
+    const ranges = centuries.map(v => CENTURIES.find(c => c.value === v)).filter(Boolean);
+    if (ranges.length > 0) {
+      lines.push(`  ?item wdt:P571 ?date.`);
+      const parts = ranges.map(({ startYear, endYear }) =>
+        `(YEAR(?date) >= ${startYear} && YEAR(?date) <= ${endYear})`
+      );
+      lines.push(`  FILTER(${parts.join(' || ')})`);
+    }
+  }
+
+  return lines;
+}
+
+/**
+ * Build and execute a SPARQL search query using the mwapi Search service.
+ * Searches the MediaWiki full-text index (labels + descriptions + aliases),
+ * applies structural filters, requires P18 image.
+ *
+ * Returns a shuffled array of QID strings.
+ */
+async function getSearchCandidates(keyword, filters = []) {
+  const structuralLines = buildStructuralFilterLines(filters);
+
+  const query = [
+    'SELECT DISTINCT ?item WHERE {',
+    '  SERVICE wikibase:mwapi {',
+    '    bd:serviceParam wikibase:endpoint "www.wikidata.org";',
+    '                    wikibase:api "Search";',
+    `                    mwapi:srsearch ${JSON.stringify(keyword)};`,
+    '                    mwapi:language "en";',
+    '                    mwapi:limit "100".',
+    '    ?item wikibase:apiOutputItem mwapi:title.',
+    '  }',
+    '  ?item wdt:P18 [].',
+    ...structuralLines,
+    '}',
+    'LIMIT 50',
+  ].join('\n');
+
+  const bindings = await sparqlQuery(query, 30000);
   const qids = bindings
     .map(b => b.item?.value?.replace('http://www.wikidata.org/entity/', ''))
     .filter(Boolean);
 
   if (qids.length === 0) throw new Error(`[wikidata] No items with images found for "${keyword}"`);
-
-  // Shuffle so successive fetches don't always hit the same top result.
   return qids.sort(() => Math.random() - 0.5);
 }
 
 /**
  * Return up to `count` search result previews for the given query.
+ * Uses the same mwapi approach so labels and descriptions are both searched.
  */
-async function searchPreview(query, options = {}) {
+async function searchPreview(queryStr, options = {}) {
   const { count = 12 } = options;
 
-  const searchResp = await axios.get(ENTITY_API, {
-    params: {
-      action:   'wbsearchentities',
-      search:   query,
-      type:     'item',
-      language: 'en',
-      limit:    Math.min(count * 4, 50),  // over-fetch — many won't have images
-      format:   'json',
-      origin:   '*',
-    },
-    headers: { 'User-Agent': USER_AGENT },
-    timeout: 10000,
-  });
+  const sparql = [
+    'SELECT DISTINCT ?item ?image ?itemLabel ?creatorLabel WHERE {',
+    '  SERVICE wikibase:mwapi {',
+    '    bd:serviceParam wikibase:endpoint "www.wikidata.org";',
+    '                    wikibase:api "Search";',
+    `                    mwapi:srsearch ${JSON.stringify(queryStr)};`,
+    '                    mwapi:language "en";',
+    `                    mwapi:limit "${count * 3}".`,
+    '    ?item wikibase:apiOutputItem mwapi:title.',
+    '  }',
+    '  ?item wdt:P18 ?image.',
+    '  OPTIONAL { ?item wdt:P170 ?creator }',
+    '  SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }',
+    '}',
+    `LIMIT ${count}`,
+  ].join('\n');
 
-  const candidates = (searchResp.data.search || []).map(r => r.id);
-  if (candidates.length === 0) return { results: [], totalAvailable: 0 };
-
-  const valuesClause = candidates.map(q => `wd:${q}`).join(' ');
-  const sparql = `
-SELECT ?item ?image ?itemLabel ?creatorLabel WHERE {
-  VALUES ?item { ${valuesClause} }
-  ?item wdt:P18 ?image.
-  OPTIONAL { ?item wdt:P170 ?creator }
-  SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
-}
-LIMIT ${count}`.trim();
-
-  const bindings = await sparqlQuery(sparql, 15000);
+  const bindings = await sparqlQuery(sparql, 30000);
 
   const results = bindings.map(b => {
-    const qid = b.item?.value?.replace('http://www.wikidata.org/entity/', '') || null;
+    const qid      = b.item?.value?.replace('http://www.wikidata.org/entity/', '') || null;
     const imageUrl = b.image?.value || null;
     return {
-      title:        b.itemLabel?.value || null,
+      title:        b.itemLabel?.value  || null,
       creator:      b.creatorLabel?.value || null,
       thumbnailUrl: imageUrl ? `${imageUrl}?width=200` : null,
       artworkUrl:   qid ? `https://www.wikidata.org/wiki/${qid}` : null,
