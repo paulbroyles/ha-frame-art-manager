@@ -157,29 +157,33 @@ router.get('/calibrate', async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 
-  // Measure the same cases with opentype.js.
+  // Measure the same cases with opentype.js and compare against draw.textlength()
+  // (which is what OEL actually uses for word-wrap decisions).
+  const mean = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+  const max  = arr => Math.max(...arr);
+  const min  = arr => Math.min(...arr);
+
   const comparison = [];
   for (const tc of pilResults) {
     if (tc.error) { comparison.push(tc); continue; }
-    const otWidth = await measureText(tc.font, tc.text, tc.size);
-    const diff    = otWidth - tc.pil_width;
-    const ratio   = tc.pil_width > 0 ? otWidth / tc.pil_width : null;
+    const otWidth   = await measureText(tc.font, tc.text, tc.size);
+    const oelWidth  = tc.draw_textlength;  // OEL's actual measurement
+    const diff      = otWidth - oelWidth;
+    const ratio     = oelWidth > 0 ? otWidth / oelWidth : null;
     comparison.push({
-      font:      tc.font,
-      text:      tc.text,
-      size:      tc.size,
-      ot_width:  Math.round(otWidth * 100) / 100,
-      pil_width: tc.pil_width,
-      diff:      Math.round(diff * 100) / 100,
-      ratio:     ratio !== null ? Math.round(ratio * 10000) / 10000 : null,
+      font:              tc.font,
+      text:              tc.text,
+      size:              tc.size,
+      ot_width:          Math.round(otWidth  * 100) / 100,
+      oel_width:         oelWidth,
+      font_getlength:    tc.font_getlength,
+      diff_ot_vs_oel:    Math.round(diff  * 100) / 100,
+      ratio_ot_vs_oel:   ratio !== null ? Math.round(ratio * 10000) / 10000 : null,
     });
   }
 
-  const diffs  = comparison.filter(c => c.diff != null).map(c => c.diff);
-  const ratios = comparison.filter(c => c.ratio != null).map(c => c.ratio);
-  const mean   = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
-  const max    = arr => Math.max(...arr);
-  const min    = arr => Math.min(...arr);
+  const diffs  = comparison.filter(c => c.diff_ot_vs_oel  != null).map(c => c.diff_ot_vs_oel);
+  const ratios = comparison.filter(c => c.ratio_ot_vs_oel != null).map(c => c.ratio_ot_vs_oel);
 
   return res.json({
     summary: {
@@ -189,7 +193,7 @@ router.get('/calibrate', async (req, res) => {
       mean_ratio: Math.round(mean(ratios) * 10000) / 10000,
       max_ratio:  Math.round(max(ratios)  * 10000) / 10000,
       min_ratio:  Math.round(min(ratios)  * 10000) / 10000,
-      note: 'positive diff = opentype.js wider than PIL; negative = opentype.js narrower',
+      note: 'diff = opentype.js minus PIL draw.textlength (OEL actual); positive = ot wider',
     },
     cases: comparison,
   });
