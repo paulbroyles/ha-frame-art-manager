@@ -17149,6 +17149,9 @@ function deserializeMappingTarget(val) {
  */
 function autoGuessMappingTarget(hint) {
   if (!hint) return '';
+  // If the hint is already a structured object (e.g. { entity: 'creator', attribute: 'name' }),
+  // serialize it directly — it's not a string to match against attribute names.
+  if (typeof hint === 'object') return serializeMappingTarget(hint);
   const hintLower = hint.toLowerCase();
   const attrMatch = (allAttributes || []).find(a => a.toLowerCase() === hintLower);
   if (attrMatch) return `attr:${attrMatch}`;
