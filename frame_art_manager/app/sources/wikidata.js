@@ -319,8 +319,10 @@ function buildPoolQuery(filters, creatorQid, shard = null) {
 
   // Shard filter: restrict to items whose QID numeric part falls in the chosen shard.
   // This rotates which slice of the corpus is returned on each pool rebuild.
+  // SUBSTR(STR(?item), 33) extracts the numeric part: the entity URI is
+  // "http://www.wikidata.org/entity/Q<number>" — "Q" is at position 32, number at 33.
   if (shard !== null) {
-    lines.push(`  FILTER(xsd:integer(strafter(str(?item), "Q")) % ${SHARD_COUNT} = ${shard})`);
+    lines.push(`  FILTER(xsd:integer(SUBSTR(STR(?item), 33)) % ${SHARD_COUNT} = ${shard})`);
   }
 
   lines.push('}');
