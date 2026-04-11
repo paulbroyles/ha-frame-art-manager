@@ -355,7 +355,7 @@ function buildPoolQuery(filters, creatorQid, shard = null) {
  */
 function buildDetailQuery(qid) {
   return `
-SELECT ?image ?itemLabel ?creatorLabel ?date ?movementLabel ?genreLabel ?collectionLabel WHERE {
+SELECT ?image ?itemLabel ?creatorLabel ?date ?movementLabel ?genreLabel ?collectionLabel ?materialLabel ?height ?width WHERE {
   VALUES ?item { wd:${qid} }
   OPTIONAL { ?item wdt:P18 ?image }
   OPTIONAL { ?item wdt:P170 ?creator }
@@ -363,6 +363,9 @@ SELECT ?image ?itemLabel ?creatorLabel ?date ?movementLabel ?genreLabel ?collect
   OPTIONAL { ?item wdt:P135 ?movement }
   OPTIONAL { ?item wdt:P136 ?genre }
   OPTIONAL { ?item (wdt:P195|wdt:P276) ?collection }
+  OPTIONAL { ?item wdt:P186 ?material }
+  OPTIONAL { ?item wdt:P2048 ?height }
+  OPTIONAL { ?item wdt:P2049 ?width }
   SERVICE wikibase:label { bd:serviceParam wikibase:language "en,fr,de,nl,it,es,pt". }
 }
 LIMIT 10
@@ -421,6 +424,19 @@ function formatDate(dateStr) {
   if (!dateStr) return null;
   const match = dateStr.match(/^-?(\d{1,4})/);
   return match ? match[1] : null;
+}
+
+/**
+ * Format artwork dimensions from Wikidata P2048 (height) and P2049 (width).
+ * Both values are numeric, assumed to be in centimetres.
+ */
+function formatDimensions(height, width) {
+  const h = height ? parseFloat(height) : null;
+  const w = width  ? parseFloat(width)  : null;
+  if (w && h) return `${w.toFixed(1)} × ${h.toFixed(1)} cm`;
+  if (h) return `${h.toFixed(1)} cm (height)`;
+  if (w) return `${w.toFixed(1)} cm (width)`;
+  return null;
 }
 
 // ── fetchRandomArtwork ─────────────────────────────────────────────────────────
@@ -536,6 +552,9 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     const movement   = firstValue(bindings, 'movementLabel');
     const genre      = firstValue(bindings, 'genreLabel');
     const collection = firstValue(bindings, 'collectionLabel');
+    const material   = firstValue(bindings, 'materialLabel');
+    const dimH       = firstValue(bindings, 'height');
+    const dimW       = firstValue(bindings, 'width');
 
     return {
       imageBuffer,
@@ -543,7 +562,8 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       metadata: {
         title:       title || null,
         creator:     creator || null,
-        medium:      null,
+        medium:      material || null,
+        dimensions:  formatDimensions(dimH, dimW),
         dateCreated: formatDate(dateRaw),
         artworkUrl:  `https://www.wikidata.org/wiki/${qid}`,
         source:      sourceLabel,
@@ -775,6 +795,9 @@ async function fetchByIdentifier(identifier, options = {}) {
   const movement   = firstValue(bindings, 'movementLabel');
   const genre      = firstValue(bindings, 'genreLabel');
   const collection = firstValue(bindings, 'collectionLabel');
+  const material   = firstValue(bindings, 'materialLabel');
+  const dimH       = firstValue(bindings, 'height');
+  const dimW       = firstValue(bindings, 'width');
 
   return {
     imageBuffer,
@@ -782,7 +805,8 @@ async function fetchByIdentifier(identifier, options = {}) {
     metadata: {
       title:       title || null,
       creator:     creator || null,
-      medium:      null,
+      medium:      material || null,
+      dimensions:  formatDimensions(dimH, dimW),
       dateCreated: formatDate(dateRaw),
       artworkUrl:  `https://www.wikidata.org/wiki/${qid}`,
       source:      sourceLabel,
@@ -956,6 +980,8 @@ const metadataFields = [
   { key: 'title',       label: 'Title',       description: 'Artwork title (Wikidata item label)' },
   { key: 'creator',     label: 'Creator',     description: 'Artist or maker (P170 label)' },
   { key: 'dateCreated', label: 'Date',        description: 'Inception year (P571)', format: 'date' },
+  { key: 'medium',      label: 'Medium',      description: 'Material used (P186 label, e.g. "oil paint")' },
+  { key: 'dimensions',  label: 'Dimensions',  description: 'Physical size formatted as "W × H cm" from P2049/P2048' },
   { key: 'movement',    label: 'Movement',    description: 'Art movement (P135 label)' },
   { key: 'genre',       label: 'Genre',       description: 'Genre (P136 label)' },
   { key: 'collection',  label: 'Collection',  description: 'Museum or collection holding the work (P195/P276 label)' },
@@ -966,6 +992,8 @@ const defaultMapping = {
   title:       'title',
   creator:     { entity: 'creator', attribute: 'name' },
   dateCreated: 'date',
+  medium:      'medium',
+  dimensions:  'dimensions',
   collection:  'museum',
   source:      null,
 };
