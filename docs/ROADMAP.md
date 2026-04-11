@@ -334,3 +334,33 @@ which the backend handles but the UI does not yet expose.
 **When to implement**: When a concrete use case arises (e.g., a source with a
 tag-like field where users need fine-grained include+exclude at one level). The
 current single-mode-per-type UI is sufficient for medium/category/orientation.
+
+---
+
+## OEL Text Measurement: HarfBuzz for Exact PIL Matching
+
+**Problem**: opentype.js cannot read GPOS Extension lookups (type 9), which is how
+PlayfairDisplay-Bold stores its kern table. PIL uses FreeType via RAQM/HarfBuzz,
+which handles these lookups. For all-caps artist names at fontSize 30, this causes
+opentype.js to measure ~5 px wider than PIL ("VINCENT VAN GOGH": JS=302.4 vs
+PIL=297.6), leading to incorrect line-wrapping decisions in the layout engine.
+
+**Current mitigation**: `MEASURE_SLACK = 6` in `layoutEngine.js` — a fixed tolerance
+applied to all single-line fit checks, covering the empirically observed worst case.
+
+**Better fix**: Replace opentype.js advance-width measurement with `harfbuzzjs`
+(pure WASM, no native deps, works on Alpine). Testing confirmed it matches PIL to
+within 0.04 px. The `HB_TINY` build includes GPOS kern support.
+
+**Implementation sketch**:
+1. `npm install harfbuzzjs` (~3.3 MB WASM binary)
+2. Initialize `hb` singleton in `fontManager.js` `preloadFonts()` (async WASM load)
+3. Maintain a HarfBuzz font cache (`filename → {blob, face, hbFont}`) alongside
+   the existing opentype.js cache (opentype.js still needed for `getLineHeight`)
+4. Replace `measureText` and `wrapText` inner measurement with HarfBuzz shaping:
+   `hb.shape(hbFont, buf)` → sum `g.ax` for each glyph → scale by `fontSize/upem`
+5. Explicit `.destroy()` calls on buffer after each measurement; face/font cached
+6. Remove `MEASURE_SLACK` once HarfBuzz is wired in
+
+**When to implement**: If placard wrapping bugs persist for specific artist names
+despite MEASURE_SLACK, or if we add fonts with heavy GPOS kerning.

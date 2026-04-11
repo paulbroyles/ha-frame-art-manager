@@ -10,9 +10,21 @@
  *   - "top"    — packed top-to-bottom, skipped if field is empty
  *   - "anchor" — fixed position (QR code bottom-right), reserves space
  *   - "fill"   — expands to fill remaining space (description beside QR)
+ *   - "bottom" — packed bottom-to-top, reserves space that fill zone respects
  */
 
 const { measureText, wrapText, getLineHeight } = require('./fontManager');
+
+// opentype.js cannot read GPOS Extension lookups (lookup type 9), which is how
+// PlayfairDisplay-Bold stores its GPOS kern table. PIL uses FreeType via RAQM/
+// HarfBuzz, which supports these lookups and applies kerning automatically.
+// As a result our widths for heading fonts are systematically ~1–5 px wider
+// than PIL's for strings with many kerned pairs (e.g. all-caps artist names).
+// Empirically measured maximum at fontSize 30: 4.84 px ("VINCENT VAN GOGH").
+// MEASURE_SLACK is subtracted from the available width when deciding whether
+// text fits on a single line, so we never wrap a line that PIL can render
+// on one line.
+const MEASURE_SLACK = 6; // px
 const QRCode = require('qrcode');
 
 
@@ -116,6 +128,7 @@ async function layoutPlacard(template, metadata, display, refreshType) {
   const topSlots    = template.slots.filter(s => (s.zone || 'top') === 'top');
   const anchorSlots = template.slots.filter(s => s.zone === 'anchor');
   const fillSlots   = template.slots.filter(s => s.zone === 'fill');
+  const bottomSlots = template.slots.filter(s => s.zone === 'bottom');
 
   // ── 2. Resolve anchor elements (QR code) ────────────────────────────────
   const anchors = [];
@@ -258,8 +271,8 @@ async function layoutPlacard(template, metadata, display, refreshType) {
       const minFontSize = slot.minFontSize || Math.max(10, Math.floor(fontSize * 0.55));
       for (let fs = fontSize; fs >= minFontSize; fs -= 2) {
         const w = await measureText(fontFile, text, fs);
-        if (Math.round(w) <= effectiveWidth) { fontSize = fs; lines = [text]; break; }
-        const wrapped = await wrapText(fontFile, text, fs, effectiveWidth);
+        if (w <= effectiveWidth + MEASURE_SLACK) { fontSize = fs; lines = [text]; break; }
+        const wrapped = await wrapText(fontFile, text, fs, effectiveWidth + MEASURE_SLACK);
         if (wrapped.length <= maxLines) { fontSize = fs; lines = wrapped; break; }
         if (fs - 2 < minFontSize) {
           fontSize = minFontSize;
@@ -273,7 +286,7 @@ async function layoutPlacard(template, metadata, display, refreshType) {
 
     if (lines === null) {
       const textWidth = await measureText(fontFile, text, fontSize);
-      lines = Math.round(textWidth) <= effectiveWidth ? [text] : await wrapText(fontFile, text, fontSize, effectiveWidth);
+      lines = textWidth <= effectiveWidth + MEASURE_SLACK ? [text] : await wrapText(fontFile, text, fontSize, effectiveWidth + MEASURE_SLACK);
     }
 
     const lineH       = await getLineHeight(fontFile, fontSize);
@@ -334,7 +347,40 @@ async function layoutPlacard(template, metadata, display, refreshType) {
     debug.slotsRendered++;
   }
 
-  // ── 4. Fill zone (description beside QR) ────────────────────────────────
+  // ── 4. Bottom zone (museum credit, packed bottom-up, full width) ─────────
+  //
+  // Slots render from the bottom of the display upward. Active slots reserve
+  // space that the fill zone will not enter. Inactive slots are skipped.
+  let bottomFloor = display.height; // y below which bottom slots render
+  const bottomRendered = []; // collect entries to emit after computing positions
+
+  for (const slot of [...bottomSlots].reverse()) {
+    if (!isSlotActive(slot, metadata)) {
+      debug.slotsSkipped++;
+      continue;
+    }
+    const rawValue = metadata[slot.field] || '';
+    const text     = applyTransforms(rawValue, slot);
+    const fontFile = resolveFont(slot.font, template.fonts);
+    const color    = resolveColor(slot.color, refreshType);
+    const fontSize = slot.fontSize || 13;
+    const lineH    = await getLineHeight(fontFile, fontSize);
+    const slotMargin = slot.marginBottom || 4;
+
+    const lines    = await wrapText(fontFile, text, fontSize, contentWidth);
+    const slotH    = lines.length * lineH;
+    bottomFloor   -= slotH + slotMargin;
+
+    const spacing  = Math.max(0, (slot.lineHeight || lineH) - lineH);
+    bottomRendered.unshift({ lines, contentWidth, y: bottomFloor + slotMargin, fontSize, fontFile, color, spacing });
+    debug.slotsRendered++;
+  }
+
+  for (const entry of bottomRendered) {
+    emitTextSegment(entry.lines, entry.contentWidth, entry.y, entry.fontSize, entry.fontFile, entry.color, entry.spacing);
+  }
+
+  // ── 5. Fill zone (description beside QR) ────────────────────────────────
   for (const slot of fillSlots) {
     if (!isSlotActive(slot, metadata)) {
       debug.slotsSkipped++;
@@ -358,7 +404,8 @@ async function layoutPlacard(template, metadata, display, refreshType) {
       : (display.height - 60);
     const fillX  = margin;
     const fillW  = qrAnchor ? qrAnchor.x - margin * 2 : contentWidth;
-    const fillH  = display.height - fillY;
+    // Fill zone stops at bottomFloor (reserves space for bottom zone slots).
+    const fillH  = bottomFloor - fillY;
 
     // How many lines fit?
     const maxLines = Math.floor(fillH / lineH);
