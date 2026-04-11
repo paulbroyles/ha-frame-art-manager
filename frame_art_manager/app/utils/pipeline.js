@@ -175,6 +175,13 @@ const PROCESSORS = {
  * @returns {Promise<{ buffer: Buffer, debug: object }>}
  */
 async function runPipeline(buffer, orientation, steps) {
+  // Normalise EXIF orientation before anything else. Sharp reads raw pixel rows in
+  // storage order; if the EXIF tag says the image is rotated, every downstream step
+  // (dimension checks, crop windows, aspect ratio logic) would operate on a rotated
+  // image and produce a rotated result. .rotate() with no argument applies the EXIF
+  // rotation and strips the tag so the rest of the pipeline sees upright pixels.
+  buffer = await sharp(buffer).rotate().toBuffer();
+
   const meta = await sharp(buffer).metadata();
   const { finalW, finalH } = computeTargetDimensions(meta.width, meta.height, orientation);
 
