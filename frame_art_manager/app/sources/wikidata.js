@@ -163,13 +163,26 @@ function poolCacheKey(filters, creatorQid) {
 
 /**
  * Execute a SPARQL query against Wikidata and return the result bindings array.
+ * Uses POST to avoid URL length limits on complex queries.
  */
 async function sparqlQuery(query, timeoutMs = SPARQL_TIMEOUT_MS) {
-  const response = await axios.get(SPARQL_ENDPOINT, {
-    params:  { query, format: 'json' },
-    headers: { 'User-Agent': USER_AGENT, 'Accept': 'application/sparql-results+json' },
-    timeout: timeoutMs,
-  });
+  let response;
+  try {
+    response = await axios.post(SPARQL_ENDPOINT, new URLSearchParams({ query }), {
+      headers: {
+        'User-Agent':   USER_AGENT,
+        'Accept':       'application/sparql-results+json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      timeout: timeoutMs,
+    });
+  } catch (err) {
+    // Log the query on 400 to aid diagnosis.
+    if (err.response?.status === 400) {
+      console.error(`[wikidata] SPARQL 400 — query was:\n${query}`);
+    }
+    throw err;
+  }
   return response.data.results?.bindings ?? [];
 }
 
@@ -319,10 +332,12 @@ function buildPoolQuery(filters, creatorQid, shard = null) {
 
   // Shard filter: restrict to items whose QID numeric part falls in the chosen shard.
   // This rotates which slice of the corpus is returned on each pool rebuild.
-  // SUBSTR(STR(?item), 33) extracts the numeric part: the entity URI is
-  // "http://www.wikidata.org/entity/Q<number>" — "Q" is at position 32, number at 33.
+  // SUBSTR(STR(?item), 33) extracts the numeric suffix: the Wikidata entity URI is
+  // "http://www.wikidata.org/entity/Q<number>" — Q is at position 32, digits at 33+.
+  // SPARQL has no % operator; modulo is expressed as: x - FLOOR(x/n)*n.
   if (shard !== null) {
-    lines.push(`  FILTER(xsd:integer(SUBSTR(STR(?item), 33)) % ${SHARD_COUNT} = ${shard})`);
+    lines.push(`  BIND(xsd:integer(SUBSTR(STR(?item), 33)) AS ?_qnum)`);
+    lines.push(`  FILTER((?_qnum - FLOOR(?_qnum / ${SHARD_COUNT}) * ${SHARD_COUNT}) = ${shard})`);
   }
 
   lines.push('}');
