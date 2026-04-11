@@ -451,6 +451,34 @@ async function fetchItemDetail(qid) {
 }
 
 /**
+ * Fetch original image dimensions from the Wikimedia Commons imageinfo API.
+ * Returns { width, height } or null on failure.
+ * This is a lightweight metadata-only call (~200ms) — no image body is downloaded.
+ * Used to prescreen aspect ratio before committing to a full thumbnail download.
+ */
+async function fetchCommonsImageDimensions(filename) {
+  try {
+    const resp = await axios.get('https://commons.wikimedia.org/w/api.php', {
+      params: {
+        action:  'query',
+        prop:    'imageinfo',
+        iiprop:  'size',
+        titles:  `File:${filename}`,
+        format:  'json',
+      },
+      headers: { 'User-Agent': USER_AGENT },
+      timeout: 5000,
+    });
+    const pages = resp.data?.query?.pages || {};
+    const page  = Object.values(pages)[0];
+    const info  = page?.imageinfo?.[0];
+    return info ? { width: info.width, height: info.height } : null;
+  } catch (err) {
+    return null;  // graceful degradation — caller falls through to download
+  }
+}
+
+/**
  * Fetch or return cached QID pool for the given filter combination.
  * Pool is refreshed after POOL_TTL_MS.
  *
@@ -566,6 +594,30 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       continue;
     }
 
+    // Prescreen aspect ratio before downloading the full thumbnail.
+    // The Commons imageinfo API returns {width, height} as lightweight metadata (~200ms)
+    // vs 2-5s for a 4608px thumbnail. Rejected candidates skip the download entirely.
+    // Falls through to the post-download check if prescreening fails (network error, etc.).
+    let prescreenPassed = true;
+    if (aspectRatio !== 'all') {
+      const fileMatch = detail.imageUrl.match(/Special:FilePath\/(.+?)(?:\?|$)/);
+      const filename  = fileMatch ? decodeURI(fileMatch[1]) : null;
+      if (filename) {
+        const dims = await fetchCommonsImageDimensions(filename);
+        if (dims) {
+          const isLandscape = dims.width > dims.height;
+          if (aspectRatio === 'landscape' && !isLandscape) {
+            console.warn(`[wikidata] ${qid} prescreened out: not landscape (${dims.width}x${dims.height})`);
+            prescreenPassed = false;
+          } else if (aspectRatio === 'portrait' && isLandscape) {
+            console.warn(`[wikidata] ${qid} prescreened out: not portrait (${dims.width}x${dims.height})`);
+            prescreenPassed = false;
+          }
+        }
+      }
+      if (!prescreenPassed) continue;
+    }
+
     // Download a thumbnail rather than the full-res original.
     // Special:FilePath?width=N (landscape) or ?height=N (portrait) redirects to a JPEG thumb
     // at that long-edge size. Originals can be 50–100 MB TIFFs; ~4608px is sufficient for 4K output.
@@ -594,17 +646,18 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       continue;
     }
 
-    // Aspect ratio check (post-download via sharp).
+    // Post-download aspect ratio check — catches any prescreening misses (e.g. if the
+    // Commons API returned stale/incorrect dimensions, or prescreening was skipped).
     if (aspectRatio !== 'all') {
       try {
         const { width, height } = await sharp(imageBuffer).metadata();
         const isLandscape = width > height;
         if (aspectRatio === 'landscape' && !isLandscape) {
-          console.warn(`[wikidata] ${qid} skipped: not landscape (${width}x${height})`);
+          console.warn(`[wikidata] ${qid} skipped post-download: not landscape (${width}x${height})`);
           continue;
         }
         if (aspectRatio === 'portrait' && isLandscape) {
-          console.warn(`[wikidata] ${qid} skipped: not portrait (${width}x${height})`);
+          console.warn(`[wikidata] ${qid} skipped post-download: not portrait (${width}x${height})`);
           continue;
         }
       } catch (err) {
