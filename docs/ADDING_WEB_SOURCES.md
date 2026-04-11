@@ -305,7 +305,33 @@ if (aspectRatio !== 'all') {
 }
 ```
 
-### Post-download filtering (fallback)
+### Metadata-only API call (preferred when no inline dimensions)
+
+Some sources don't return dimensions in the listing response but provide a cheap metadata
+endpoint — for example, IIIF `info.json` or the Wikimedia Commons `imageinfo` API. These
+return `{width, height}` without downloading any image body (~200ms vs 2-5s for a thumbnail).
+Prefer this over post-download filtering when such an endpoint exists.
+
+```js
+// IIIF example: info.json is already fetched to build the bounding-box URL
+const { url: imageUrl, nativeW, nativeH } = await buildImageUrl(imageId, orientation);
+if (aspectRatio !== 'all' && nativeW && nativeH) {
+  if (aspectRatio === 'landscape' && nativeW < nativeH) continue;
+  if (aspectRatio === 'portrait'  && nativeW > nativeH) continue;
+}
+
+// Wikimedia Commons example: lightweight imageinfo API call
+const dims = await fetchCommonsImageDimensions(filename);
+if (dims) {
+  if (aspectRatio === 'landscape' && dims.width < dims.height) continue;
+  if (aspectRatio === 'portrait'  && dims.width > dims.height) continue;
+}
+```
+
+Keep a post-download `sharp` check as a safety fallback for the cases where the metadata call
+fails or returns null.
+
+### Post-download filtering (last resort)
 
 If dimensions aren't available pre-download, download the image and inspect it with `sharp`:
 

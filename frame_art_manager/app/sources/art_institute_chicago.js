@@ -405,6 +405,9 @@ async function pickRandomSearchId(filters, keyword) {
 /**
  * Build a IIIF bounding-box URL for the given image_id at the target orientation.
  * Fetches info.json first to get native dimensions for an accurate bounding box.
+ *
+ * Returns { url, nativeW, nativeH } so the caller can prescreen aspect ratio
+ * before committing to a full image download.
  */
 async function buildImageUrl(imageId, orientation) {
   let nativeW, nativeH;
@@ -420,7 +423,7 @@ async function buildImageUrl(imageId, orientation) {
   }
 
   const bbox = iiifBoundingBox(orientation, nativeW, nativeH);
-  return `${IIIF_BASE}/${imageId}/full/!${bbox}/0/default.jpg`;
+  return { url: `${IIIF_BASE}/${imageId}/full/!${bbox}/0/default.jpg`, nativeW, nativeH };
 }
 
 // ── fetchRandomArtwork ─────────────────────────────────────────────────────────
@@ -463,7 +466,20 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       continue;
     }
 
-    const imageUrl = await buildImageUrl(obj.image_id, orientation);
+    const { url: imageUrl, nativeW, nativeH } = await buildImageUrl(obj.image_id, orientation);
+
+    // Prescreen aspect ratio using info.json dimensions (already fetched above, no extra cost).
+    if (aspectRatio !== 'all' && nativeW && nativeH) {
+      if (aspectRatio === 'landscape' && nativeW < nativeH) {
+        console.warn(`[aic] ${id} prescreened out: not landscape (${nativeW}x${nativeH})`);
+        continue;
+      }
+      if (aspectRatio === 'portrait' && nativeW > nativeH) {
+        console.warn(`[aic] ${id} prescreened out: not portrait (${nativeW}x${nativeH})`);
+        continue;
+      }
+    }
+
     let imageBuffer;
     try {
       const resp = await axios.get(imageUrl, {
@@ -477,8 +493,8 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       continue;
     }
 
-    // Verify aspect ratio post-download.
-    if (aspectRatio !== 'all') {
+    // Post-download aspect ratio safety check (catches info.json failures where nativeW/nativeH were null).
+    if (aspectRatio !== 'all' && !(nativeW && nativeH)) {
       let w, h;
       try {
         ({ width: w, height: h } = await sharp(imageBuffer).metadata());
@@ -528,7 +544,7 @@ async function fetchByIdentifier(identifier, options = {}) {
   if (!obj) throw new Error(`[aic] Artwork ${id} not found`);
   if (!obj.image_id) throw new Error(`[aic] Artwork ${id} has no accessible image`);
 
-  const imageUrl = await buildImageUrl(obj.image_id, orientation);
+  const { url: imageUrl } = await buildImageUrl(obj.image_id, orientation);
   const resp = await axios.get(imageUrl, {
     responseType: 'arraybuffer',
     headers: HEADERS,
