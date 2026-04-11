@@ -38,6 +38,7 @@
  */
 
 const sharp                         = require('sharp');
+const { TV_TARGETS }                = require('./thumbSize');
 const { backgroundStripProcessor }  = require('./processors/backgroundStrip');
 const { sharpCropProcessor }        = require('./processors/sharpCrop');
 const { frameAwareCropProcessor }   = require('./processors/frameAwareCrop');
@@ -50,9 +51,7 @@ const { PRE_PROCESSOR_WRAPPERS }    = require('./processors/preprocessorWrappers
 const { ensureRaw, invalidateRaw }  = require('./processors/contextUtils');
 
 // ── Target dimensions ─────────────────────────────────────────────────────────
-
-const LANDSCAPE_TARGET = { w: 3840, h: 2160 };
-const PORTRAIT_TARGET  = { w: 2160, h: 3840 };
+// Imported from thumbSize.js — single source of truth for TV resolution targets.
 
 /**
  * Compute output dimensions given input size and orientation.
@@ -68,7 +67,7 @@ const PORTRAIT_TARGET  = { w: 2160, h: 3840 };
  * Guarantee: finalW <= inputW and finalH <= inputH (safe to pass to any crop engine).
  */
 function computeTargetDimensions(inputW, inputH, orientation) {
-  const target = orientation === 'portrait' ? PORTRAIT_TARGET : LANDSCAPE_TARGET;
+  const target = TV_TARGETS[orientation] || TV_TARGETS.landscape;
   const { w: tw, h: th } = target;
 
   const aspectInput  = inputW / inputH;

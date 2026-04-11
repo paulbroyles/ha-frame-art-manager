@@ -169,6 +169,7 @@ function thumbSpecialFileParam(orientation = 'landscape') {
 }
 
 module.exports = {
+  TV_TARGETS,
   THUMB_LONG_EDGE,
   THUMB_SHORT_EDGE,
   thumbWidthFor,

@@ -3,6 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const sharp = require('sharp');
 const MetadataHelper = require('./metadata_helper');
+const { TV_TARGETS } = require('./utils/thumbSize');
 
 function toPercent(value, fallback = 0) {
   const num = Number(value);
@@ -35,7 +36,7 @@ function normalizeTargetResolution(target) {
 }
 
 const PRESET_TARGET_RESOLUTIONS = {
-  '16:9sam': { width: 3840, height: 2160 }
+  '16:9sam': { width: TV_TARGETS.landscape.w, height: TV_TARGETS.landscape.h },
 };
 
 /**

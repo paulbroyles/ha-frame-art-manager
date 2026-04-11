@@ -2,7 +2,7 @@ const axios = require('axios');
 const sharp = require('sharp');
 const { CookieJar } = require('tough-cookie');
 const { dezoomify } = require('../utils/dezoomify');
-const { googleCdnSuffix } = require('../utils/thumbSize');
+const { googleCdnSuffix, TV_TARGETS } = require('../utils/thumbSize');
 
 const { mergePreferContent } = require('../utils/merge');
 
@@ -674,7 +674,7 @@ async function fetchFromArtistEntity(entityId, count, {
     let imageBuffer = Buffer.from(imageResponse.data);
     const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
 
-    const [targetW, targetH] = aspectRatio === 'portrait' ? [2160, 3840] : [3840, 2160];
+    const { w: targetW, h: targetH } = TV_TARGETS[aspectRatio] || TV_TARGETS.landscape;
     const { width: dlW, height: dlH } = await sharp(imageBuffer).metadata();
     if (dlW < targetW || dlH < targetH) {
       console.log(`[google_arts] Artist entity image is ${dlW}×${dlH} (below ${targetW}×${targetH}); attempting dezoomify for ${artworkUrl}`);
@@ -1065,7 +1065,7 @@ async function fetchFromSearch(query, { aspectRatio = 'all', excludedTypesLower 
     const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
 
     // Dezoomify if below 4K target
-    const [targetW, targetH] = aspectRatio === 'portrait' ? [2160, 3840] : [3840, 2160];
+    const { w: targetW, h: targetH } = TV_TARGETS[aspectRatio] || TV_TARGETS.landscape;
     const { width: dlW, height: dlH } = await sharp(imageBuffer).metadata();
     if (dlW < targetW || dlH < targetH) {
       console.log(`[google_arts] Search image is ${dlW}×${dlH} (below ${targetW}×${targetH} target); attempting dezoomify for ${artworkUrl}`);
@@ -1246,7 +1246,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     // The target depends on orientation: portrait filter → portrait TV (2160×3840);
     // otherwise → landscape TV (3840×2160). Cover-fit requires imageW >= targetW AND
     // imageH >= targetH. If either is short, dezoomify-rs can fetch tiles at higher zoom.
-    const [targetW, targetH] = aspectRatio === 'portrait' ? [2160, 3840] : [3840, 2160];
+    const { w: targetW, h: targetH } = TV_TARGETS[aspectRatio] || TV_TARGETS.landscape;
     const { width: dlW, height: dlH } = await sharp(imageBuffer).metadata();
     if (dlW < targetW || dlH < targetH) {
       console.log(`[google_arts] Image is ${dlW}×${dlH} (below ${targetW}×${targetH} target); attempting dezoomify for ${artworkUrl}`);
@@ -1469,7 +1469,7 @@ async function fetchByIdentifier(identifier, { tvOrientation } = {}) {
 
   // Dezoomify fallback: if the direct download can't cover the TV's 4K target without
   // upscaling, try fetching higher-resolution tiles from the artwork page.
-  const [targetW, targetH] = tvOrientation === 'portrait' ? [2160, 3840] : [3840, 2160];
+  const { w: targetW, h: targetH } = TV_TARGETS[tvOrientation] || TV_TARGETS.landscape;
   const { width: dlW, height: dlH } = await sharp(imageBuffer).metadata();
   if (dlW < targetW || dlH < targetH) {
     console.log(`[google_arts] fetchByIdentifier: ${dlW}×${dlH} is below ${targetW}×${targetH}; attempting dezoomify for ${artworkUrl}`);
