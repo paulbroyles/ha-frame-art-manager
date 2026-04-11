@@ -15,6 +15,14 @@ These four Met Museum images are used together as a balanced regression suite. T
 
 **Coverage gaps to fill:** larger/deeper ornate frames (multi-layer gilding going 200px+), dark frames against dark paintings, frames with strong color contrast (red lacquer, black), no-frame paintings, and paintings with heavy varnish yellowing that mimics gold frame color.
 
+## Known edge cases — expected crop = 0 on one or more sides
+
+Artworks where the preprocessors must *not* crop a given side. Use these to guard against overcropping regressions.
+
+| Source | ID | URL | Expected | Notes |
+|--------|----|-----|----------|-------|
+| AIC | 68433 | https://www.artic.edu/artworks/68433 | left=0, right=0 | Henri Rousseau, "Sawmill, Outskirts of Paris". Native scan 19601×10528 (1.86:1). Painting content extends to horizontal edges — no left/right frame or margin. |
+
 ## Earlier test image set (2026-03-11)
 
 | ID     | Expected | Actual result | Notes |
