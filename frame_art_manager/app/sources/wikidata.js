@@ -45,6 +45,10 @@ const POOL_TTL_MS        = 6  * 60 * 60 * 1000;   // 6 hours — pool compositio
 const SHARD_COUNT = 40;  // 40 shards × 6hr TTL = full 400K corpus reachable in ~10 days
 const CREATOR_CACHE_TTL  = 24 * 60 * 60 * 1000;   // 24 hours — creator QIDs are stable
 const MAX_ROUNDS         = 5;
+// When aspect ratio filtering is active, most candidates get rejected after image download.
+// Classical paintings skew heavily portrait; landscape filter may reject 60-70% of candidates.
+// Use a larger candidate window so we find a match without exhausting the pool too often.
+const MAX_ASPECT_CANDIDATES = 60;
 const SPARQL_TIMEOUT_MS  = 60000;   // pool queries can take up to ~30s for large result sets
 const IMAGE_TIMEOUT_MS   = 30000;
 
@@ -521,13 +525,17 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 
   const searchKeyword = getRequireValues(allFilters, 'search')[0] || null;
 
+  // How many candidates to evaluate before giving up.
+  // With aspect ratio filtering, most candidates may be rejected post-download
+  // (classical paintings skew portrait). A larger window prevents spurious failures.
+  const maxCandidates = aspectRatio !== 'all' ? MAX_ASPECT_CANDIDATES : MAX_ROUNDS * 3;
+
   let candidates;
   if (searchKeyword) {
-    // Keyword search — bypass pool; use wbsearchentities + P18 validation.
-    // Other structural filters (movement, century, etc.) are not applied in
-    // search mode; the keyword provides the primary narrowing.
+    // Keyword search — bypass pool; use mwapi SPARQL search.
+    // Structural filters (movement, century, etc.) are applied in the SPARQL query.
     candidates = await getSearchCandidates(searchKeyword, allFilters);
-    candidates = candidates.slice(0, MAX_ROUNDS * 3);
+    candidates = candidates.slice(0, maxCandidates);
   } else {
     // Resolve artist filter to a Wikidata QID.
     const artistName = getRequireValues(allFilters, 'artist')[0] || null;
@@ -541,7 +549,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
 
     // Get (or build) the QID pool for this filter combination.
     const pool = await getPool(allFilters, creatorQid);
-    candidates = [...pool].sort(() => Math.random() - 0.5).slice(0, MAX_ROUNDS * 3);
+    candidates = [...pool].sort(() => Math.random() - 0.5).slice(0, maxCandidates);
   }
 
   for (const qid of candidates) {
