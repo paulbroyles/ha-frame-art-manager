@@ -46,7 +46,6 @@ const SHARD_COUNT = 40;  // 40 shards × 6hr TTL = full 400K corpus reachable in
 const CREATOR_CACHE_TTL  = 24 * 60 * 60 * 1000;   // 24 hours — creator QIDs are stable
 const MAX_ROUNDS         = 5;
 const SPARQL_TIMEOUT_MS  = 60000;   // pool queries can take up to ~30s for large result sets
-const DETAIL_TIMEOUT_MS  = 15000;
 const IMAGE_TIMEOUT_MS   = 30000;
 
 // ── Data tables ───────────────────────────────────────────────────────────────
@@ -353,23 +352,98 @@ function buildPoolQuery(filters, creatorQid, shard = null) {
  * May return multiple rows if an item has multiple creators/movements/genres/collections —
  * the caller takes first non-null value for each field.
  */
-function buildDetailQuery(qid) {
-  return `
-SELECT ?image ?itemLabel ?creatorLabel ?date ?movementLabel ?genreLabel ?collectionLabel ?materialLabel ?height ?width WHERE {
-  VALUES ?item { wd:${qid} }
-  OPTIONAL { ?item wdt:P18 ?image }
-  OPTIONAL { ?item wdt:P170 ?creator }
-  OPTIONAL { ?item wdt:P571 ?date }
-  OPTIONAL { ?item wdt:P135 ?movement }
-  OPTIONAL { ?item wdt:P136 ?genre }
-  OPTIONAL { ?item (wdt:P195|wdt:P276) ?collection }
-  OPTIONAL { ?item wdt:P186 ?material }
-  OPTIONAL { ?item wdt:P2048 ?height }
-  OPTIONAL { ?item wdt:P2049 ?width }
-  SERVICE wikibase:label { bd:serviceParam wikibase:language "en,fr,de,nl,it,es,pt". }
-}
-LIMIT 10
-`.trim();
+/**
+ * Fetch item detail via the MediaWiki action API (wbgetentities) instead of SPARQL.
+ *
+ * Motivation: the SPARQL detail query (which ran on every fetch) hit Blazegraph
+ * under variable load — cache hit ~3s, cache miss up to 45s. wbgetentities is a
+ * direct database lookup: ~300-500ms consistently regardless of server load.
+ *
+ * Two requests:
+ *   1. Item claims + label (all properties in one call).
+ *   2. Batch label lookup for linked entities (creator, movement, genre,
+ *      collection, material) — combined into a single request.
+ *
+ * Returns: { imageUrl, title, creator, dateRaw, movement, genre, collection,
+ *            medium, height, width } — all nullable strings.
+ */
+async function fetchItemDetail(qid) {
+  // ── Request 1: item claims + en label ─────────────────────────────────────
+  const itemResp = await axios.get(ENTITY_API, {
+    params: {
+      action:           'wbgetentities',
+      ids:              qid,
+      format:           'json',
+      props:            'claims|labels',
+      languages:        'en',
+      languagefallback:  1,
+    },
+    headers: { 'User-Agent': USER_AGENT },
+    timeout: 10000,
+  });
+
+  const entity = itemResp.data.entities?.[qid];
+  if (!entity || entity.missing === '') return null;
+
+  const title        = entity.labels?.en?.value || null;
+  const claims       = entity.claims || {};
+
+  // P18 → Wikimedia Commons Special:FilePath URL
+  const imageFile    = claims.P18?.[0]?.mainsnak?.datavalue?.value;
+  const imageUrl     = imageFile
+    ? `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURI(imageFile.trim().replace(/ /g, '_'))}`
+    : null;
+
+  // Extract QIDs for linked entities that need label resolution.
+  const creatorQid    = claims.P170?.[0]?.mainsnak?.datavalue?.value?.id   || null;
+  const movementQid   = claims.P135?.[0]?.mainsnak?.datavalue?.value?.id   || null;
+  const genreQid      = claims.P136?.[0]?.mainsnak?.datavalue?.value?.id   || null;
+  const collectionQid = (claims.P195 ?? claims.P276)?.[0]?.mainsnak?.datavalue?.value?.id || null;
+  const materialQid   = claims.P186?.[0]?.mainsnak?.datavalue?.value?.id   || null;
+
+  // P571 (inception) time string e.g. "+1889-06-07T00:00:00Z"
+  const dateRaw      = claims.P571?.[0]?.mainsnak?.datavalue?.value?.time  || null;
+
+  // P2048/P2049 amount strings e.g. "+73.7"
+  const heightRaw    = claims.P2048?.[0]?.mainsnak?.datavalue?.value?.amount || null;
+  const widthRaw     = claims.P2049?.[0]?.mainsnak?.datavalue?.value?.amount || null;
+  const height       = heightRaw ? heightRaw.replace(/^\+/, '') : null;
+  const width        = widthRaw  ? widthRaw.replace(/^\+/, '')  : null;
+
+  // ── Request 2: batch-resolve linked-entity labels ─────────────────────────
+  const labelQids = [creatorQid, movementQid, genreQid, collectionQid, materialQid].filter(Boolean);
+  const labelMap  = {};
+
+  if (labelQids.length > 0) {
+    const labelResp = await axios.get(ENTITY_API, {
+      params: {
+        action:           'wbgetentities',
+        ids:              labelQids.join('|'),
+        format:           'json',
+        props:            'labels',
+        languages:        'en',
+        languagefallback:  1,
+      },
+      headers: { 'User-Agent': USER_AGENT },
+      timeout: 10000,
+    });
+    for (const [id, ent] of Object.entries(labelResp.data.entities || {})) {
+      labelMap[id] = ent.labels?.en?.value || null;
+    }
+  }
+
+  return {
+    imageUrl,
+    title,
+    creator:    creatorQid    ? labelMap[creatorQid]    : null,
+    dateRaw,
+    movement:   movementQid   ? labelMap[movementQid]   : null,
+    genre:      genreQid      ? labelMap[genreQid]      : null,
+    collection: collectionQid ? labelMap[collectionQid] : null,
+    medium:     materialQid   ? labelMap[materialQid]   : null,
+    height,
+    width,
+  };
 }
 
 /**
@@ -407,22 +481,12 @@ async function getPool(filters, creatorQid) {
 }
 
 /**
- * Extract the first non-null value from multiple SPARQL result bindings for a given field.
- */
-function firstValue(bindings, field) {
-  for (const b of bindings) {
-    const v = b[field]?.value;
-    if (v) return v;
-  }
-  return null;
-}
-
-/**
  * Format a SPARQL date value (xsd:dateTime like "1889-06-07T00:00:00Z") to a year or full date.
  */
 function formatDate(dateStr) {
   if (!dateStr) return null;
-  const match = dateStr.match(/^-?(\d{1,4})/);
+  // wbgetentities time values have a leading "+"; strip before parsing.
+  const match = dateStr.replace(/^\+/, '').match(/^(-?\d{1,4})/);
   return match ? match[1] : null;
 }
 
@@ -481,21 +545,15 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   }
 
   for (const qid of candidates) {
-    // Fast single-item metadata + image URL query.
-    let bindings;
+    // Fetch item detail via wbgetentities (two REST calls, ~1s total vs 3-45s SPARQL).
+    let detail;
     try {
-      bindings = await sparqlQuery(buildDetailQuery(qid), DETAIL_TIMEOUT_MS);
+      detail = await fetchItemDetail(qid);
     } catch (err) {
-      console.warn(`[wikidata] Detail query failed for ${qid}: ${err.message}`);
+      console.warn(`[wikidata] Detail fetch failed for ${qid}: ${err.message}`);
       continue;
     }
-    if (!bindings.length) {
-      console.warn(`[wikidata] ${qid}: no detail results`);
-      continue;
-    }
-
-    const imageUrl = firstValue(bindings, 'image');
-    if (!imageUrl) {
+    if (!detail?.imageUrl) {
       console.warn(`[wikidata] ${qid}: no image URL`);
       continue;
     }
@@ -504,7 +562,9 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     // Special:FilePath?width=N (landscape) or ?height=N (portrait) redirects to a JPEG thumb
     // at that long-edge size. Originals can be 50–100 MB TIFFs; ~4608px is sufficient for 4K output.
     const sizeParam = thumbSpecialFileParam(aspectRatio === 'portrait' ? 'portrait' : 'landscape');
-    const thumbUrl = imageUrl.includes('?') ? `${imageUrl}&${sizeParam}` : `${imageUrl}?${sizeParam}`;
+    const thumbUrl = detail.imageUrl.includes('?')
+      ? `${detail.imageUrl}&${sizeParam}`
+      : `${detail.imageUrl}?${sizeParam}`;
     let imageBuffer, contentType;
     try {
       const resp = await axios.get(thumbUrl, {
@@ -545,31 +605,20 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       }
     }
 
-    // Build metadata from detail query results.
-    const title      = firstValue(bindings, 'itemLabel');
-    const creator    = firstValue(bindings, 'creatorLabel');
-    const dateRaw    = firstValue(bindings, 'date');
-    const movement   = firstValue(bindings, 'movementLabel');
-    const genre      = firstValue(bindings, 'genreLabel');
-    const collection = firstValue(bindings, 'collectionLabel');
-    const material   = firstValue(bindings, 'materialLabel');
-    const dimH       = firstValue(bindings, 'height');
-    const dimW       = firstValue(bindings, 'width');
-
     return {
       imageBuffer,
       contentType,
       metadata: {
-        title:       title || null,
-        creator:     creator || null,
-        medium:      material || null,
-        dimensions:  formatDimensions(dimH, dimW),
-        dateCreated: formatDate(dateRaw),
+        title:       detail.title,
+        creator:     detail.creator,
+        medium:      detail.medium,
+        dimensions:  formatDimensions(detail.height, detail.width),
+        dateCreated: formatDate(detail.dateRaw),
         artworkUrl:  `https://www.wikidata.org/wiki/${qid}`,
         source:      sourceLabel,
-        movement:    movement || null,
-        genre:       genre || null,
-        collection:  collection || null,
+        movement:    detail.movement,
+        genre:       detail.genre,
+        collection:  detail.collection,
       },
     };
   }
@@ -763,18 +812,18 @@ async function fetchByIdentifier(identifier, options = {}) {
   const qid = extractQid(identifier);
   if (!qid) throw new Error('Could not extract QID from Wikidata URL');
 
-  let bindings;
+  let detail;
   try {
-    bindings = await sparqlQuery(buildDetailQuery(qid), DETAIL_TIMEOUT_MS);
+    detail = await fetchItemDetail(qid);
   } catch (err) {
-    throw new Error(`Wikidata detail query failed for ${qid}: ${err.message}`);
+    throw new Error(`Wikidata detail fetch failed for ${qid}: ${err.message}`);
   }
-
-  const imageUrl = firstValue(bindings, 'image');
-  if (!imageUrl) throw new Error(`No image found for Wikidata item ${qid}`);
+  if (!detail?.imageUrl) throw new Error(`No image found for Wikidata item ${qid}`);
 
   const sizeParam = thumbSpecialFileParam(options.tvOrientation === 'portrait' ? 'portrait' : 'landscape');
-  const thumbUrl = imageUrl.includes('?') ? `${imageUrl}&${sizeParam}` : `${imageUrl}?${sizeParam}`;
+  const thumbUrl = detail.imageUrl.includes('?')
+    ? `${detail.imageUrl}&${sizeParam}`
+    : `${detail.imageUrl}?${sizeParam}`;
   let imageBuffer, contentType;
   try {
     const resp = await axios.get(thumbUrl, {
@@ -789,30 +838,20 @@ async function fetchByIdentifier(identifier, options = {}) {
     throw new Error(`Failed to download Wikidata image for ${qid}: ${err.message}`);
   }
 
-  const title      = firstValue(bindings, 'itemLabel');
-  const creator    = firstValue(bindings, 'creatorLabel');
-  const dateRaw    = firstValue(bindings, 'date');
-  const movement   = firstValue(bindings, 'movementLabel');
-  const genre      = firstValue(bindings, 'genreLabel');
-  const collection = firstValue(bindings, 'collectionLabel');
-  const material   = firstValue(bindings, 'materialLabel');
-  const dimH       = firstValue(bindings, 'height');
-  const dimW       = firstValue(bindings, 'width');
-
   return {
     imageBuffer,
     contentType,
     metadata: {
-      title:       title || null,
-      creator:     creator || null,
-      medium:      material || null,
-      dimensions:  formatDimensions(dimH, dimW),
-      dateCreated: formatDate(dateRaw),
+      title:       detail.title,
+      creator:     detail.creator,
+      medium:      detail.medium,
+      dimensions:  formatDimensions(detail.height, detail.width),
+      dateCreated: formatDate(detail.dateRaw),
       artworkUrl:  `https://www.wikidata.org/wiki/${qid}`,
       source:      sourceLabel,
-      movement:    movement || null,
-      genre:       genre || null,
-      collection:  collection || null,
+      movement:    detail.movement,
+      genre:       detail.genre,
+      collection:  detail.collection,
     },
   };
 }
