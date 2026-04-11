@@ -356,17 +356,25 @@ async function getFilterTotal(boolClause) {
  * Pick a random artwork ID using a full-text keyword search.
  * Not pooled — arbitrary queries are too numerous to pre-cache.
  * Capped at the first 1000 results (AIC's `from` limit).
+ *
+ * IMPORTANT: uses simple_query_string in the `must` clause (not the `q` URL
+ * parameter). When `q` is combined with sort-by-id, Elasticsearch treats it as
+ * a scorer only — all documents pass regardless of whether they match. Putting
+ * the term in `must` makes it a true filter that participates in scoring AND
+ * excludes non-matching documents even when sorting by a non-score field.
  */
 async function pickRandomSearchId(filters, keyword) {
   const boolClause = buildEsFilter(filters);
+  boolClause.must = [{
+    simple_query_string: {
+      query:            keyword,
+      fields:           ['title^3', 'artist_display^2', 'description', 'subject_titles', 'medium_display'],
+      default_operator: 'AND',
+    },
+  }];
 
   // Get total matching count.
-  const countBody = {
-    q: keyword,
-    query: { bool: boolClause },
-    size: 0,
-    _source: false,
-  };
+  const countBody = { query: { bool: boolClause }, size: 0, _source: false };
   const countResp = await axios.post(`${API_BASE}/artworks/search`, countBody, {
     headers: { ...HEADERS, 'Content-Type': 'application/json' },
     timeout: 10000,
@@ -376,7 +384,6 @@ async function pickRandomSearchId(filters, keyword) {
 
   const from = Math.floor(Math.random() * Math.min(total, 1000));
   const body = {
-    q: keyword,
     query: { bool: boolClause },
     from,
     size: 1,
