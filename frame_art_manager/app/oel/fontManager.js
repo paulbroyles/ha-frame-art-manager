@@ -79,7 +79,7 @@ async function wrapText(filename, text, fontSize, maxWidth) {
   for (const word of words) {
     const candidate = current ? `${current} ${word}` : word;
     const width = font.getAdvanceWidth(candidate, fontSize);
-    if (width <= maxWidth) {
+    if (Math.round(width) <= maxWidth) {
       current = candidate;
     } else {
       if (current) lines.push(current);

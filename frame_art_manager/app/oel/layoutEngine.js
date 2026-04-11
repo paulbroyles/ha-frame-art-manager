@@ -15,11 +15,6 @@
 const { measureText, wrapText, getLineHeight } = require('./fontManager');
 const QRCode = require('qrcode');
 
-// opentype.js getAdvanceWidth() and OEL's PIL renderer use slightly different glyph
-// metrics. Text that opentype.js measures as just barely over the line width often fits
-// in one visual line in OEL, causing the layout engine to reserve an extra blank line.
-// MEASURE_SLACK gives a small tolerance so the line-break decision matches OEL more closely.
-const MEASURE_SLACK = 3; // pixels
 
 /**
  * Resolve a font reference (template key → actual filename).
@@ -263,7 +258,7 @@ async function layoutPlacard(template, metadata, display, refreshType) {
       const minFontSize = slot.minFontSize || Math.max(10, Math.floor(fontSize * 0.55));
       for (let fs = fontSize; fs >= minFontSize; fs -= 2) {
         const w = await measureText(fontFile, text, fs);
-        if (w <= effectiveWidth + MEASURE_SLACK) { fontSize = fs; lines = [text]; break; }
+        if (Math.round(w) <= effectiveWidth) { fontSize = fs; lines = [text]; break; }
         const wrapped = await wrapText(fontFile, text, fs, effectiveWidth);
         if (wrapped.length <= maxLines) { fontSize = fs; lines = wrapped; break; }
         if (fs - 2 < minFontSize) {
@@ -278,7 +273,7 @@ async function layoutPlacard(template, metadata, display, refreshType) {
 
     if (lines === null) {
       const textWidth = await measureText(fontFile, text, fontSize);
-      lines = textWidth <= effectiveWidth + MEASURE_SLACK ? [text] : await wrapText(fontFile, text, fontSize, effectiveWidth);
+      lines = Math.round(textWidth) <= effectiveWidth ? [text] : await wrapText(fontFile, text, fontSize, effectiveWidth);
     }
 
     const lineH       = await getLineHeight(fontFile, fontSize);
