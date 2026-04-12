@@ -1488,7 +1488,16 @@ async function resolveAndFetch(webSources, { sourceId, virtualTag, adHocFilters,
     );
   }
 
-  const fetchResult = await fetchWithRetry(SOURCE_FETCHERS[chosenSourceId], sourceFilters, { aspectRatio: effectiveAspectRatio, ...extraOpts }, {
+  // Forward skipLowRes/minResolution into fetchOptions so sources that prescreen
+  // via metadata API (e.g. Wikidata via Commons imageinfo) can reject low-res
+  // candidates before downloading, rather than relying solely on post-download retries.
+  const { skipLowRes, minResolution } = retryOpts;
+  const fetchResult = await fetchWithRetry(SOURCE_FETCHERS[chosenSourceId], sourceFilters, {
+    aspectRatio: effectiveAspectRatio,
+    ...(skipLowRes !== undefined && { skipLowRes }),
+    ...(minResolution !== undefined && { minResolution }),
+    ...extraOpts,
+  }, {
     prefetchedResult,
     ...retryOpts,
   });

@@ -545,10 +545,13 @@ function formatDimensions(height, width) {
  * @param {'all'|'landscape'|'portrait'} [options.aspectRatio='all']
  * @param {string} [options.sourceLabel='Wikidata']
  * @param {Array} [options.preFilters=[]]
+ * @param {boolean} [options.skipLowRes=false]
+ * @param {number} [options.minResolution=1080]
  * @returns {{ imageBuffer, contentType, metadata }}
  */
 async function fetchRandomArtwork(filters = [], options = {}) {
-  const { aspectRatio = 'all', sourceLabel = 'Wikidata', preFilters = [] } = options;
+  const { aspectRatio = 'all', sourceLabel = 'Wikidata', preFilters = [],
+          skipLowRes = false, minResolution = 1080 } = options;
   const allFilters = [...preFilters, ...filters];
 
   const searchKeyword = getRequireValues(allFilters, 'search')[0] || null;
@@ -594,28 +597,37 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       continue;
     }
 
-    // Prescreen aspect ratio before downloading the full thumbnail.
+    // Prescreen aspect ratio and resolution before downloading the full thumbnail.
     // The Commons imageinfo API returns {width, height} as lightweight metadata (~200ms)
     // vs 2-5s for a 4608px thumbnail. Rejected candidates skip the download entirely.
-    // Falls through to the post-download check if prescreening fails (network error, etc.).
-    let prescreenPassed = true;
-    if (aspectRatio !== 'all') {
+    // Falls through to the post-download checks if prescreening fails (network error, etc.).
+    const needsPrescreen = aspectRatio !== 'all' || skipLowRes;
+    if (needsPrescreen) {
       const fileMatch = detail.imageUrl.match(/Special:FilePath\/(.+?)(?:\?|$)/);
       const filename  = fileMatch ? decodeURI(fileMatch[1]) : null;
       if (filename) {
         const dims = await fetchCommonsImageDimensions(filename);
         if (dims) {
-          const isLandscape = dims.width > dims.height;
-          if (aspectRatio === 'landscape' && !isLandscape) {
-            console.warn(`[wikidata] ${qid} prescreened out: not landscape (${dims.width}x${dims.height})`);
-            prescreenPassed = false;
-          } else if (aspectRatio === 'portrait' && isLandscape) {
-            console.warn(`[wikidata] ${qid} prescreened out: not portrait (${dims.width}x${dims.height})`);
-            prescreenPassed = false;
+          if (aspectRatio !== 'all') {
+            const isLandscape = dims.width > dims.height;
+            if (aspectRatio === 'landscape' && !isLandscape) {
+              console.warn(`[wikidata] ${qid} prescreened out: not landscape (${dims.width}x${dims.height})`);
+              continue;
+            }
+            if (aspectRatio === 'portrait' && isLandscape) {
+              console.warn(`[wikidata] ${qid} prescreened out: not portrait (${dims.width}x${dims.height})`);
+              continue;
+            }
+          }
+          if (skipLowRes) {
+            const shortSide = Math.min(dims.width, dims.height);
+            if (shortSide < minResolution) {
+              console.warn(`[wikidata] ${qid} prescreened out: low-res (${dims.width}x${dims.height}, short side ${shortSide} < ${minResolution})`);
+              continue;
+            }
           }
         }
       }
-      if (!prescreenPassed) continue;
     }
 
     // Download a thumbnail rather than the full-res original.
