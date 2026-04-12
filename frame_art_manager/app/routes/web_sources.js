@@ -702,31 +702,39 @@ function isSourceCompatible(sourceId, aspectRatio) {
 /**
  * Fetch from a source with retry logic for orientation, resolution, recency, and mood filters.
  *
- * @param {Function} fetcher - Source fetchRandomArtwork function
- * @param {Array}    filters - Merged filter cascade to pass to the fetcher
- * @param {object}   fetchOptions - Options passed directly to the fetcher (aspectRatio, extraOpts, …)
- * @param {object}   [retryOpts]
- * @param {boolean}  [retryOpts.skipLowRes=false]
- * @param {number}   [retryOpts.minResolution=1080]
- * @param {number}   [retryOpts.maxAttempts=5]
- * @param {object}   [retryOpts.prefetchedResult=null] - Reused on first attempt (avoids redundant fetch)
- * @param {Set}      [retryOpts.recentArtworkIds=new Set()]
- * @param {string[]} [retryOpts.moodRejectTerms=[]]
- * @param {string}   [retryOpts.logTag='web_sources'] - Prefix for console.warn messages
+ * fetchContext is a single object that flows through the entire fetch chain — it is passed
+ * directly to the source fetcher (sources destructure what they need and ignore the rest),
+ * and also drives the retry logic here. This avoids split fetchOptions/retryOpts bags that
+ * require manual forwarding when new fields are added.
+ *
+ * @param {Function} fetcher       - Source fetchRandomArtwork function
+ * @param {Array}    filters       - Merged filter cascade to pass to the fetcher
+ * @param {object}   fetchContext  - Unified fetch context (forwarded to fetcher + drives retries)
+ * @param {string}   [fetchContext.aspectRatio='all']
+ * @param {boolean}  [fetchContext.skipLowRes=false]
+ * @param {number}   [fetchContext.minResolution=1080]
+ * @param {number}   [fetchContext.maxAttempts=5]
+ * @param {object}   [fetchContext.prefetchedResult=null] - Reused on first attempt
+ * @param {Set}      [fetchContext.recentArtworkIds=new Set()]
+ * @param {string[]} [fetchContext.moodRejectTerms=[]]
+ * @param {string}   [fetchContext.logTag='web_sources']
  * @returns {Promise<object>} fetchResult ({ imageBuffer, contentType, metadata })
  */
-async function fetchWithRetry(fetcher, filters, fetchOptions, {
-  skipLowRes = false, minResolution = 1080, maxAttempts = 5,
-  prefetchedResult = null, recentArtworkIds = new Set(), moodRejectTerms = [],
-  logTag = 'web_sources',
-} = {}) {
-  const { aspectRatio = 'all' } = fetchOptions;
+async function fetchWithRetry(fetcher, filters, fetchContext = {}) {
+  const {
+    aspectRatio = 'all',
+    skipLowRes = false, minResolution = 1080, maxAttempts = 5,
+    prefetchedResult = null, recentArtworkIds = new Set(), moodRejectTerms = [],
+    logTag = 'web_sources',
+  } = fetchContext;
   let fetchResult;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     // On the first attempt, reuse any pre-fetched result to avoid a redundant round-trip.
+    // On retries, pass the full fetchContext so sources can use skipLowRes/minResolution
+    // for their own metadata-based prescreening (e.g. Wikidata via Commons imageinfo).
     fetchResult = (attempt === 0 && prefetchedResult)
       ? prefetchedResult
-      : await fetcher(filters, fetchOptions);
+      : await fetcher(filters, fetchContext);
     const isLast = attempt === maxAttempts - 1;
 
     // Resolve image dimensions once for both resolution and orientation checks.
@@ -1262,14 +1270,14 @@ const MAX_RECENT_WEB_ARTWORKS = 30; // ring-buffer size for per-TV web source re
  *   - Unified artist (virtualTag.sourceId is null, queryMode: 'artist'): try artist-capable
  *     sources in order (preferred first), return result from the first that succeeds.
  *
- * @param {object} webSources  - Loaded web sources config
- * @param {object} virtualTag  - The resolved virtual tag object
- * @param {string} aspectRatio - Resolved aspect ratio ('all', 'landscape', 'portrait')
- * @param {object} [retryOpts] - Passed to fetchWithRetry at each fetch point
+ * @param {object} webSources   - Loaded web sources config
+ * @param {object} virtualTag   - The resolved virtual tag object
+ * @param {string} aspectRatio  - Resolved aspect ratio ('all', 'landscape', 'portrait')
+ * @param {object} fetchContext - Unified fetch context (forwarded to source fetchers)
  * @returns {{ chosenSourceId, fetchResult, mergedFilters, extraOpts }}
  * @throws Errors annotated with .statusCode (400/503)
  */
-async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio, retryOpts = {}) {
+async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio, fetchContext = {}) {
   let chosenSourceId = virtualTag.sourceId;
   let mergedFilters, extraOpts, fetchResult;
 
@@ -1311,7 +1319,7 @@ async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio, retryOpt
         const cExtraOpts = SOURCE_MODULES[candidateId]?.getExtraOptions?.(
           webSources.sources[candidateId]?.settings
         ) || {};
-        fetchResult    = await SOURCE_FETCHERS[candidateId](cFilters, { aspectRatio, ...cExtraOpts });
+        fetchResult    = await SOURCE_FETCHERS[candidateId](cFilters, { ...fetchContext, ...cExtraOpts });
         chosenSourceId = candidateId;
         mergedFilters  = cFilters;
         extraOpts      = cExtraOpts;
@@ -1367,7 +1375,7 @@ async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio, retryOpt
         const cExtraOpts = SOURCE_MODULES[candidateId]?.getExtraOptions?.(
           webSources.sources[candidateId]?.settings
         ) || {};
-        fetchResult    = await SOURCE_FETCHERS[candidateId](cFilters, { aspectRatio, ...cExtraOpts });
+        fetchResult    = await SOURCE_FETCHERS[candidateId](cFilters, { ...fetchContext, ...cExtraOpts });
         chosenSourceId = candidateId;
         mergedFilters  = cFilters;
         extraOpts      = cExtraOpts;
@@ -1415,7 +1423,7 @@ async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio, retryOpt
     const tagFilters    = virtualTag.filters || [];
     mergedFilters = mergeFilterCascade(globalFilters, sourceFilters, tagFilters);
     extraOpts     = SOURCE_MODULES[chosenSourceId]?.getExtraOptions?.(webSources.sources[chosenSourceId]?.settings) || {};
-    fetchResult   = await fetcher(mergedFilters, { aspectRatio, ...extraOpts });
+    fetchResult   = await fetcher(mergedFilters, { ...fetchContext, ...extraOpts });
   }
 
   return { chosenSourceId, fetchResult, mergedFilters, extraOpts };
@@ -1433,21 +1441,23 @@ async function fetchFromVirtualTag(webSources, virtualTag, aspectRatio, retryOpt
  * @param {string}   [params.sourceId]     - For direct-source dispatch (mutually exclusive with virtualTag)
  * @param {object}   [params.virtualTag]   - For virtual-tag dispatch (mutually exclusive with sourceId)
  * @param {Array}    [params.adHocFilters] - Extra filters merged last (direct-source path only)
- * @param {string}   params.aspectRatio    - Resolved aspect ratio ('all', 'landscape', 'portrait')
  * @param {Array}    [params.moodFilters]  - Mood-injected filters; merged after virtual-tag resolution;
  *                                          when non-empty the pre-fetched result is discarded so the
  *                                          re-fetch honours the full filter set.
- * @param {object} [retryOpts]             - Passed to fetchWithRetry (skipLowRes, minResolution,
- *                                          recentArtworkIds, moodRejectTerms, maxAttempts, logTag)
+ * @param {object} fetchContext            - Unified fetch context forwarded to fetchWithRetry and sources.
+ *                                          Must include aspectRatio; may include skipLowRes, minResolution,
+ *                                          maxAttempts, recentArtworkIds, moodRejectTerms, logTag, and any
+ *                                          source-specific extra options.
  * @returns {{ chosenSourceId, fetchResult, mergedFilters, extraOpts }}
  * @throws Errors annotated with .statusCode
  */
-async function resolveAndFetch(webSources, { sourceId, virtualTag, adHocFilters, aspectRatio, moodFilters = [] }, retryOpts = {}) {
+async function resolveAndFetch(webSources, { sourceId, virtualTag, adHocFilters, moodFilters = [] }, fetchContext = {}) {
+  const { aspectRatio = 'all' } = fetchContext;
   let chosenSourceId, mergedFilters, extraOpts, prefetchedResult = null;
 
   if (virtualTag) {
     ({ chosenSourceId, fetchResult: prefetchedResult, mergedFilters, extraOpts }
-      = await fetchFromVirtualTag(webSources, virtualTag, aspectRatio));
+      = await fetchFromVirtualTag(webSources, virtualTag, aspectRatio, fetchContext));
     // Inject mood filters; discard prefetch so re-fetch uses the full combined filter set.
     if (moodFilters.length > 0) {
       mergedFilters = mergeFilterCascade(mergedFilters, moodFilters);
@@ -1488,19 +1498,11 @@ async function resolveAndFetch(webSources, { sourceId, virtualTag, adHocFilters,
     );
   }
 
-  // Forward skipLowRes/minResolution into fetchOptions so sources that prescreen
-  // via metadata API (e.g. Wikidata via Commons imageinfo) can reject low-res
-  // candidates before downloading, rather than relying solely on post-download retries.
-  const { skipLowRes, minResolution } = retryOpts;
-  const fetchResult = await fetchWithRetry(SOURCE_FETCHERS[chosenSourceId], sourceFilters, {
-    aspectRatio: effectiveAspectRatio,
-    ...(skipLowRes !== undefined && { skipLowRes }),
-    ...(minResolution !== undefined && { minResolution }),
-    ...extraOpts,
-  }, {
-    prefetchedResult,
-    ...retryOpts,
-  });
+  // Merge extraOpts into fetchContext (source-specific defaults sit under extraOpts;
+  // explicitly set fetchContext values take precedence).
+  const effectiveFetchContext = { ...extraOpts, ...fetchContext, aspectRatio: effectiveAspectRatio, prefetchedResult };
+
+  const fetchResult = await fetchWithRetry(SOURCE_FETCHERS[chosenSourceId], sourceFilters, effectiveFetchContext);
 
   return { chosenSourceId, fetchResult, mergedFilters, extraOpts };
 }
@@ -1546,8 +1548,8 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
 
   const { chosenSourceId, fetchResult } = await resolveAndFetch(
     webSources,
-    { sourceId, virtualTag, aspectRatio, moodFilters },
-    { skipLowRes, minResolution, maxAttempts: 5, recentArtworkIds, moodRejectTerms, logTag: 'web_sources' }
+    { sourceId, virtualTag, moodFilters },
+    { aspectRatio, skipLowRes, minResolution, maxAttempts: 5, recentArtworkIds, moodRejectTerms, logTag: 'web_sources' }
   );
   const { imageBuffer, contentType, metadata: artMetadata } = fetchResult;
 
@@ -2013,8 +2015,8 @@ router.post('/test-fetch', async (req, res) => {
       try {
         resolved = await resolveAndFetch(
           webSources,
-          { sourceId: adHocSourceId, virtualTag, adHocFilters, aspectRatio },
-          { skipLowRes, minResolution, maxAttempts: 5, logTag: 'test-fetch' }
+          { sourceId: adHocSourceId, virtualTag, adHocFilters },
+          { aspectRatio, skipLowRes, minResolution, maxAttempts: 5, logTag: 'test-fetch' }
         );
       } catch (err) {
         console.error('[test-fetch] resolveAndFetch error:', err.message, err.stack?.split('\n').slice(1, 4).join(' | '));

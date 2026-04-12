@@ -202,7 +202,7 @@ test('fetchWithRetry: returns last result after maxAttempts even if orientation 
   let callCount = 0;
   const fetcher = async () => { callCount++; return makeFakeResult(portrait); };
 
-  const result = await fetchWithRetry(fetcher, [], { aspectRatio: 'landscape' }, { maxAttempts: 3 });
+  const result = await fetchWithRetry(fetcher, [], { aspectRatio: 'landscape', maxAttempts: 3 });
   assert.strictEqual(callCount, 3, 'Should try maxAttempts times');
   assert.ok(result.imageBuffer, 'Should still return a result');
 });
@@ -216,7 +216,7 @@ test('fetchWithRetry: retries when image is below minResolution', async () => {
     return makeFakeResult(callCount === 1 ? lowRes : highRes);
   };
 
-  const result = await fetchWithRetry(fetcher, [], { aspectRatio: 'all' }, { skipLowRes: true, minResolution: 1080 });
+  const result = await fetchWithRetry(fetcher, [], { aspectRatio: 'all', skipLowRes: true, minResolution: 1080 });
   assert.strictEqual(callCount, 2, 'Should retry once after low-res result');
   const { width, height } = await sharp(result.imageBuffer).metadata();
   assert.ok(Math.min(width, height) >= 1080, 'Returned image should meet minimum resolution');
@@ -233,7 +233,8 @@ test('fetchWithRetry: retries for recently-shown artwork, returns fresh result',
     return makeFakeResult(imageBuffer, { artworkUrl: url });
   };
 
-  const result = await fetchWithRetry(fetcher, [], { aspectRatio: 'all' }, {
+  const result = await fetchWithRetry(fetcher, [], {
+    aspectRatio: 'all',
     recentArtworkIds: new Set([recentUrl]),
   });
   assert.strictEqual(callCount, 2);
@@ -254,7 +255,8 @@ test('fetchWithRetry: retries when mood reject_terms match metadata', async () =
     return r;
   };
 
-  const result = await fetchWithRetry(wrappedFetcher, [], { aspectRatio: 'all' }, {
+  const result = await fetchWithRetry(wrappedFetcher, [], {
+    aspectRatio: 'all',
     moodRejectTerms: ['battle'],
   });
   assert.strictEqual(callCount, 2);
@@ -267,7 +269,7 @@ test('fetchWithRetry: reuses prefetchedResult on first attempt', async () => {
   let callCount = 0;
   const fetcher = async () => { callCount++; return makeFakeResult(imageBuffer); };
 
-  const result = await fetchWithRetry(fetcher, [], { aspectRatio: 'all' }, { prefetchedResult: prefetched });
+  const result = await fetchWithRetry(fetcher, [], { aspectRatio: 'all', prefetchedResult: prefetched });
   assert.strictEqual(callCount, 0, 'Fetcher should not be called when prefetchedResult is valid');
   assert.strictEqual(result.metadata.artworkUrl, 'https://example.com/prefetched');
 });
