@@ -60,6 +60,36 @@ function lifespanConflict(sourceLifespan, wikidataLifespan) {
  * @param {object}         entityType
  * @param {object}         snapshotAttrs  - display attrs from the web source (name, lifespan, …)
  */
+/**
+ * Dry-run enrichment for a single artist entity snapshot — performs the same
+ * Wikidata lookup as autoLinkArtistFromWebSource but returns the merged data
+ * without writing anything. Used by the test panel to preview enriched metadata.
+ *
+ * @param {object} entityType    - The entity type object (must have kind='artist')
+ * @param {object} snapshotAttrs - Raw snapshot attrs from the web source
+ * @returns {Promise<object>}    - Merged attrs (may be identical to input if no enrichment found)
+ */
+async function previewArtistEnrichment(entityType, snapshotAttrs) {
+  if (entityType.kind !== 'artist') return snapshotAttrs;
+  const keyAttr = entityType.attributes[0];
+  const name = snapshotAttrs[keyAttr];
+  if (!name) return snapshotAttrs;
+
+  try {
+    const candidates = await suggestArtists(name, 3);
+    for (const candidate of candidates) {
+      if (!candidate.wikidataId) continue;
+      const wikidataData = await enrichArtist(candidate.wikidataId);
+      if (!wikidataData) continue;
+      if (lifespanConflict(snapshotAttrs.lifespan, wikidataData.lifespan)) continue;
+      return mergePreferContent(snapshotAttrs, wikidataData);
+    }
+  } catch (err) {
+    console.warn(`[enrichers] previewArtistEnrichment failed for "${name}": ${err.message}`);
+  }
+  return snapshotAttrs;
+}
+
 async function autoLinkArtistFromWebSource(helper, entityId, entityType, snapshotAttrs) {
   if (entityType.kind !== 'artist') return;
   const keyAttr = entityType.attributes[0];
@@ -82,4 +112,26 @@ async function autoLinkArtistFromWebSource(helper, entityId, entityType, snapsho
   }
 }
 
-module.exports = { enrichArtistInstance, autoLinkArtistFromWebSource };
+/**
+ * Dry-run enrichment for a full entitySnapshot — enriches each artist entity
+ * in-place and returns a new snapshot with merged data. Non-artist entity types
+ * are returned unchanged. Errors per entity are non-fatal.
+ *
+ * @param {object} entitySnapshot - { entityId: { attrName: value } }
+ * @param {Array}  entityTypes    - Full entity type list from metadata (for kind lookup)
+ * @returns {Promise<object>}     - New snapshot with enriched artist entries
+ */
+async function enrichEntitySnapshotPreview(entitySnapshot, entityTypes = []) {
+  const result = {};
+  await Promise.all(
+    Object.entries(entitySnapshot).map(async ([entityId, attrs]) => {
+      const entityType = entityTypes.find(e => e.id === entityId);
+      result[entityId] = entityType
+        ? await previewArtistEnrichment(entityType, attrs)
+        : attrs;
+    })
+  );
+  return result;
+}
+
+module.exports = { enrichArtistInstance, autoLinkArtistFromWebSource, enrichEntitySnapshotPreview };

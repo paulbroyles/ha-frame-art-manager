@@ -8,7 +8,7 @@ const sharp = require('sharp');
 const { processWebSourceImage, solidBorderStrip, runPipeline, PRE_PROCESSORS, IMAGE_PROCESSING_SCHEMA, PROCESSORS } = require('../utils/imageProcessor');
 const { applyFieldFormat } = require('../utils/fieldFormatters');
 const MetadataHelper = require('../metadata_helper');
-const { autoLinkArtistFromWebSource } = require('../utils/enrichers');
+const { autoLinkArtistFromWebSource, enrichEntitySnapshotPreview } = require('../utils/enrichers');
 const { readMoods } = require('./moods');
 
 // Source modules — each must export fetchRandomArtwork, selectMode, metadataFields, and defaultMapping.
@@ -2062,6 +2062,16 @@ router.post('/test-fetch', async (req, res) => {
         artMetadata, rawEffectiveMapping,
         { fieldDefs: rawFieldDefs, applyFormatting: webSources.formatDates !== false }
       );
+      let enrichedRawEntitySnap = rawEntitySnap;
+      if (Object.keys(rawEntitySnap).length > 0) {
+        try {
+          const helperForEnrich = new MetadataHelper(req.frameArtPath);
+          const metadataForEnrich = await helperForEnrich.readMetadata();
+          enrichedRawEntitySnap = await enrichEntitySnapshotPreview(rawEntitySnap, metadataForEnrich.entityTypes || []);
+        } catch (err) {
+          console.warn('[test-fetch] Entity enrichment preview failed (non-fatal):', err.message);
+        }
+      }
       webSources.testCache = {
         rawFilename,
         sourceId: chosenSourceId,
@@ -2069,7 +2079,7 @@ router.post('/test-fetch', async (req, res) => {
         artworkUrl: artMetadata.artworkUrl,
         metadata: artMetadata,
         ...(Object.keys(rawAttrSnap).length > 0 && { attributeSnapshot: rawAttrSnap }),
-        ...(Object.keys(rawEntitySnap).length > 0 && { entitySnapshot: rawEntitySnap }),
+        ...(Object.keys(enrichedRawEntitySnap).length > 0 && { entitySnapshot: enrichedRawEntitySnap }),
         fetchedAt: new Date().toISOString(),
         fetchTrace,
         timings: { fetchMs },
@@ -2149,6 +2159,16 @@ router.post('/test-fetch', async (req, res) => {
       fieldDefs: testFieldDefs,
       applyFormatting: webSources.formatDates !== false,
     });
+    let enrichedEntitySnapshot = entitySnapshot;
+    if (Object.keys(entitySnapshot).length > 0) {
+      try {
+        const helperForEnrich = new MetadataHelper(req.frameArtPath);
+        const metadataForEnrich = await helperForEnrich.readMetadata();
+        enrichedEntitySnapshot = await enrichEntitySnapshotPreview(entitySnapshot, metadataForEnrich.entityTypes || []);
+      } catch (err) {
+        console.warn('[test-fetch] Entity enrichment preview failed (non-fatal):', err.message);
+      }
+    }
 
     webSources.testCache = {
       filename: testFilename,
@@ -2159,7 +2179,7 @@ router.post('/test-fetch', async (req, res) => {
       artworkUrl: artMetadata.artworkUrl,
       metadata: artMetadata,
       ...(Object.keys(attributeSnapshot).length > 0 && { attributeSnapshot }),
-      ...(Object.keys(entitySnapshot).length > 0 && { entitySnapshot }),
+      ...(Object.keys(enrichedEntitySnapshot).length > 0 && { entitySnapshot: enrichedEntitySnapshot }),
       fetchedAt: new Date().toISOString(),
       ...(processingInfo && { processingInfo }),
       fetchTrace,
