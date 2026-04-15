@@ -570,20 +570,22 @@ async function getPool(filters, creatorQid) {
   let qids = [];
 
   if (useSharding) {
-    // Parallel shard strategy: fire PARALLEL_SHARDS queries simultaneously, take the
-    // first non-empty result.  Sequential retries made each 30s SPARQL round-trip pay
-    // N times when Wikidata returned empty shards — parallel cuts that to one round-trip.
-    //
-    // If all PARALLEL_SHARDS return empty, try one more wave before giving up.
-    const PARALLEL_SHARDS = 3;
-    const MAX_WAVES = 2;
+    // Fire PARALLEL_SHARDS queries simultaneously and take the first non-empty result.
+    // This caps pool build time at one SPARQL round-trip (~30s) regardless of how many
+    // shards return empty.  With 6 parallel shards and an observed ~65% per-shard failure
+    // rate (Wikidata SPARQL is inconsistent under load), P(all 6 fail) ≈ 0.065^6... wait
+    // actually: with a 65% failure rate per shard, P(all 6 fail) = 0.65^6 ≈ 7.5%.
+    // In practice Wikidata is usually more reliable; 6 shards is a reasonable ceiling.
+    const PARALLEL_SHARDS = 6;
     const pickedShards = new Set();
 
     const pickShards = (n) => {
       const batch = [];
       while (batch.length < n && pickedShards.size < SHARD_COUNT) {
-        const s = Math.floor(Math.random() * SHARD_COUNT);
-        if (!pickedShards.has(s)) { pickedShards.add(s); batch.push(s); }
+        let s;
+        do { s = Math.floor(Math.random() * SHARD_COUNT); } while (pickedShards.has(s));
+        pickedShards.add(s);
+        batch.push(s);
       }
       return batch;
     };
@@ -602,18 +604,10 @@ async function getPool(filters, creatorQid) {
       }
     };
 
-    for (let wave = 0; wave < MAX_WAVES && qids.length === 0; wave++) {
-      const batch = pickShards(PARALLEL_SHARDS);
-      if (batch.length === 0) break;
-      // Run all shards in this wave in parallel; take the first non-empty result.
-      const results = await Promise.all(batch.map(fetchShard));
-      const winner = results.find(r => r.length > 0);
-      if (winner) { qids = winner; break; }
-      if (wave < MAX_WAVES - 1) {
-        const tried = [...pickedShards].slice(-batch.length).join(', ');
-        console.log(`[wikidata] Shards ${tried} all returned 0 — trying another wave`);
-      }
-    }
+    const batch = pickShards(PARALLEL_SHARDS);
+    const results = await Promise.all(batch.map(fetchShard));
+    const winner = results.find(r => r.length > 0);
+    if (winner) qids = winner;
   } else {
     const query = buildPoolQuery(filters, creatorQid, null);
     console.log(`[wikidata] Fetching QID pool (key: ${key.slice(0, 80)}...)`);
@@ -1300,6 +1294,7 @@ const metadataFields = [
   { key: 'movement',    label: 'Movement',    description: 'Art movement (P135 label)' },
   { key: 'genre',       label: 'Genre',       description: 'Genre (P136 label)' },
   { key: 'collection',  label: 'Collection',  description: 'Museum or collection holding the work (P195/P276 label)' },
+  { key: 'artworkUrl',  label: 'Artwork URL',  description: 'Link to the artwork on Wikidata' },
   { key: 'source',      label: 'Source',      description: 'Source label' },
 ];
 
@@ -1310,6 +1305,7 @@ const defaultMapping = {
   medium:      'medium',
   dimensions:  'dimensions',
   collection:  'museum',
+  artworkUrl:  'artwork_url',
   source:      null,
 };
 
