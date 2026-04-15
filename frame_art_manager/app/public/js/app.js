@@ -16333,7 +16333,9 @@ function readFiltersFromUI(sourceId) {
 
   body.querySelectorAll(`.ws-filter-section[data-source-id="${CSS.escape(sourceId)}"]`).forEach(section => {
     const filterType = section.dataset.filterType;
-    const filterTypeDef = (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType);
+    const filterTypeDef =
+      (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType) ||
+      (webSourceCoreFilterTypes || []).find(ft => ft.type === filterType);
     if (!filterTypeDef) return;
 
     // Read mode from the parent entry's data-filter-mode (authoritative in dual-mode),
@@ -17478,7 +17480,9 @@ function readVirtualTagFiltersFromUI() {
 
   container.querySelectorAll(`.ws-filter-section[data-source-id="${CSS.escape(sourceId)}"]`).forEach(section => {
     const filterType = section.dataset.filterType;
-    const filterTypeDef = (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType);
+    const filterTypeDef =
+      (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType) ||
+      (webSourceCoreFilterTypes || []).find(ft => ft.type === filterType);
     if (!filterTypeDef) return;
 
     const parentEntry = section.closest('.ws-filter-entry');
