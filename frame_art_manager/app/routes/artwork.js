@@ -554,10 +554,18 @@ router.get('/:tvId', async (req, res) => {
       const webConfig = await readWebSourcesConfig(req.frameArtPath);
       const tvCache = webConfig?.perTvCache?.[deviceId];
 
-      // Check if cache matches what's currently displayed by comparing a known field
+      // Check if cache matches what's currently displayed.
+      // Primary: compare artworkUrl (stable per-artwork, always in cache).
+      // Fallback: compare title (for sources that omit artworkUrl).
+      // Either match is sufficient; no match → fall back to sensor attributes.
+      const cacheArtworkUrl = tvCache?.artworkUrl;
+      const sensorArtworkUrl = sensor.attributes?.artwork_url || sensor.attributes?.artworkUrl;
       const cacheTitle = tvCache?.attributeSnapshot?.title;
       const sensorTitle = sensor.attributes?.title;
-      const cacheIsCurrent = tvCache && cacheTitle && cacheTitle === sensorTitle;
+      const cacheIsCurrent = tvCache && (
+        (cacheArtworkUrl && sensorArtworkUrl && cacheArtworkUrl === sensorArtworkUrl) ||
+        (cacheTitle && sensorTitle && cacheTitle === sensorTitle)
+      );
 
       if (cacheIsCurrent) {
         attributeValues = tvCache.attributeSnapshot || {};
