@@ -584,11 +584,18 @@ async function getPool(filters, creatorQid) {
     const query = buildPoolQuery(filters, creatorQid, shard);
     const shardLabel = shard !== null ? ` shard ${shard}/${SHARD_COUNT}` : '';
     console.log(`[wikidata] Fetching QID pool${shardLabel} (key: ${key.slice(0, 80)}...)`);
-    const bindings = await sparqlQuery(query, SPARQL_TIMEOUT_MS);
-
-    qids = bindings
-      .map(b => b.item?.value?.replace('http://www.wikidata.org/entity/', ''))
-      .filter(Boolean);
+    try {
+      const bindings = await sparqlQuery(query, SPARQL_TIMEOUT_MS);
+      qids = bindings
+        .map(b => b.item?.value?.replace('http://www.wikidata.org/entity/', ''))
+        .filter(Boolean);
+    } catch (err) {
+      if (attempt < maxAttempts - 1) {
+        console.warn(`[wikidata] SPARQL error on shard ${shard} (${err.message}) — retrying with different shard`);
+        continue;
+      }
+      throw err;
+    }
 
     if (qids.length > 0) break;
     if (attempt < maxAttempts - 1) {
@@ -670,7 +677,11 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     }
 
     // Get (or build) the QID pool for this filter combination.
-    const pool = await getPool(allFilters, creatorQid);
+    // Strip orientation — buildPoolQuery doesn't use it (no Wikidata property for image
+    // orientation), so including it in the pool key would create a separate cache entry
+    // for identical SPARQL queries.  Orientation is applied post-fetch via prescreening.
+    const poolFilters = allFilters.filter(f => f.type !== 'orientation');
+    const pool = await getPool(poolFilters, creatorQid);
     candidates = [...pool].sort(() => Math.random() - 0.5).slice(0, maxCandidates);
   }
 
