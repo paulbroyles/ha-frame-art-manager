@@ -567,39 +567,63 @@ async function getPool(filters, creatorQid) {
 
   const useSharding = shouldShard(filters, creatorQid);
 
-  // When sharding, retry up to SHARD_COUNT times with different shards.
-  // Individual shards can be empty for narrow filters (e.g. landscape paintings
-  // in a specific period), so we keep trying until we find a non-empty shard.
-  const maxAttempts = useSharding ? Math.min(SHARD_COUNT, 5) : 1;
-  const triedShards = new Set();
   let qids = [];
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    let shard = null;
-    if (useSharding) {
-      do { shard = Math.floor(Math.random() * SHARD_COUNT); } while (triedShards.has(shard));
-      triedShards.add(shard);
-    }
+  if (useSharding) {
+    // Parallel shard strategy: fire PARALLEL_SHARDS queries simultaneously, take the
+    // first non-empty result.  Sequential retries made each 30s SPARQL round-trip pay
+    // N times when Wikidata returned empty shards — parallel cuts that to one round-trip.
+    //
+    // If all PARALLEL_SHARDS return empty, try one more wave before giving up.
+    const PARALLEL_SHARDS = 3;
+    const MAX_WAVES = 2;
+    const pickedShards = new Set();
 
-    const query = buildPoolQuery(filters, creatorQid, shard);
-    const shardLabel = shard !== null ? ` shard ${shard}/${SHARD_COUNT}` : '';
-    console.log(`[wikidata] Fetching QID pool${shardLabel} (key: ${key.slice(0, 80)}...)`);
+    const pickShards = (n) => {
+      const batch = [];
+      while (batch.length < n && pickedShards.size < SHARD_COUNT) {
+        const s = Math.floor(Math.random() * SHARD_COUNT);
+        if (!pickedShards.has(s)) { pickedShards.add(s); batch.push(s); }
+      }
+      return batch;
+    };
+
+    const fetchShard = async (shard) => {
+      const query = buildPoolQuery(filters, creatorQid, shard);
+      console.log(`[wikidata] Fetching QID pool shard ${shard}/${SHARD_COUNT} (key: ${key.slice(0, 80)}...)`);
+      try {
+        const bindings = await sparqlQuery(query, SPARQL_TIMEOUT_MS);
+        return bindings
+          .map(b => b.item?.value?.replace('http://www.wikidata.org/entity/', ''))
+          .filter(Boolean);
+      } catch (err) {
+        console.warn(`[wikidata] SPARQL error on shard ${shard}: ${err.message}`);
+        return [];
+      }
+    };
+
+    for (let wave = 0; wave < MAX_WAVES && qids.length === 0; wave++) {
+      const batch = pickShards(PARALLEL_SHARDS);
+      if (batch.length === 0) break;
+      // Run all shards in this wave in parallel; take the first non-empty result.
+      const results = await Promise.all(batch.map(fetchShard));
+      const winner = results.find(r => r.length > 0);
+      if (winner) { qids = winner; break; }
+      if (wave < MAX_WAVES - 1) {
+        const tried = [...pickedShards].slice(-batch.length).join(', ');
+        console.log(`[wikidata] Shards ${tried} all returned 0 — trying another wave`);
+      }
+    }
+  } else {
+    const query = buildPoolQuery(filters, creatorQid, null);
+    console.log(`[wikidata] Fetching QID pool (key: ${key.slice(0, 80)}...)`);
     try {
       const bindings = await sparqlQuery(query, SPARQL_TIMEOUT_MS);
       qids = bindings
         .map(b => b.item?.value?.replace('http://www.wikidata.org/entity/', ''))
         .filter(Boolean);
     } catch (err) {
-      if (attempt < maxAttempts - 1) {
-        console.warn(`[wikidata] SPARQL error on shard ${shard} (${err.message}) — retrying with different shard`);
-        continue;
-      }
       throw err;
-    }
-
-    if (qids.length > 0) break;
-    if (attempt < maxAttempts - 1) {
-      console.log(`[wikidata] Shard ${shard} returned 0 items — retrying with different shard`);
     }
   }
 
