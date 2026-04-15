@@ -26,6 +26,7 @@
 
 const axios = require('axios');
 const sharp = require('sharp');
+const fs    = require('fs');
 
 const SPARQL_ENDPOINT = 'https://query.wikidata.org/sparql';
 const ENTITY_API      = 'https://www.wikidata.org/w/api.php';
@@ -142,10 +143,46 @@ const CENTURIES = [
 
 // ── Caches ─────────────────────────────────────────────────────────────────────
 
+// Pool cache persistence: survive addon restarts so cold-cache SPARQL cost (~30s)
+// is only paid once per TTL period, not on every deploy/restart.
+// /data/ is the HA addon persistent data directory — survives container restarts.
+const POOL_CACHE_FILE = '/data/wikidata_pool_cache.json';
+
+function _loadPoolCacheFromDisk() {
+  try {
+    const raw = fs.readFileSync(POOL_CACHE_FILE, 'utf8');
+    const entries = JSON.parse(raw);
+    const now = Date.now();
+    let loaded = 0;
+    for (const [key, entry] of Object.entries(entries)) {
+      if (entry.expiresAt > now && Array.isArray(entry.qids) && entry.qids.length > 0) {
+        poolCache.set(key, entry);
+        loaded++;
+      }
+    }
+    if (loaded > 0) console.log(`[wikidata] Loaded ${loaded} pool(s) from disk cache`);
+  } catch (_) {
+    // File missing or corrupt — start fresh, no action needed
+  }
+}
+
+function _savePoolCacheToDisk() {
+  try {
+    const obj = {};
+    for (const [key, entry] of poolCache) obj[key] = entry;
+    fs.writeFileSync(POOL_CACHE_FILE, JSON.stringify(obj), 'utf8');
+  } catch (err) {
+    console.warn(`[wikidata] Could not write pool cache to disk: ${err.message}`);
+  }
+}
+
 // QID pool cache: filterKey → { qids: string[], expiresAt: number }
 const poolCache   = new Map();
 // Creator name→QID: normalised name → { qid: string, expiresAt: number }
 const creatorCache = new Map();
+
+// Restore persisted pools on startup.
+_loadPoolCacheFromDisk();
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -604,10 +641,16 @@ async function getPool(filters, creatorQid) {
       }
     };
 
+    // Resolve with first non-empty result — don't wait for all shards.
+    const firstNonEmpty = (promises) => new Promise((resolve) => {
+      let remaining = promises.length;
+      promises.forEach(p => p.then(result => {
+        if (result.length > 0) resolve(result);
+        else if (--remaining === 0) resolve([]);
+      }).catch(() => { if (--remaining === 0) resolve([]); }));
+    });
     const batch = pickShards(PARALLEL_SHARDS);
-    const results = await Promise.all(batch.map(fetchShard));
-    const winner = results.find(r => r.length > 0);
-    if (winner) qids = winner;
+    qids = await firstNonEmpty(batch.map(fetchShard));
   } else {
     const query = buildPoolQuery(filters, creatorQid, null);
     console.log(`[wikidata] Fetching QID pool (key: ${key.slice(0, 80)}...)`);
@@ -625,6 +668,7 @@ async function getPool(filters, creatorQid) {
 
   poolCache.set(key, { qids, expiresAt: Date.now() + POOL_TTL_MS });
   console.log(`[wikidata] Pool cached: ${qids.length} QIDs for "${key.slice(0, 80)}"`);
+  _savePoolCacheToDisk();
   return qids;
 }
 
@@ -699,7 +743,9 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     // orientation), so including it in the pool key would create a separate cache entry
     // for identical SPARQL queries.  Orientation is applied post-fetch via prescreening.
     const poolFilters = allFilters.filter(f => f.type !== 'orientation');
+    const _tPool = Date.now();
     const pool = await getPool(poolFilters, creatorQid);
+    console.log(`[wikidata] timing: getPool(size=${pool.length}) = ${Date.now() - _tPool}ms`);
     candidates = [...pool].sort(() => Math.random() - 0.5).slice(0, maxCandidates);
   }
 
@@ -714,7 +760,9 @@ async function fetchRandomArtwork(filters = [], options = {}) {
   // passes the filter.  Total time: ~3s instead of 4+ minutes.
   if (needsPrescreen) {
     // Phase 1: Batch-fetch claims for all candidates (groups of 50).
+    const _t0 = Date.now();
     const entityMap = await batchFetchItemClaims(candidates);
+    console.log(`[wikidata] timing: batchFetchItemClaims(${candidates.length}) = ${Date.now() - _t0}ms`);
 
     // Extract image filenames from P18 for candidates that have an image.
     const withImages = candidates.flatMap(qid => {
@@ -731,7 +779,9 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     });
 
     // Phase 2: Batch-fetch Commons dimensions for all filenames (groups of 50).
+    const _t1 = Date.now();
     const dimMap = await batchFetchCommonsImageDimensions(withImages.map(c => c.filename));
+    console.log(`[wikidata] timing: batchFetchCommonsImageDimensions(${withImages.length}) = ${Date.now() - _t1}ms`);
 
     // Phase 3: Filter by orientation and resolution.
     const prescreened = withImages.filter(({ qid, filename }) => {
@@ -759,12 +809,14 @@ async function fetchRandomArtwork(filters = [], options = {}) {
       return true;
     });
 
+    console.log(`[wikidata] timing: prescreened ${prescreened.length}/${withImages.length} candidates (from ${candidates.length} QIDs)`);
     // Phase 4: Download prescreened candidates sequentially until one works.
     for (const { qid, entity } of prescreened) {
       const imageFile = entity.claims?.P18?.[0]?.mainsnak?.datavalue?.value;
       const imageUrl  = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURI(imageFile.trim().replace(/ /g, '_'))}`;
       const thumbUrl  = `${imageUrl}?${sizeParam}`;
       let imageBuffer, contentType;
+      const _tImg = Date.now();
       try {
         const resp = await axios.get(thumbUrl, {
           responseType: 'arraybuffer',
@@ -774,8 +826,9 @@ async function fetchRandomArtwork(filters = [], options = {}) {
         });
         imageBuffer = Buffer.from(resp.data);
         contentType = resp.headers['content-type'] || 'image/jpeg';
+        console.log(`[wikidata] timing: image download ${qid} = ${Date.now() - _tImg}ms`);
       } catch (err) {
-        console.warn(`[wikidata] Image download failed for ${qid}: ${err.message}`);
+        console.warn(`[wikidata] Image download failed for ${qid}: ${err.message} (${Date.now() - _tImg}ms)`);
         continue;
       }
 

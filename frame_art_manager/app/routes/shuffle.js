@@ -654,13 +654,19 @@ router.post('/select', async (req, res) => {
       const allEligible = [...eligible, ...expandedEligible];
       const libraryCount = allEligible.length;
 
-      // Virtual web tags + mood search entries get effective count = avg images per library tag.
+      // Give each virtual web tag effective image count = avg images per library tag,
+      // scaled by its tag weight so high-weight virtual tags compete proportionally.
       const totalWebEntryCount = virtualWebTags.length + moodSearchEntries.length;
-      const perVtagEffective = hasWebSources && libraryIncludeTags.length > 0
+      const totalVtagWeight = virtualWebTags.reduce((s, t) => s + (tagWeights[t] ?? 1.0), 0);
+      const totalMoodWeight = moodSearchEntries.reduce((s, e) => s + e.weight, 0);
+      const totalWebWeight = totalVtagWeight + totalMoodWeight;
+      const perUnitEffective = hasWebSources && libraryIncludeTags.length > 0
         ? Math.max(1, Math.floor(eligible.length / Math.max(1, libraryIncludeTags.length)))
         : hasWebSources ? 1 : 0;
-      const webEffective = perVtagEffective * totalWebEntryCount;
-      const eligibleCount = libraryCount + webEffective;
+      // webEffectiveForProb uses sum-of-weights so the library/web split respects tag weights.
+      // eligibleCount uses raw entry count (for display only).
+      const webEffectiveForProb = perUnitEffective * totalWebWeight;
+      const eligibleCount = libraryCount + perUnitEffective * totalWebEntryCount;
 
       if (eligibleCount === 0) return res.json({ type: 'none', eligibleCount: 0 });
 
@@ -677,8 +683,8 @@ router.post('/select', async (req, res) => {
 
       // Roll for web source (proportional to effective share relative to total weight)
       if (hasWebSources) {
-        const totalWeight = libraryTotalWeight + webEffective;
-        if (Math.random() < webEffective / totalWeight) {
+        const totalWeight = libraryTotalWeight + webEffectiveForProb;
+        if (Math.random() < webEffectiveForProb / totalWeight) {
           const webEntry = selectWebEntry(virtualWebTags, tagWeights, moodSearchEntries);
           if (webEntry && webEntry.kind === 'mood') {
             return res.json({ type: 'web_source', moodKeyword: webEntry.keyword, eligibleCount, selectedTag: null, freshCount: 0, usedFallback: false });
