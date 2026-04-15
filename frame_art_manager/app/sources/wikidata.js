@@ -479,6 +479,79 @@ async function fetchCommonsImageDimensions(filename) {
 }
 
 /**
+ * Batch-fetch item claims + labels for multiple QIDs in groups of 50.
+ * Returns a Map of qid → entity object (the raw API entity, with .claims and .labels).
+ * Used to prescreen candidates before committing to individual detail fetches.
+ */
+async function batchFetchItemClaims(qids) {
+  const BATCH = 50;
+  const entityMap = new Map();
+  for (let i = 0; i < qids.length; i += BATCH) {
+    const batch = qids.slice(i, i + BATCH);
+    try {
+      const resp = await axios.get(ENTITY_API, {
+        params: {
+          action:           'wbgetentities',
+          ids:              batch.join('|'),
+          format:           'json',
+          props:            'claims|labels',
+          languages:        'en',
+          languagefallback:  1,
+        },
+        headers: { 'User-Agent': USER_AGENT },
+        timeout: 15000,
+      });
+      for (const [id, entity] of Object.entries(resp.data.entities || {})) {
+        if (!entity.missing) entityMap.set(id, entity);
+      }
+    } catch (err) {
+      console.warn(`[wikidata] Batch claims fetch failed (batch ${i}–${i + batch.length - 1}): ${err.message}`);
+    }
+  }
+  return entityMap;
+}
+
+/**
+ * Batch-fetch image dimensions from Wikimedia Commons imageinfo for multiple files.
+ * Sends groups of 50 filenames per request.
+ * Returns a Map of normalizedFilename → { width, height }.
+ *
+ * Key normalization: spaces→underscores, matching what we store in candidatesWithImages.
+ */
+async function batchFetchCommonsImageDimensions(filenames) {
+  const BATCH = 50;
+  const dimMap = new Map();
+  const unique = [...new Set(filenames)];
+  for (let i = 0; i < unique.length; i += BATCH) {
+    const batch = unique.slice(i, i + BATCH);
+    try {
+      const resp = await axios.get('https://commons.wikimedia.org/w/api.php', {
+        params: {
+          action: 'query',
+          prop:   'imageinfo',
+          iiprop: 'size',
+          titles: batch.map(fn => `File:${fn}`).join('|'),
+          format: 'json',
+        },
+        headers: { 'User-Agent': USER_AGENT },
+        timeout: 10000,
+      });
+      for (const page of Object.values(resp.data?.query?.pages || {})) {
+        const info = page?.imageinfo?.[0];
+        if (info) {
+          // Strip "File:" prefix and normalize spaces→underscores to match the key we store.
+          const key = (page.title || '').replace(/^File:/, '').replace(/ /g, '_');
+          dimMap.set(key, { width: info.width, height: info.height });
+        }
+      }
+    } catch (err) {
+      console.warn(`[wikidata] Batch Commons imageinfo failed (batch ${i}–${i + batch.length - 1}): ${err.message}`);
+    }
+  }
+  return dimMap;
+}
+
+/**
  * Fetch or return cached QID pool for the given filter combination.
  * Pool is refreshed after POOL_TTL_MS.
  *
@@ -601,117 +674,194 @@ async function fetchRandomArtwork(filters = [], options = {}) {
     candidates = [...pool].sort(() => Math.random() - 0.5).slice(0, maxCandidates);
   }
 
-  for (const qid of candidates) {
-    // Fetch item detail via wbgetentities (two REST calls, ~1s total vs 3-45s SPARQL).
-    let detail;
-    try {
-      detail = await fetchItemDetail(qid);
-    } catch (err) {
-      console.warn(`[wikidata] Detail fetch failed for ${qid}: ${err.message}`);
-      continue;
-    }
-    if (!detail?.imageUrl) {
-      console.warn(`[wikidata] ${qid}: no image URL`);
-      continue;
-    }
+  const needsPrescreen = aspectRatio !== 'all' || skipLowRes;
+  const sizeParam = thumbSpecialFileParam(aspectRatio === 'portrait' ? 'portrait' : 'landscape');
 
-    // Prescreen aspect ratio and resolution before downloading the full thumbnail.
-    // The Commons imageinfo API returns {width, height} as lightweight metadata (~200ms)
-    // vs 2-5s for a 4608px thumbnail. Rejected candidates skip the download entirely.
-    // Falls through to the post-download checks if prescreening fails (network error, etc.).
-    const needsPrescreen = aspectRatio !== 'all' || skipLowRes;
-    if (needsPrescreen) {
-      const fileMatch = detail.imageUrl.match(/Special:FilePath\/(.+?)(?:\?|$)/);
-      const filename  = fileMatch ? decodeURI(fileMatch[1]) : null;
-      if (filename) {
-        const dims = await fetchCommonsImageDimensions(filename);
-        if (dims) {
-          if (aspectRatio !== 'all') {
-            const isLandscape = dims.width > dims.height;
-            if (aspectRatio === 'landscape' && !isLandscape) {
-              console.warn(`[wikidata] ${qid} prescreened out: not landscape (${dims.width}x${dims.height})`);
-              continue;
-            }
-            if (aspectRatio === 'portrait' && isLandscape) {
-              console.warn(`[wikidata] ${qid} prescreened out: not portrait (${dims.width}x${dims.height})`);
-              continue;
-            }
-          }
-          if (skipLowRes) {
-            const shortSide = Math.min(dims.width, dims.height);
-            if (shortSide < minResolution) {
-              console.warn(`[wikidata] ${qid} prescreened out: low-res (${dims.width}x${dims.height}, short side ${shortSide} < ${minResolution})`);
-              continue;
-            }
-          }
-        }
+  // ── Batch prescreen path ──────────────────────────────────────────────────
+  // When orientation or low-res filtering is active, classical paintings skew heavily
+  // portrait — checking 60 candidates sequentially (2 API calls + 200ms Commons per item)
+  // takes 4+ minutes in the worst case.  Instead: batch-fetch all claims and all Commons
+  // dimensions upfront (2–3 total API calls), then download only the first candidate that
+  // passes the filter.  Total time: ~3s instead of 4+ minutes.
+  if (needsPrescreen) {
+    // Phase 1: Batch-fetch claims for all candidates (groups of 50).
+    const entityMap = await batchFetchItemClaims(candidates);
+
+    // Extract image filenames from P18 for candidates that have an image.
+    const withImages = candidates.flatMap(qid => {
+      const entity = entityMap.get(qid);
+      if (!entity) return [];
+      const imageFile = entity.claims?.P18?.[0]?.mainsnak?.datavalue?.value;
+      if (!imageFile) {
+        console.warn(`[wikidata] ${qid}: no image URL`);
+        return [];
       }
-    }
+      // Normalize spaces→underscores to match Commons page titles.
+      const filename = imageFile.trim().replace(/ /g, '_');
+      return [{ qid, entity, filename }];
+    });
 
-    // Download a thumbnail rather than the full-res original.
-    // Special:FilePath?width=N (landscape) or ?height=N (portrait) redirects to a JPEG thumb
-    // at that long-edge size. Originals can be 50–100 MB TIFFs; ~4608px is sufficient for 4K output.
-    const sizeParam = thumbSpecialFileParam(aspectRatio === 'portrait' ? 'portrait' : 'landscape');
-    const thumbUrl = detail.imageUrl.includes('?')
-      ? `${detail.imageUrl}&${sizeParam}`
-      : `${detail.imageUrl}?${sizeParam}`;
-    let imageBuffer, contentType;
-    try {
-      const resp = await axios.get(thumbUrl, {
-        responseType: 'arraybuffer',
-        timeout:      IMAGE_TIMEOUT_MS,
-        headers:      { 'User-Agent': USER_AGENT },
-        maxRedirects: 5,
-      });
-      imageBuffer = Buffer.from(resp.data);
-      contentType = resp.headers['content-type'] || 'image/jpeg';
-    } catch (err) {
-      console.warn(`[wikidata] Image download failed for ${qid}: ${err.message}`);
-      continue;
-    }
+    // Phase 2: Batch-fetch Commons dimensions for all filenames (groups of 50).
+    const dimMap = await batchFetchCommonsImageDimensions(withImages.map(c => c.filename));
 
-    // Skip SVG and non-raster files.
-    if (contentType.includes('svg') || !contentType.startsWith('image/')) {
-      console.warn(`[wikidata] ${qid} skipped: unsupported content-type ${contentType}`);
-      continue;
-    }
+    // Phase 3: Filter by orientation and resolution.
+    const prescreened = withImages.filter(({ qid, filename }) => {
+      const dims = dimMap.get(filename);
+      if (!dims) return true; // no dims → let through to post-download check
 
-    // Post-download aspect ratio check — catches any prescreening misses (e.g. if the
-    // Commons API returned stale/incorrect dimensions, or prescreening was skipped).
-    if (aspectRatio !== 'all') {
-      try {
-        const { width, height } = await sharp(imageBuffer).metadata();
-        const isLandscape = width > height;
+      if (aspectRatio !== 'all') {
+        const isLandscape = dims.width > dims.height;
         if (aspectRatio === 'landscape' && !isLandscape) {
-          console.warn(`[wikidata] ${qid} skipped post-download: not landscape (${width}x${height})`);
-          continue;
+          console.warn(`[wikidata] ${qid} prescreened out: not landscape (${dims.width}x${dims.height})`);
+          return false;
         }
         if (aspectRatio === 'portrait' && isLandscape) {
-          console.warn(`[wikidata] ${qid} skipped post-download: not portrait (${width}x${height})`);
-          continue;
+          console.warn(`[wikidata] ${qid} prescreened out: not portrait (${dims.width}x${dims.height})`);
+          return false;
         }
+      }
+      if (skipLowRes) {
+        const shortSide = Math.min(dims.width, dims.height);
+        if (shortSide < minResolution) {
+          console.warn(`[wikidata] ${qid} prescreened out: low-res (${dims.width}x${dims.height}, short side ${shortSide} < ${minResolution})`);
+          return false;
+        }
+      }
+      return true;
+    });
+
+    // Phase 4: Download prescreened candidates sequentially until one works.
+    for (const { qid, entity } of prescreened) {
+      const imageFile = entity.claims?.P18?.[0]?.mainsnak?.datavalue?.value;
+      const imageUrl  = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURI(imageFile.trim().replace(/ /g, '_'))}`;
+      const thumbUrl  = `${imageUrl}?${sizeParam}`;
+      let imageBuffer, contentType;
+      try {
+        const resp = await axios.get(thumbUrl, {
+          responseType: 'arraybuffer',
+          timeout:      IMAGE_TIMEOUT_MS,
+          headers:      { 'User-Agent': USER_AGENT },
+          maxRedirects: 5,
+        });
+        imageBuffer = Buffer.from(resp.data);
+        contentType = resp.headers['content-type'] || 'image/jpeg';
       } catch (err) {
-        console.warn(`[wikidata] ${qid}: could not read dimensions: ${err.message}`);
+        console.warn(`[wikidata] Image download failed for ${qid}: ${err.message}`);
         continue;
       }
-    }
 
-    return {
-      imageBuffer,
-      contentType,
-      metadata: {
-        title:       detail.title,
-        creator:     detail.creator,
-        medium:      detail.medium,
-        dimensions:  formatDimensions(detail.height, detail.width),
-        dateCreated: formatDate(detail.dateRaw),
-        artworkUrl:  `https://www.wikidata.org/wiki/${qid}`,
-        source:      sourceLabel,
-        movement:    detail.movement,
-        genre:       detail.genre,
-        collection:  detail.collection,
-      },
-    };
+      if (contentType.includes('svg') || !contentType.startsWith('image/')) {
+        console.warn(`[wikidata] ${qid} skipped: unsupported content-type ${contentType}`);
+        continue;
+      }
+
+      // Post-download orientation check — catches any prescreening misses.
+      if (aspectRatio !== 'all') {
+        try {
+          const { width, height } = await sharp(imageBuffer).metadata();
+          const isLandscape = width > height;
+          if (aspectRatio === 'landscape' && !isLandscape) {
+            console.warn(`[wikidata] ${qid} skipped post-download: not landscape (${width}x${height})`);
+            continue;
+          }
+          if (aspectRatio === 'portrait' && isLandscape) {
+            console.warn(`[wikidata] ${qid} skipped post-download: not portrait (${width}x${height})`);
+            continue;
+          }
+        } catch (err) {
+          console.warn(`[wikidata] ${qid}: could not read dimensions: ${err.message}`);
+          continue;
+        }
+      }
+
+      // Winner found — fetch full metadata (labels for linked entities) for this item only.
+      let detail;
+      try {
+        detail = await fetchItemDetail(qid);
+      } catch (err) {
+        console.warn(`[wikidata] Detail fetch failed for winner ${qid}: ${err.message}`);
+        // Fall back to what we already have from the batch claims fetch.
+        const title = entity.labels?.en?.value || null;
+        detail = { imageUrl, title, creator: null, medium: null, dateRaw: null,
+                   movement: null, genre: null, collection: null, height: null, width: null };
+      }
+
+      return {
+        imageBuffer,
+        contentType,
+        metadata: {
+          title:       detail.title,
+          creator:     detail.creator,
+          medium:      detail.medium,
+          dimensions:  formatDimensions(detail.height, detail.width),
+          dateCreated: formatDate(detail.dateRaw),
+          artworkUrl:  `https://www.wikidata.org/wiki/${qid}`,
+          source:      sourceLabel,
+          movement:    detail.movement,
+          genre:       detail.genre,
+          collection:  detail.collection,
+        },
+      };
+    }
+  } else {
+    // ── Sequential path (no prescreen needed) ──────────────────────────────
+    for (const qid of candidates) {
+      // Fetch item detail via wbgetentities (two REST calls, ~1s total vs 3-45s SPARQL).
+      let detail;
+      try {
+        detail = await fetchItemDetail(qid);
+      } catch (err) {
+        console.warn(`[wikidata] Detail fetch failed for ${qid}: ${err.message}`);
+        continue;
+      }
+      if (!detail?.imageUrl) {
+        console.warn(`[wikidata] ${qid}: no image URL`);
+        continue;
+      }
+
+      // Download a thumbnail rather than the full-res original.
+      // Special:FilePath?width=N (landscape) or ?height=N (portrait) redirects to a JPEG thumb
+      // at that long-edge size. Originals can be 50–100 MB TIFFs; ~4608px is sufficient for 4K output.
+      const thumbUrl = detail.imageUrl.includes('?')
+        ? `${detail.imageUrl}&${sizeParam}`
+        : `${detail.imageUrl}?${sizeParam}`;
+      let imageBuffer, contentType;
+      try {
+        const resp = await axios.get(thumbUrl, {
+          responseType: 'arraybuffer',
+          timeout:      IMAGE_TIMEOUT_MS,
+          headers:      { 'User-Agent': USER_AGENT },
+          maxRedirects: 5,
+        });
+        imageBuffer = Buffer.from(resp.data);
+        contentType = resp.headers['content-type'] || 'image/jpeg';
+      } catch (err) {
+        console.warn(`[wikidata] Image download failed for ${qid}: ${err.message}`);
+        continue;
+      }
+
+      if (contentType.includes('svg') || !contentType.startsWith('image/')) {
+        console.warn(`[wikidata] ${qid} skipped: unsupported content-type ${contentType}`);
+        continue;
+      }
+
+      return {
+        imageBuffer,
+        contentType,
+        metadata: {
+          title:       detail.title,
+          creator:     detail.creator,
+          medium:      detail.medium,
+          dimensions:  formatDimensions(detail.height, detail.width),
+          dateCreated: formatDate(detail.dateRaw),
+          artworkUrl:  `https://www.wikidata.org/wiki/${qid}`,
+          source:      sourceLabel,
+          movement:    detail.movement,
+          genre:       detail.genre,
+          collection:  detail.collection,
+        },
+      };
+    }
   }
 
   throw new Error(
