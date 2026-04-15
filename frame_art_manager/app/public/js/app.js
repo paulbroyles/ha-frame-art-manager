@@ -14315,7 +14315,7 @@ function renderTagsetSelectedTags(type) {
     // Virtual tags: umbrella or ws:tagId
     if (tag === WEB_SOURCES_VIRTUAL_TAG || tag.startsWith('ws:')) {
       const vtId = tag.startsWith('ws:') ? tag.slice(3) : null;
-      const vtLabel = vtId ? (virtualTags[vtId]?.label || vtId) : 'Web Sources';
+      const vtLabel = vtId ? getVirtualTagLabel(vtId) : 'Web Sources';
       const percentStr = hasCustomWeights ? `<span class="tag-percent">${percentages[tag] || 0}%</span> ` : '';
       return `<span class="tag-pill web-sources-virtual-tag" data-tag="${escapeHtml(tag)}" title="Virtual tag: ${escapeHtml(vtLabel)}">
         ${escapeHtml(vtLabel)} ${percentStr}<span class="tag-count">(virtual)</span>
@@ -14679,7 +14679,7 @@ function renderTagWeightedContent() {
 
     if (tag === WEB_SOURCES_VIRTUAL_TAG || tag.startsWith('ws:')) {
       const vtId = tag.startsWith('ws:') ? tag.slice(3) : null;
-      const vtLabel = vtId ? (virtualTags[vtId]?.label || vtId) : 'Web Sources';
+      const vtLabel = vtId ? getVirtualTagLabel(vtId) : 'Web Sources';
       return `
         <div class="weight-slider-row web-sources-slider-row" data-tag="${escapeHtml(tag)}">
           <div class="weight-slider-header">
@@ -15877,18 +15877,14 @@ function renderWebSourcesList() {
  * @param {Array} [lockedFilters] - Filters from higher cascade levels (shown as locked/disabled).
  */
 function renderSourceFilters(sourceId, currentFilters, lockedFilters, expandedTypes) {
-  const sourceFilterTypes = webSourceFilterTypes[sourceId] || [];
-  const coreTypes = webSourceCoreFilterTypes || [];
-  const allFilterTypes = [...coreTypes, ...sourceFilterTypes];
   if (currentFilters === undefined) {
     currentFilters = webSourcesConfig?.sources?.[sourceId]?.filters || [];
   }
-  // Global filters are locked at the source level
   if (!lockedFilters) lockedFilters = webSourcesConfig?.globalFilters || [];
 
   return renderFilterList({
     containerId: `ws-filters-${sourceId}`,
-    availableFilterTypes: allFilterTypes,
+    availableFilterTypes: getAllFilterTypes(sourceId),
     currentFilters,
     lockedFilters,
     sourceId,
@@ -16323,6 +16319,14 @@ function readFiltersFromUI(sourceId) {
 
   const filters = [];
 
+  // Core single-value filters (e.g. orientation — rendered as a <select>, not a .ws-filter-section)
+  body.querySelectorAll('.ws-filter-entry:not(.ws-filter-entry-locked)').forEach(entry => {
+    const coreSelect = entry.querySelector('.ws-filter-core-value');
+    if (coreSelect) {
+      filters.push({ type: entry.dataset.filterType, mode: 'require', values: [coreSelect.value] });
+    }
+  });
+
   // Search filters (single-value text input, not inside .ws-filter-section)
   body.querySelectorAll(`.ws-filter-search-value[data-source-id="${CSS.escape(sourceId)}"]`).forEach(input => {
     const val = input.value.trim();
@@ -16333,9 +16337,7 @@ function readFiltersFromUI(sourceId) {
 
   body.querySelectorAll(`.ws-filter-section[data-source-id="${CSS.escape(sourceId)}"]`).forEach(section => {
     const filterType = section.dataset.filterType;
-    const filterTypeDef =
-      (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType) ||
-      (webSourceCoreFilterTypes || []).find(ft => ft.type === filterType);
+    const filterTypeDef = getFilterTypeDef(sourceId, filterType);
     if (!filterTypeDef) return;
 
     // Read mode from the parent entry's data-filter-mode (authoritative in dual-mode),
@@ -16629,9 +16631,7 @@ function updateFilterEntrySummary(entry, sourceId) {
   // Core single-value filter (select directly in entry-body, no .ws-filter-section wrapper)
   const coreSelect = entry.querySelector('.ws-filter-entry-body .ws-filter-core-value');
   if (coreSelect) {
-    const filterTypeDef =
-      (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === coreSelect.dataset.filterType) ||
-      (webSourceCoreFilterTypes || []).find(ft => ft.type === coreSelect.dataset.filterType);
+    const filterTypeDef = getFilterTypeDef(sourceId, coreSelect.dataset.filterType);
     if (filterTypeDef) summaryEl.textContent = generateFilterSummary(filterTypeDef, { values: [coreSelect.value] });
     return;
   }
@@ -16639,9 +16639,7 @@ function updateFilterEntrySummary(entry, sourceId) {
   const section = entry.querySelector('.ws-filter-section');
   if (!section) return; // search filters update live via their own handler
   const filterType = section.dataset.filterType;
-  const filterTypeDef =
-    (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType) ||
-    (webSourceCoreFilterTypes || []).find(ft => ft.type === filterType);
+  const filterTypeDef = getFilterTypeDef(sourceId, filterType);
   if (!filterTypeDef) return;
 
   const entryMode = entry.dataset.filterMode;
@@ -17444,22 +17442,43 @@ function initVirtualTagFilterList(container, sourceId, currentFilters, skipRende
 }
 
 function renderVirtualTagFilters(sourceId, currentFilters, expandedTypes) {
-  const sourceFilterTypes = webSourceFilterTypes[sourceId] || [];
-  const coreTypes = webSourceCoreFilterTypes || [];
-  const allFilterTypes = [...coreTypes, ...sourceFilterTypes];
-  // Both global and source-level filters are locked (inherited).
-  const globalFilters = webSourcesConfig?.globalFilters || [];
-  const sourceFilters = webSourcesConfig?.sources?.[sourceId]?.filters || [];
-  const lockedFilters = [...globalFilters, ...sourceFilters];
-
   return renderFilterList({
     containerId: `ws-vt-filters-${sourceId}`,
-    availableFilterTypes: allFilterTypes,
+    availableFilterTypes: getAllFilterTypes(sourceId),
     currentFilters,
-    lockedFilters,
+    lockedFilters: getLockedFilters(sourceId),
     sourceId,
     expandedTypes,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Filter type helpers — single source of truth for lookups used across render,
+// read, and summary functions.  Avoids the class of bug where a new core filter
+// type (e.g. orientation) renders correctly but is silently dropped on read
+// because a call site only searched source-level types.
+// ---------------------------------------------------------------------------
+
+/** All filter types available for a source: core types + source-specific types. */
+function getAllFilterTypes(sourceId) {
+  return [...(webSourceCoreFilterTypes || []), ...(webSourceFilterTypes[sourceId] || [])];
+}
+
+/** Find the filter type definition for a given type string, checking core types first. */
+function getFilterTypeDef(sourceId, filterType) {
+  return getAllFilterTypes(sourceId).find(ft => ft.type === filterType) || null;
+}
+
+/** Locked filters at the virtual-tag level: global + source filters inherited from config. */
+function getLockedFilters(sourceId) {
+  const globalFilters = webSourcesConfig?.globalFilters || [];
+  const sourceFilters = webSourcesConfig?.sources?.[sourceId]?.filters || [];
+  return [...globalFilters, ...sourceFilters];
+}
+
+/** Get a virtual tag's display label, falling back to the ID. */
+function getVirtualTagLabel(vtId) {
+  return webSourcesConfig?.virtualTags?.[vtId]?.label || vtId;
 }
 
 function readVirtualTagFiltersFromUI() {
@@ -17469,6 +17488,14 @@ function readVirtualTagFiltersFromUI() {
   if (!sourceId) return [];
 
   const filters = [];
+
+  // Core single-value filters (e.g. orientation — rendered as a <select>, not a .ws-filter-section)
+  container.querySelectorAll('.ws-filter-entry:not(.ws-filter-entry-locked)').forEach(entry => {
+    const coreSelect = entry.querySelector('.ws-filter-core-value');
+    if (coreSelect) {
+      filters.push({ type: entry.dataset.filterType, mode: 'require', values: [coreSelect.value] });
+    }
+  });
 
   // Search filters
   container.querySelectorAll(`.ws-filter-search-value[data-source-id="${CSS.escape(sourceId)}"]`).forEach(input => {
@@ -17480,9 +17507,7 @@ function readVirtualTagFiltersFromUI() {
 
   container.querySelectorAll(`.ws-filter-section[data-source-id="${CSS.escape(sourceId)}"]`).forEach(section => {
     const filterType = section.dataset.filterType;
-    const filterTypeDef =
-      (webSourceFilterTypes[sourceId] || []).find(ft => ft.type === filterType) ||
-      (webSourceCoreFilterTypes || []).find(ft => ft.type === filterType);
+    const filterTypeDef = getFilterTypeDef(sourceId, filterType);
     if (!filterTypeDef) return;
 
     const parentEntry = section.closest('.ws-filter-entry');
@@ -18035,18 +18060,11 @@ function renderTestAdHocFilters(expandedTypes) {
     return;
   }
 
-  const sourceFilterTypes = webSourceFilterTypes[sourceId] || [];
-  const coreTypes = webSourceCoreFilterTypes || [];
-  const allFilterTypes = [...coreTypes, ...sourceFilterTypes];
-  const globalFilters = webSourcesConfig?.globalFilters || [];
-  const sourceFilters = webSourcesConfig?.sources?.[sourceId]?.filters || [];
-  const lockedFilters = [...globalFilters, ...sourceFilters];
-
   filtersContainer.innerHTML = renderFilterList({
     containerId: 'ws-test-ad-hoc-filter-list',
-    availableFilterTypes: allFilterTypes,
+    availableFilterTypes: getAllFilterTypes(sourceId),
     currentFilters: webSourceTestAdHocFilters,
-    lockedFilters,
+    lockedFilters: getLockedFilters(sourceId),
     sourceId,
     expandedTypes,
   });
