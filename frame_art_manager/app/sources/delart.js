@@ -680,6 +680,7 @@ const metadataFields = [
   { key: 'medium',         label: 'Medium',         description: 'Materials and techniques' },
   { key: 'dateCreated',    label: 'Date',           description: 'Creation date or period', format: 'date' },
   { key: 'classification', label: 'Classification', description: 'Object type (e.g. Painting, Drawing)' },
+  { key: 'artworkUrl',     label: 'Artwork URL',    description: 'Link to the artwork on Delaware Art Museum' },
   { key: 'source',         label: 'Source',         description: 'Always "Delaware Art Museum"' },
 ];
 
@@ -689,6 +690,7 @@ const defaultMapping = {
   medium:         'medium',
   dateCreated:    'date',
   classification: null,
+  artworkUrl:     'artwork_url',
   source:         'museum',
 };
 

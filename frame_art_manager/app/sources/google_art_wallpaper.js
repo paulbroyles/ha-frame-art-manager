@@ -105,6 +105,7 @@ const metadataFields = [
   { key: 'title',       label: 'Title',       description: 'Artwork title' },
   { key: 'creator',     label: 'Creator',     description: 'Artist or creator name' },
   { key: 'attribution', label: 'Attribution', description: 'Attribution line' },
+  { key: 'artworkUrl',  label: 'Artwork URL',  description: 'Link to the artwork on Google Arts & Culture' },
   { key: 'source',      label: 'Source',      description: 'Source collection name (always "Google Art Wallpaper")' },
 ];
 
@@ -113,6 +114,7 @@ const defaultMapping = {
   title:       'title',
   creator:     { entity: 'creator', attribute: 'name' },
   attribution: null,
+  artworkUrl:  'artwork_url',
   source:      null,
 };
 

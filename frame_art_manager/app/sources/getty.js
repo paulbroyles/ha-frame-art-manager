@@ -528,6 +528,7 @@ const metadataFields = [
   { key: 'dateCreated',     label: 'Date',             description: 'Creation date (e.g. "1890", "negative 1885–1903")' },
   { key: 'culture',         label: 'Culture',          description: 'Cultural origin (e.g. "American", "French")' },
   { key: 'accessionNumber', label: 'Accession Number', description: 'Getty Museum accession number' },
+  { key: 'artworkUrl',       label: 'Artwork URL',      description: 'Link to the artwork on J. Paul Getty Museum' },
   { key: 'source',          label: 'Source',           description: 'Always "J. Paul Getty Museum"' },
 ];
 
@@ -537,6 +538,7 @@ const defaultMapping = {
   dateCreated:     'date',
   culture:         null,
   accessionNumber: null,
+  artworkUrl:      'artwork_url',
   source:          'museum',
 };
 

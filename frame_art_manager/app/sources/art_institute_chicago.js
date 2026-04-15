@@ -747,6 +747,7 @@ const metadataFields = [
   { key: 'department',  label: 'Department',  description: 'AIC curatorial department' },
   { key: 'creditLine',  label: 'Credit Line', description: 'Acquisition or gift credit' },
   { key: 'description', label: 'Description', description: 'Curatorial description' },
+  { key: 'artworkUrl',  label: 'Artwork URL',  description: 'Link to the artwork on Art Institute of Chicago' },
   { key: 'source',      label: 'Source',      description: 'Always "Art Institute of Chicago"' },
 ];
 
@@ -761,6 +762,7 @@ const defaultMapping = {
   department:  null,
   creditLine:  'credit_line',
   description: 'description',
+  artworkUrl:  'artwork_url',
   source:      'museum',
 };
 

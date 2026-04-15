@@ -250,6 +250,7 @@ const metadataFields = [
   { key: 'creator',     label: 'Creator',      description: 'Artist or creator name' },
   { key: 'medium',      label: 'Medium',       description: 'Material or technique (e.g. "Oil on canvas")' },
   { key: 'dateCreated', label: 'Date Created', description: 'Date or year the artwork was created', format: 'date' },
+  { key: 'artworkUrl',  label: 'Artwork URL',   description: 'Link to the artwork on The Metropolitan Museum of Art' },
   { key: 'source',      label: 'Source',       description: 'Source collection name (always "The Metropolitan Museum of Art")' },
 ];
 
@@ -259,6 +260,7 @@ const defaultMapping = {
   creator:     { entity: 'creator', attribute: 'name' },
   medium:      'medium',
   dateCreated: 'date',
+  artworkUrl:  'artwork_url',
   source:      'museum',
 };
 

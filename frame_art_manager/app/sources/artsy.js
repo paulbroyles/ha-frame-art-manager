@@ -355,7 +355,7 @@ const defaultMapping = {
   creator:     { entity: 'creator', attribute: 'name' },
   medium:      'medium',
   dateCreated: 'date',
-  artworkUrl:  'source_url',
+  artworkUrl:  'artwork_url',
   partner:     'museum',
   price:       null,
   source:      null,

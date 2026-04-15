@@ -616,6 +616,7 @@ const metadataFields = [
   { key: 'creditLine',      label: 'Credit Line',    description: 'Acquisition credit' },
   { key: 'gallery',         label: 'Gallery',        description: 'Gallery within Tate where the work is currently displayed (null if not on display)' },
   { key: 'institution',     label: 'Institution',    description: 'Specific Tate gallery (e.g. "Tate Britain", "Tate Modern"); falls back to "Tate" when not on display' },
+  { key: 'artworkUrl',       label: 'Artwork URL',    description: 'Link to the artwork on Tate' },
   { key: 'source',          label: 'Source',         description: 'Always "Tate"' },
 ];
 
@@ -630,6 +631,7 @@ const defaultMapping = {
   creditLine:      null,
   gallery:         null,
   institution:     'museum',
+  artworkUrl:      'artwork_url',
   source:          null,
 };
 

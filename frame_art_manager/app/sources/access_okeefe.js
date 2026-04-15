@@ -469,6 +469,7 @@ const metadataFields = [
   { key: 'accessionNumber',    label: 'Accession Number',    description: 'Museum accession number' },
   { key: 'description',        label: 'Description',         description: 'Curatorial description of the artwork' },
   { key: 'copyright',          label: 'Copyright',           description: 'Copyright notice (e.g. "© Georgia O\'Keeffe Museum")' },
+  { key: 'artworkUrl',          label: 'Artwork URL',         description: "Link to the artwork on Access O'Keeffe" },
   { key: 'source',             label: 'Source',              description: "Always \"Access O'Keeffe\"" },
 ];
 
@@ -483,6 +484,7 @@ const defaultMapping = {
   accessionNumber:    null,
   description:        'description',
   copyright:          null,
+  artworkUrl:         'artwork_url',
   source:             null,
 };
 

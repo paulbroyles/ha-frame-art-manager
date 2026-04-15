@@ -670,6 +670,7 @@ const metadataFields = [
   { key: 'medium',      label: 'Medium',        description: 'Materials and technique' },
   { key: 'dimensions',  label: 'Dimensions',    description: 'Physical dimensions' },
   { key: 'creditLine',  label: 'Credit Line',   description: 'Acquisition credit or collection name' },
+  { key: 'artworkUrl',  label: 'Artwork URL',   description: 'Link to the artwork on National Gallery of Art' },
   { key: 'source',      label: 'Source',        description: 'Always "National Gallery of Art"' },
 ];
 
@@ -680,6 +681,7 @@ const defaultMapping = {
   medium:      'medium',
   dimensions:  'dimensions',
   creditLine:  'credit_line',
+  artworkUrl:  'artwork_url',
   source:      'museum',
 };
 

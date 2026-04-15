@@ -648,6 +648,7 @@ const metadataFields = [
   { key: 'dateCreated',        label: 'Date',           description: 'Date or year of creation (e.g. "1929", "1928–29")' },
   { key: 'classification',     label: 'Classification', description: 'Object type (e.g. "Painting", "Photograph")' },
   { key: 'department',         label: 'Department',     description: 'MoMA curatorial department' },
+  { key: 'artworkUrl',         label: 'Artwork URL',    description: 'Link to the artwork on The Museum of Modern Art (MoMA)' },
   { key: 'source',             label: 'Source',         description: 'Always "The Museum of Modern Art (MoMA)"' },
 ];
 
@@ -661,6 +662,7 @@ const defaultMapping = {
   dateCreated:        'date',
   classification:     null,
   department:         null,
+  artworkUrl:         'artwork_url',
   source:             'museum',
 };
 

@@ -933,6 +933,7 @@ const metadataFields = [
   { key: 'title',       label: 'Title',        description: 'Artwork title from Wikimedia Commons ObjectName' },
   { key: 'creator',     label: 'Creator',      description: 'Artist or maker name' },
   { key: 'dateCreated', label: 'Date Created', description: 'Date or period the artwork was created', format: 'date' },
+  { key: 'artworkUrl',  label: 'Artwork URL',   description: 'Link to the artwork on Wikimedia Commons' },
   { key: 'source',      label: 'Source',       description: 'Source label (Wikimedia Commons, or institution name for wrappers)' },
 ];
 
@@ -940,6 +941,7 @@ const defaultMapping = {
   title:       'title',
   creator:     { entity: 'creator', attribute: 'name' },
   dateCreated: 'date',
+  artworkUrl:  'artwork_url',
   source:      null,
 };
 

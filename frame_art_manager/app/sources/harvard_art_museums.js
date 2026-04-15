@@ -641,6 +641,7 @@ const metadataFields = [
   { key: 'creator',     label: 'Creator',      description: 'Artist or maker name' },
   { key: 'medium',      label: 'Medium',       description: 'Technique or material (e.g. "Oil on canvas")' },
   { key: 'dateCreated', label: 'Date Created', description: 'Date or period the artwork was created', format: 'date' },
+  { key: 'artworkUrl',  label: 'Artwork URL',   description: 'Link to the artwork on Harvard Art Museums' },
   { key: 'source',      label: 'Source',       description: 'Always "Harvard Art Museums"' },
 ];
 
@@ -649,6 +650,7 @@ const defaultMapping = {
   creator:     { entity: 'creator', attribute: 'name' },
   medium:      'medium',
   dateCreated: 'date',
+  artworkUrl:  'artwork_url',
   source:      'museum',
 };
 

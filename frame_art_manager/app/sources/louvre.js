@@ -363,6 +363,7 @@ const metadataFields = [
   { key: 'dateCreated', label: 'Date Created', description: 'Creation date or period', format: 'date' },
   { key: 'collection',  label: 'Collection',   description: 'Louvre department name (in French)' },
   { key: 'attribution', label: 'Attribution',  description: 'Copyright attribution line from the Louvre' },
+  { key: 'artworkUrl',  label: 'Artwork URL',  description: 'Link to the artwork on Musée du Louvre' },
   { key: 'source',      label: 'Source',       description: 'Source collection name (always "Musée du Louvre")' },
 ];
 
@@ -373,6 +374,7 @@ const defaultMapping = {
   dateCreated: 'date',
   collection:  null,
   attribution: null,
+  artworkUrl:  'artwork_url',
   source:      'museum',
 };
 

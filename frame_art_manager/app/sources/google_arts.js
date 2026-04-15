@@ -798,7 +798,7 @@ function parseStructuredFields(av12) {
  * Parse all available metadata fields from a stella.av block.
  * Used by both fetchAssetDetails and fetchByIdentifier so extraction logic
  * stays in one place. Returns the subset of FIELD_DEFS fields that come from
- * the API response (excludes color/source/artworkUrl which are added by callers).
+ * the API response (excludes color/source/artworkUrl which are added by callers after this function returns).
  *
  * @param {Array} av - The stella.av array from the parsed API response
  * @returns {object} Extracted metadata fields (values are strings or null)
@@ -1301,6 +1301,7 @@ const FIELD_DEFS = [
   { key: 'additionalInfo',     label: 'Additional Info',  description: 'Additional artwork information as provided by the museum',       defaultMapHint: null     },
   { key: 'color',              label: 'Dominant Color',   description: 'Dominant color of the image as a hex string (e.g. "#17120c")',   defaultMapHint: null     },
   { key: 'source',             label: 'Source',           description: 'Source collection name (always "Google Arts & Culture")',        defaultMapHint: null     },
+  { key: 'artworkUrl',         label: 'Artwork URL',      description: 'Link to the artwork on Google Arts & Culture',                   defaultMapHint: 'artwork_url' },
 ];
 
 const metadataFields = FIELD_DEFS.map(({ key, label, description, format }) => ({ key, label, description, ...(format && { format }) }));
