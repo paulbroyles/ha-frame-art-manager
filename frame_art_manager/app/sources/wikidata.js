@@ -492,23 +492,41 @@ async function getPool(filters, creatorQid) {
   const cached = poolCache.get(key);
   if (cached && Date.now() < cached.expiresAt) return cached.qids;
 
-  const shard = shouldShard(filters, creatorQid)
-    ? Math.floor(Math.random() * SHARD_COUNT)
-    : null;
+  const useSharding = shouldShard(filters, creatorQid);
 
-  const query = buildPoolQuery(filters, creatorQid, shard);
-  const shardLabel = shard !== null ? ` shard ${shard}/${SHARD_COUNT}` : '';
-  console.log(`[wikidata] Fetching QID pool${shardLabel} (key: ${key.slice(0, 80)}...)`);
-  const bindings = await sparqlQuery(query, SPARQL_TIMEOUT_MS);
+  // When sharding, retry up to SHARD_COUNT times with different shards.
+  // Individual shards can be empty for narrow filters (e.g. landscape paintings
+  // in a specific period), so we keep trying until we find a non-empty shard.
+  const maxAttempts = useSharding ? Math.min(SHARD_COUNT, 5) : 1;
+  const triedShards = new Set();
+  let qids = [];
 
-  const qids = bindings
-    .map(b => b.item?.value?.replace('http://www.wikidata.org/entity/', ''))
-    .filter(Boolean);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let shard = null;
+    if (useSharding) {
+      do { shard = Math.floor(Math.random() * SHARD_COUNT); } while (triedShards.has(shard));
+      triedShards.add(shard);
+    }
+
+    const query = buildPoolQuery(filters, creatorQid, shard);
+    const shardLabel = shard !== null ? ` shard ${shard}/${SHARD_COUNT}` : '';
+    console.log(`[wikidata] Fetching QID pool${shardLabel} (key: ${key.slice(0, 80)}...)`);
+    const bindings = await sparqlQuery(query, SPARQL_TIMEOUT_MS);
+
+    qids = bindings
+      .map(b => b.item?.value?.replace('http://www.wikidata.org/entity/', ''))
+      .filter(Boolean);
+
+    if (qids.length > 0) break;
+    if (attempt < maxAttempts - 1) {
+      console.log(`[wikidata] Shard ${shard} returned 0 items — retrying with different shard`);
+    }
+  }
 
   if (qids.length === 0) throw new Error('Wikidata returned no items for the current filters');
 
   poolCache.set(key, { qids, expiresAt: Date.now() + POOL_TTL_MS });
-  console.log(`[wikidata] Pool cached: ${qids.length} QIDs${shardLabel} for "${key.slice(0, 80)}"`);
+  console.log(`[wikidata] Pool cached: ${qids.length} QIDs for "${key.slice(0, 80)}"`);
   return qids;
 }
 
