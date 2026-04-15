@@ -181,6 +181,7 @@ const BUILTIN_SOURCES = {
   google_art_wallpaper: {
     id: 'google_art_wallpaper',
     name: 'Google Art Wallpaper',
+    linkName: 'Google Arts & Culture',
     description: 'Curated widescreen artworks from the Google Art Wallpaper collection (~349 works), pre-formatted for large displays',
     type: 'google_art_wallpaper',
     // All entries are center-cropped to 3840×2160 — landscape only.
@@ -2447,3 +2448,4 @@ module.exports.resolveAspectRatioFilter = resolveAspectRatioFilter;
 module.exports.isSourceCompatible = isSourceCompatible;
 module.exports.mergeFilterCascade = mergeFilterCascade;
 module.exports.fetchWithRetry = fetchWithRetry;
+module.exports.BUILTIN_SOURCES = BUILTIN_SOURCES;

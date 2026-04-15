@@ -17,7 +17,7 @@ Source modules are responsible only for fetching and filtering.
 
 1. Create `frame_art_manager/app/sources/<source_id>.js` following the contract below.
 2. Add the module to `sources/index.js`.
-3. Add a `BUILTIN_SOURCES` entry in `web_sources.js`.
+3. Add a `BUILTIN_SOURCES` entry in `web_sources.js`. The `name` field is the human-readable source name displayed in the UI. It is also used for the "View at &lt;source&gt;" link on the artwork page — always include it. If the link should say something different from the internal source name (e.g. a backend source that surfaces on a different branded site), add `linkName` to override just the link label.
 4. Export `selectMode(filters)` — even if the source has only one mode, this is required.
 5. If the source has filterable dimensions (e.g. media categories, object types), export `getFilterTypes()`.
 6. If the source has non-filter options derived from settings (e.g. fetchRichMetadata), export `getExtraOptions(settings)`.

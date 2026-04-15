@@ -5,7 +5,7 @@ const QRCode = require('qrcode');
 const router = express.Router();
 
 const { haRequest } = require('./ha');
-const { readWebSourcesConfig } = require('./web_sources');
+const { readWebSourcesConfig, BUILTIN_SOURCES } = require('./web_sources');
 const MetadataHelper = require('../metadata_helper');
 const ImageEditService = require('../image_edit_service');
 
@@ -167,14 +167,6 @@ function resolveEntityRefs(entityRefs, entityInstances) {
 
 // ── Page Rendering ────────────────────────────────────────────────────────────
 
-// Human-readable names for built-in source IDs.
-const SOURCE_DISPLAY_NAMES = {
-  google_arts:         'Google Arts & Culture',
-  google_art_wallpaper:'Google Arts & Culture',
-  met_museum:          'Metropolitan Museum of Art',
-  moma:                'MoMA',
-};
-
 function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAttributes, { deviceId = null, sourceType = '', filename = null, addonHome = '' } = {}) {
   const primaryFields  = fields.filter(f => f.role === 'primary');
   const secondaryFields = fields.filter(f => f.role === 'secondary');
@@ -228,10 +220,11 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
     ? `<p class="description">${escapeHtml(description)}</p>`
     : '';
 
-  const sourceName  = (sourceId && SOURCE_DISPLAY_NAMES[sourceId]) || null;
+  const _src = sourceId && BUILTIN_SOURCES[sourceId];
+  const sourceName  = (_src && (_src.linkName || _src.name)) || null;
   const sourceLinkHtml = artworkUrl
     ? `<a href="${escapeHtml(artworkUrl)}" target="_blank" rel="noopener" class="ext-link">
-        View on ${escapeHtml(sourceName || 'source')} &rarr;
+        View at ${escapeHtml(sourceName || 'source')} &rarr;
        </a>`
     : '';
 
