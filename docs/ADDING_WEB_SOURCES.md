@@ -62,7 +62,7 @@ types the source doesn't know about — these should be silently skipped.
     medium: string | null,         // Material/technique (e.g. "Oil on canvas")
     attribution: string | null,    // Attribution line if different from creator
     dateCreated: string | null,    // Human-readable date (e.g. "1889", "ca. 1880–1890")
-    artworkUrl: string | null,     // Canonical URL to artwork page (not in metadataFields)
+    artworkUrl: string | null,     // Canonical URL to artwork page on the source website — REQUIRED
     source: string,                // Human-readable source name — always include this
     // Additional fields as appropriate for the source:
     // repository, creatorNationality, dimensions, description, color, ...
@@ -70,8 +70,11 @@ types the source doesn't know about — these should be silently skipped.
 }
 ```
 
-`artworkUrl` is used internally (stored in perTvCache) but is not a mappable field.
-All other fields returned in `metadata` should be declared in `metadataFields` so users can map them.
+**`artworkUrl` is required** and must be included in every source's `metadataFields` and `defaultMapping`
+(mapped to `'artwork_url'`). It is stored in the per-TV cache and forwarded to the HA artwork sensor
+so that "View On..." links work. Sources that lack a stable per-artwork URL should set it to `null`.
+
+All fields returned in `metadata` should be declared in `metadataFields` so users can map them.
 
 **Errors:** Throw a plain `Error` with a descriptive message on network failure, empty results, or
 an unsatisfiable filter (e.g. portrait requested from a landscape-only source). The route layer
@@ -107,11 +110,12 @@ Every source must also export `metadataFields` and `defaultMapping`:
 ```js
 // Declares which metadata fields this source provides.
 // Consumed by the UI to render per-source mapping controls.
-// Include every field that appears in fetchRandomArtwork's metadata return value
-// (except artworkUrl, which is internal-only).
+// Include every field that appears in fetchRandomArtwork's metadata return value.
+// artworkUrl is REQUIRED here (see fetchRandomArtwork contract above).
 const metadataFields = [
-  { key: 'title',  label: 'Title',  description: 'Artwork title' },
-  { key: 'source', label: 'Source', description: 'Source collection name (always "My Source")' },
+  { key: 'title',      label: 'Title',       description: 'Artwork title' },
+  { key: 'artworkUrl', label: 'Artwork URL',  description: 'Link to the artwork on My Source' },
+  { key: 'source',     label: 'Source',      description: 'Source collection name (always "My Source")' },
   // ... add all fields this source provides
 ];
 
@@ -119,9 +123,11 @@ const metadataFields = [
 // Hint strings are matched case-insensitively against available HA attributes at render time.
 // Fields whose hint matches an existing attribute are auto-selected in the UI (shown as "auto").
 // User can override any field; "Reset to Auto-detected" clears overrides.
+// artworkUrl MUST map to 'artwork_url' — this is how View On links reach the HA sensor.
 const defaultMapping = {
-  title:  'title',   // look for an HA attribute named 'title' (case-insensitive)
-  source: null,      // no good guess — leave unmapped by default
+  title:      'title',        // look for an HA attribute named 'title' (case-insensitive)
+  artworkUrl: 'artwork_url',  // REQUIRED — do not omit or set to null
+  source:     null,           // no good guess — leave unmapped by default
 };
 ```
 
