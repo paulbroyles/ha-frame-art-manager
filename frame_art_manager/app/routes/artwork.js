@@ -86,16 +86,22 @@ function buildDisplayFields(customDataOrder, attributeValues, entitySnapshot, en
       // For web sources: entitySnapshot has { entityId: { attrName: value } }
       const snapshotData = entitySnapshot?.[entry.id];
       if (snapshotData) {
-        // Use first attribute as primary display value
+        // Merge in the stored entity instance to pick up enriched fields (lifespan,
+        // nationality, etc.) that weren't in the per-artwork snapshot.
         const primaryAttr = et.attributes?.[0];
         const primaryValue = primaryAttr ? snapshotData[primaryAttr] : null;
+        const instanceKey = primaryValue ? slugify(String(primaryValue)) : null;
+        const storedInstance = instanceKey ? (entityInstances?.[entry.id]?.[instanceKey] || {}) : {};
+        // Snapshot wins over instance (source data takes precedence over enrichment).
+        const merged = { ...storedInstance, ...snapshotData };
+
         if (primaryValue) {
           fields.push({
             label: et.name,
             value: String(primaryValue),
             role,
             entityAttrs: et.attributes
-              .map(a => ({ name: a, value: snapshotData[a] }))
+              .map(a => ({ name: a, value: merged[a] }))
               .filter(a => a.value !== undefined && a.value !== null && a.value !== '')
           });
         }
