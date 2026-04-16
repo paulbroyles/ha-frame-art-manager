@@ -426,8 +426,14 @@ async function fetchItemDetail(qid) {
   const entity = itemResp.data.entities?.[qid];
   if (!entity || entity.missing === '') return null;
 
-  const title        = entity.labels?.en?.value || null;
   const claims       = entity.claims || {};
+
+  // P1476 = title property (monolingual text claim, often more reliable than label).
+  // Fall back to English label, then any available label (languagefallback may return non-en key).
+  const p1476Value = claims.P1476?.[0]?.mainsnak?.datavalue?.value?.text || null;
+  const enLabel    = entity.labels?.en?.value || null;
+  const anyLabel   = enLabel || Object.values(entity.labels || {})[0]?.value || null;
+  const title      = p1476Value || anyLabel || null;
 
   // P18 → Wikimedia Commons Special:FilePath URL
   const imageFile    = claims.P18?.[0]?.mainsnak?.datavalue?.value;
@@ -477,6 +483,7 @@ async function fetchItemDetail(qid) {
     imageUrl,
     title,
     creator:    creatorQid    ? labelMap[creatorQid]    : null,
+    creatorQid,
     dateRaw,
     movement:   movementQid   ? labelMap[movementQid]   : null,
     genre:      genreQid      ? labelMap[genreQid]      : null,
@@ -874,6 +881,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
         metadata: {
           title:       detail.title,
           creator:     detail.creator,
+          creatorQid:  detail.creatorQid,
           medium:      detail.medium,
           dimensions:  formatDimensions(detail.height, detail.width),
           dateCreated: formatDate(detail.dateRaw),
@@ -933,6 +941,7 @@ async function fetchRandomArtwork(filters = [], options = {}) {
         metadata: {
           title:       detail.title,
           creator:     detail.creator,
+          creatorQid:  detail.creatorQid,
           medium:      detail.medium,
           dimensions:  formatDimensions(detail.height, detail.width),
           dateCreated: formatDate(detail.dateRaw),

@@ -1714,11 +1714,13 @@ router.post('/fetch-and-send', async (req, res) => {
 
     // Best-effort: enrich entity instances with data from the web source.
     // Existing instances: patch empty fields only (content wins).
-    // Unknown artists: fire-and-forget Wikidata auto-link with lifespan validation.
+    // New artists: await auto-link with a 3s timeout so the enriched instance is
+    // available on the first artwork page load. Falls back to fire-and-forget on timeout.
     // All failures are non-fatal.
     if (Object.keys(entitySnapshot).length > 0) {
       try {
         const metadata = await helper.readMetadata();
+        const autoLinkPromises = [];
         for (const [entityId, snapshotAttrs] of Object.entries(entitySnapshot)) {
           const entityType = (metadata.entityTypes || []).find(e => e.id === entityId);
           if (!entityType || !entityType.attributes.length) continue;
@@ -1729,9 +1731,18 @@ router.post('/fetch-and-send', async (req, res) => {
           if ((metadata.entityInstances?.[entityId] || {})[key]) {
             await helper.patchEntityInstance(entityId, key, snapshotAttrs);
           } else if (entityType.kind === 'artist') {
-            autoLinkArtistFromWebSource(helper, entityId, entityType, snapshotAttrs)
-              .catch(err => console.warn('[fetch-and-send] Auto-link failed (non-fatal):', err.message));
+            const wikidataIdHint = artMetadata?.creatorQid || null;
+            const linkPromise = autoLinkArtistFromWebSource(helper, entityId, entityType, snapshotAttrs, { wikidataIdHint });
+            autoLinkPromises.push(linkPromise.catch(err => console.warn('[fetch-and-send] Auto-link failed (non-fatal):', err.message)));
           }
+        }
+        // Await auto-links with a 3s timeout — fast when QID hint is available (~300ms),
+        // graceful fallback when name search takes longer.
+        if (autoLinkPromises.length > 0) {
+          await Promise.race([
+            Promise.all(autoLinkPromises),
+            new Promise(resolve => setTimeout(resolve, 3000)),
+          ]);
         }
       } catch (err) {
         console.warn('[fetch-and-send] Entity enrichment failed (non-fatal):', err.message);

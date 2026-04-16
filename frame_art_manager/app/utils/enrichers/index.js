@@ -90,11 +90,24 @@ async function previewArtistEnrichment(entityType, snapshotAttrs) {
   return snapshotAttrs;
 }
 
-async function autoLinkArtistFromWebSource(helper, entityId, entityType, snapshotAttrs) {
+async function autoLinkArtistFromWebSource(helper, entityId, entityType, snapshotAttrs, { wikidataIdHint } = {}) {
   if (entityType.kind !== 'artist') return;
   const keyAttr = entityType.attributes[0];
   const name = snapshotAttrs[keyAttr];
   if (!name) return;
+
+  // If the source already knows the creator's Wikidata QID (e.g. Wikidata source),
+  // use it directly — no name search needed.
+  if (wikidataIdHint) {
+    const wikidataData = await enrichArtist(wikidataIdHint);
+    if (wikidataData && !lifespanConflict(snapshotAttrs.lifespan, wikidataData.lifespan)) {
+      const merged = mergePreferContent(snapshotAttrs, wikidataData);
+      await helper.upsertEntityInstance(entityId, merged, {
+        _links: { wikidataId: wikidataIdHint },
+      });
+      return;
+    }
+  }
 
   const candidates = await suggestArtists(name, 3);
   for (const candidate of candidates) {
