@@ -28,7 +28,6 @@ const blacklistRouter = require('./routes/blacklist');
 
 const app = express();
 const PORT = process.env.PORT || 8099;
-const FRAME_ART_HOME = process.env.FRAME_ART_HOME || '';
 
 // Get the frame art path from environment variable or use defaults
 // Production (Home Assistant add-on): /config/www/frame_art
@@ -55,9 +54,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Expose add-on configuration to templates/routes
-app.locals.addonHome = FRAME_ART_HOME;
-
 // Serve static files from public directory
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -69,7 +65,6 @@ app.use('/cache', express.static(path.join(FRAME_ART_PATH, 'web_source_cache')))
 // Make FRAME_ART_PATH available to all routes
 app.use((req, res, next) => {
   req.frameArtPath = FRAME_ART_PATH;
-  req.frameArtHome = FRAME_ART_HOME;
   next();
 });
 
@@ -95,9 +90,8 @@ app.use('/api/blacklist',      blacklistRouter);
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ 
-    status: 'ok', 
+    status: 'ok',
     frameArtPath: FRAME_ART_PATH,
-    home: FRAME_ART_HOME || null,
     env: process.env.NODE_ENV || 'development',
     timestamp: new Date().toISOString()
   });

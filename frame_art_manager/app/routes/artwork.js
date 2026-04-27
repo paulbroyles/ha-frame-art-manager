@@ -173,7 +173,7 @@ function resolveEntityRefs(entityRefs, entityInstances) {
 
 // ── Page Rendering ────────────────────────────────────────────────────────────
 
-function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAttributes, { deviceId = null, sourceType = '', filename = null, addonHome = '' } = {}) {
+function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAttributes, { deviceId = null, sourceType = '', filename = null } = {}) {
   const primaryFields  = fields.filter(f => f.role === 'primary');
   const secondaryFields = fields.filter(f => f.role === 'secondary');
   const detailFields   = fields.filter(f => f.role === 'detail');
@@ -426,7 +426,7 @@ function renderArtworkPage(tvName, fields, imageUrl, artworkUrl, sourceId, rawAt
     });
 
     // Action buttons
-    const BASE = ${JSON.stringify(addonHome)};
+    const BASE = '..';
     const SOURCE_TYPE = ${JSON.stringify(sourceType)};
     const DEVICE_ID   = ${JSON.stringify(deviceId)};
     const ARTWORK_URL = ${JSON.stringify(artworkUrl)};
@@ -604,7 +604,7 @@ router.get('/:tvId', async (req, res) => {
 
     const html = renderArtworkPage(
       tvName, fields, `/artwork${imageUrl}`, artworkUrl, sourceId, attributeValues,
-      { deviceId, sourceType, filename: localFilename, addonHome: req.app.locals.addonHome || '..' }
+      { deviceId, sourceType, filename: localFilename }
     );
     res.send(html);
   } catch (error) {
