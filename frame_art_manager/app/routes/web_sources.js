@@ -10,6 +10,10 @@ const { applyFieldFormat } = require('../utils/fieldFormatters');
 const MetadataHelper = require('../metadata_helper');
 const { autoLinkArtistFromWebSource, enrichEntitySnapshotPreview } = require('../utils/enrichers');
 const { readMoods } = require('./moods');
+const {
+  computeConfigFingerprint, readPrefetch, writePrefetch,
+  deletePrefetch, deleteAllPrefetches, listPrefetches,
+} = require('../utils/prefetchCache');
 
 // Source modules — each must export fetchRandomArtwork, selectMode, metadataFields, and defaultMapping.
 // Optional: settingsSchema, getExtraOptions, getFilterTypes, getMetadataFields, alreadyProcessed.
@@ -463,10 +467,23 @@ async function readWebSourcesConfig(frameArtPath) {
 
 /**
  * Write web sources config to web_sources.json.
+ * Auto-invalidates pre-fetched images when source-selection fields change
+ * (fingerprint mismatch), so stale pre-fetches are never used after a config edit.
+ * Routine writes that only touch perTvCache/stagedCache/webSourceRecency don't
+ * change the fingerprint and won't trigger invalidation.
  */
 async function writeWebSourcesConfig(frameArtPath, config) {
   const configPath = webSourcesConfigPath(frameArtPath);
+  // Read existing fingerprint before overwriting so we can detect meaningful changes.
+  let prevFp = null;
+  try {
+    const raw = await fs.readFile(configPath, 'utf8');
+    prevFp = computeConfigFingerprint(JSON.parse(raw));
+  } catch { /* file missing on first write — treat as no previous config */ }
   await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+  if (prevFp !== null && prevFp !== computeConfigFingerprint(config)) {
+    deleteAllPrefetches(frameArtPath).catch(() => {});
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1527,8 +1544,30 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
 
   // Resolve virtual tag (mood keyword search acts as a synthetic unified search tag).
   let virtualTag = null;
-  if (moodKeyword) {
-    virtualTag = { id: '__mood_search__', sourceId: null, queryMode: 'search', queryParams: { keyword: moodKeyword }, filters: [] };
+  let resolvedMoodKeyword = moodKeyword;
+
+  // If no virtualTagId or moodKeyword but moods with search_terms are active,
+  // auto-pick a keyword using the same weighted-random logic as shuffle/select.
+  // This allows replenishPrefetch to pre-fetch a mood-keyword image without
+  // needing to call back through the shuffle route.
+  if (!resolvedMoodKeyword && !virtualTagId && !sourceId && activeMoodDefs.length > 0) {
+    const composing = activeMoodDefs.filter(m => (m.search_terms || []).length > 0 && m.search_compose !== false);
+    const standalone = activeMoodDefs.filter(m => (m.search_terms || []).length > 0 && m.search_compose === false);
+    const entries = [];
+    if (composing.length > 0) {
+      const composedKeyword = composing.flatMap(m => m.search_terms).join(' ');
+      entries.push({ keyword: composedKeyword, weight: composing.reduce((s, m) => s + (m.strength || 1.0), 0) / composing.length });
+    }
+    standalone.forEach(m => entries.push({ keyword: m.search_terms.join(' '), weight: m.strength || 1.0 }));
+    if (entries.length > 0) {
+      const totalWeight = entries.reduce((s, e) => s + e.weight, 0);
+      let rand = Math.random() * totalWeight;
+      resolvedMoodKeyword = entries.find(e => (rand -= e.weight) <= 0)?.keyword || entries[entries.length - 1].keyword;
+    }
+  }
+
+  if (resolvedMoodKeyword) {
+    virtualTag = { id: '__mood_search__', sourceId: null, queryMode: 'search', queryParams: { keyword: resolvedMoodKeyword }, filters: [] };
   } else if (virtualTagId) {
     virtualTag = webSources.virtualTags[virtualTagId];
     if (!virtualTag) {
@@ -1601,6 +1640,36 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
   };
 }
 
+/**
+ * Fetch and store the next image for a device in the background.
+ * Errors are logged but not thrown — this is always non-fatal.
+ */
+async function replenishPrefetch(frameArtPath, deviceId, { virtualTagId, tvOrientation, activeMoods = [], fingerprint }) {
+  try {
+    const fakeReq = { frameArtPath };
+    const result = await fetchAndProcessWebSource(fakeReq, {
+      virtualTagId,
+      tvOrientation,
+      deviceId,
+      activeMoods,
+      moodKeyword: null,  // never pre-fetch keyword-search moods
+    });
+    await writePrefetch(frameArtPath, deviceId, {
+      fingerprint,
+      virtualTagId: virtualTagId || null,
+      activeMoods,
+      ext: result.ext,
+      buffer: result.processedBuffer,
+      artMetadata: result.artMetadata,
+      attributeSnapshot: result.attributeSnapshot,
+      entitySnapshot: result.entitySnapshot,
+    });
+    console.log(`[prefetch] Stored next image for device ${deviceId} (virtualTagId=${virtualTagId})`);
+  } catch (err) {
+    console.warn(`[prefetch] Replenish failed for device ${deviceId} (non-fatal):`, err.message);
+  }
+}
+
 // POST /api/web-sources/fetch-and-send
 // Body: { deviceId, select: true|false, screenOn?, matte?, virtualTagId?, sourceId?, tvOrientation? }
 //
@@ -1620,15 +1689,56 @@ router.post('/fetch-and-send', async (req, res) => {
     const MAX_BLACKLIST_RETRIES = 5;
     let fetchResult;
     const helper = new MetadataHelper(req.frameArtPath);
-    for (let attempt = 0; attempt < MAX_BLACKLIST_RETRIES; attempt++) {
-      fetchResult = await fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId, activeMoods, moodKeyword });
-      const artworkUrl = fetchResult.artMetadata?.artworkUrl;
-      if (!artworkUrl || !(await helper.isBlacklisted('web', artworkUrl))) break;
-      console.log(`[fetch-and-send] Skipping blacklisted artwork (attempt ${attempt + 1}): ${artworkUrl}`);
-      if (attempt === MAX_BLACKLIST_RETRIES - 1) {
-        return res.status(503).json({ error: 'All fetched artworks are blacklisted; try again later' });
+
+    // Check pre-fetch cache: use stored image if fingerprint + virtualTagId + activeMoods match.
+    // Skip only when sourceId is set (direct-source test dispatch, not from shuffler).
+    // Mood keyword-search is fine: we pre-fetch with a randomly chosen keyword ahead of time;
+    // at use time we only check that the active moods still match, not which keyword was picked.
+    const sortedActiveMoods = [...(activeMoods || [])].sort();
+    const hasMoodsOrVirtualTag = virtualTagId || sortedActiveMoods.length > 0;
+    let usedPrefetch = false;
+    let prefetchFingerprint = null;
+    if (hasMoodsOrVirtualTag && !sourceId) {
+      const currentWebSources = await readWebSourcesConfig(req.frameArtPath);
+      prefetchFingerprint = computeConfigFingerprint(currentWebSources);
+      const cached = await readPrefetch(req.frameArtPath, deviceId);
+      const moodsMatch = cached && JSON.stringify(cached.activeMoods || []) === JSON.stringify(sortedActiveMoods);
+      if (cached && cached.fingerprint === prefetchFingerprint && cached.virtualTagId === (virtualTagId || null) && moodsMatch) {
+        const artworkUrl = cached.artMetadata?.artworkUrl;
+        if (!artworkUrl || !(await helper.isBlacklisted('web', artworkUrl))) {
+          console.log(`[fetch-and-send] Using pre-fetched image for device ${deviceId} (virtualTagId=${virtualTagId})`);
+          const buffer = await fs.readFile(cached.imagePath);
+          fetchResult = {
+            processedBuffer: buffer,
+            imageBuffer: buffer,
+            ext: cached.ext,
+            artMetadata: cached.artMetadata,
+            attributeSnapshot: cached.attributeSnapshot || {},
+            entitySnapshot: cached.entitySnapshot || {},
+            chosenSourceId: null,
+            virtualTagId,
+            webSources: currentWebSources,
+          };
+          usedPrefetch = true;
+          await deletePrefetch(req.frameArtPath, deviceId);
+        } else {
+          console.log(`[fetch-and-send] Pre-fetched image is blacklisted — falling through to live fetch`);
+        }
       }
     }
+
+    if (!usedPrefetch) {
+      for (let attempt = 0; attempt < MAX_BLACKLIST_RETRIES; attempt++) {
+        fetchResult = await fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrientation, deviceId, activeMoods, moodKeyword });
+        const artworkUrl = fetchResult.artMetadata?.artworkUrl;
+        if (!artworkUrl || !(await helper.isBlacklisted('web', artworkUrl))) break;
+        console.log(`[fetch-and-send] Skipping blacklisted artwork (attempt ${attempt + 1}): ${artworkUrl}`);
+        if (attempt === MAX_BLACKLIST_RETRIES - 1) {
+          return res.status(503).json({ error: 'All fetched artworks are blacklisted; try again later' });
+        }
+      }
+    }
+
     const {
       processedBuffer, imageBuffer, ext, artMetadata,
       attributeSnapshot, entitySnapshot, chosenSourceId,
@@ -1749,6 +1859,25 @@ router.post('/fetch-and-send', async (req, res) => {
       }
     }
 
+    // Kick off background replenish after a select=true send so the next shuffle
+    // can skip the fetch+process overhead.  Only when we know the virtualTagId
+    // (i.e. this was a tagset-driven dispatch, not a direct-source test fetch)
+    // and no moods are active (fingerprint wouldn't capture them anyway).
+    const replenishVirtualTagId = resolvedVirtualTagId || virtualTagId;
+    const replenishMoods = activeMoods || [];
+    if (select && (replenishVirtualTagId || replenishMoods.length > 0) && !sourceId) {
+      if (!prefetchFingerprint) {
+        const currentWebSources = webSources || await readWebSourcesConfig(req.frameArtPath);
+        prefetchFingerprint = computeConfigFingerprint(currentWebSources);
+      }
+      setImmediate(() => replenishPrefetch(req.frameArtPath, deviceId, {
+        virtualTagId: replenishVirtualTagId || null,
+        tvOrientation,
+        activeMoods: replenishMoods,
+        fingerprint: prefetchFingerprint,
+      }));
+    }
+
     res.json({
       success: true,
       contentId,
@@ -1767,6 +1896,64 @@ router.post('/fetch-and-send', async (req, res) => {
     );
     if (error.stack && !isTimeout) console.error('[fetch-and-send] Stack:', error.stack);
     res.status(status).json({ error: error.message || 'Failed to fetch and send web source image' });
+  }
+});
+
+// POST /api/web-sources/prefetch/:deviceId
+// Body: { virtualTagId, tvOrientation? }
+// Queues a background pre-fetch for the device; returns immediately.
+router.post('/prefetch/:deviceId', async (req, res) => {
+  const { deviceId } = req.params;
+  const { virtualTagId = null, tvOrientation, activeMoods = [] } = req.body || {};
+  if (!virtualTagId && !activeMoods.length) {
+    return res.status(400).json({ error: 'virtualTagId or activeMoods is required' });
+  }
+  try {
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+    const fingerprint = computeConfigFingerprint(webSources);
+    setImmediate(() => replenishPrefetch(req.frameArtPath, deviceId, { virtualTagId, tvOrientation, activeMoods, fingerprint }));
+    res.json({ queued: true, deviceId, virtualTagId, fingerprint });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/web-sources/prefetch/:deviceId
+router.delete('/prefetch/:deviceId', async (req, res) => {
+  const { deviceId } = req.params;
+  try {
+    await deletePrefetch(req.frameArtPath, deviceId);
+    res.json({ deleted: true, deviceId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/web-sources/prefetch
+router.delete('/prefetch', async (req, res) => {
+  try {
+    await deleteAllPrefetches(req.frameArtPath);
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/web-sources/prefetch/status
+router.get('/prefetch/status', async (req, res) => {
+  try {
+    const prefetches = await listPrefetches(req.frameArtPath);
+    const webSources = await readWebSourcesConfig(req.frameArtPath);
+    const currentFingerprint = computeConfigFingerprint(webSources);
+    const status = Object.fromEntries(
+      Object.entries(prefetches).map(([deviceId, meta]) => [
+        deviceId,
+        { ...meta, stale: meta.fingerprint !== currentFingerprint },
+      ])
+    );
+    res.json({ currentFingerprint, prefetches: status });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
