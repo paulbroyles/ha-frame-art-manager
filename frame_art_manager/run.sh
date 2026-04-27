@@ -147,6 +147,7 @@ fi
 # Export environment variables for Node.js app
 export FRAME_ART_PATH="${FRAME_ART_PATH}"
 export PORT="${PORT}"
+[ "${HOME_NAME}" = "null" ] && HOME_NAME=""
 export FRAME_ART_HOME="${HOME_NAME}"
 export GITHUB_SYNC_ENABLED="${GITHUB_SYNC_ENABLED}"
 export NODE_ENV="production"
