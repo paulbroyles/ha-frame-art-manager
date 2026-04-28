@@ -17,13 +17,15 @@ async function ensureFaceApi() {
   loadAttempted = true;
 
   try {
-    // Pure-JS CPU backend — Alpine/musl compatible, no native deps.
-    tf = require('@tensorflow/tfjs-core');
-    require('@tensorflow/tfjs-backend-cpu');
-    await tf.setBackend('cpu');
-    await tf.ready();
+    // node-wasm build: uses @tensorflow/tfjs + WASM backend (Alpine/musl compatible).
+    require('@tensorflow/tfjs');
+    require('@tensorflow/tfjs-backend-wasm');
 
-    faceapi = require('@vladmandic/face-api');
+    // Must require the node-wasm entry point explicitly — the default entry
+    // requires @tensorflow/tfjs-node which has native bindings.
+    faceapi = require('@vladmandic/face-api/dist/face-api.node-wasm.js');
+    tf = faceapi.tf;
+    await tf.ready();
 
     // Model files ship inside the @vladmandic/face-api package.
     const pkgRoot   = path.dirname(require.resolve('@vladmandic/face-api/package.json'));
