@@ -80,27 +80,75 @@ function findInnerEdge(
 }
 
 /**
+ * Fallback for sides where Sobel finds nothing: scan for a thin strip of
+ * uniformly low-variance pixels (solid black or gold border).  Stops at the
+ * first high-variance row (painting content) and returns that depth.
+ *
+ * Guards:
+ *  - maxThinDepth caps how deep we'll look (prevents confusing a large uniform
+ *    background with a frame border).
+ *  - minBorderDepth: requires at least this many low-variance rows before we
+ *    accept the detection (filters single-row noise).
+ *  - Must actually hit a high-variance row within maxThinDepth; if the
+ *    uniform region extends all the way to the cap we return 0 (too ambiguous).
+ */
+function findThinUniformBorder(gray, width, height, side, maxThinDepth, varianceThreshold, minBorderDepth = 2) {
+  let uniformCount = 0;
+
+  for (let d = 1; d <= maxThinDepth; d++) {
+    let sum = 0, sumSq = 0, total;
+    if (side === 'top' || side === 'bottom') {
+      const row = side === 'top' ? d : height - 1 - d;
+      total = width;
+      for (let x = 0; x < width; x++) { const v = gray[row * width + x]; sum += v; sumSq += v * v; }
+    } else {
+      const col = side === 'left' ? d : width - 1 - d;
+      total = height;
+      for (let y = 0; y < height; y++) { const v = gray[y * width + col]; sum += v; sumSq += v * v; }
+    }
+    const mean   = sum / total;
+    const variance = sumSq / total - mean * mean;
+
+    if (variance < varianceThreshold) {
+      uniformCount++;
+    } else {
+      // First high-variance row — this is the painting content.
+      if (uniformCount >= minBorderDepth) return d - 1;
+      return 0; // variance rose immediately, no clean uniform border
+    }
+  }
+
+  return 0; // never hit painting content within cap — too ambiguous to crop
+}
+
+/**
  * Frame boundary pre-processor.
  *
- * Detects the inner edge of a picture frame using Sobel edge density analysis.
- * The frame-to-canvas boundary produces a nearly continuous horizontal/vertical
- * line of strong edges spanning the full image width or height. Scans inward
- * from each edge within maxCropFrac and finds the innermost such dense-edge line.
+ * Two-pass detection:
  *
- * Works best on: ornate gilt frames, simple wooden frames, multi-profile frames.
- * Tuning: increase minEdgeDensity (0.5+) to avoid false positives on paintings
- * with strong compositional lines near the border.
+ * Pass 1 (Sobel): finds the innermost row/column with high edge density followed
+ * by sparse interior — the characteristic signature of a frame-to-canvas boundary.
+ * Works well for ornate, multi-profile, and wooden frames.
+ *
+ * Pass 2 (thin uniform border): fallback per-side for solid-color borders
+ * (thin black, gold, or white bands) that are too thin to survive downscale+blur.
+ * Only runs on sides where Sobel found nothing. Scans for a uniformly low-variance
+ * strip within a tight depth cap and stops at the first high-variance painting row.
  *
  * @param {Buffer} buffer
  * @param {object} options
- * @param {number} [options.maxCropFrac=0.25]   Max fraction of each dimension to crop
- * @param {number} [options.minEdgeDensity=0.40] Min fraction of row/col pixels above threshold
- * @param {number} [options.edgeThreshold=20]    Sobel magnitude threshold (post-blur)
+ * @param {number} [options.maxCropFrac=0.25]       Max fraction of dimension for Sobel scan
+ * @param {number} [options.minEdgeDensity=0.40]    Sobel: min fraction of pixels above threshold
+ * @param {number} [options.edgeThreshold=20]       Sobel magnitude threshold (post-blur)
+ * @param {number} [options.thinBorderVariance=200] Variance threshold for uniform border pass
+ * @param {number} [options.thinBorderMaxFrac=0.06] Max fraction of dimension for thin-border scan
  */
 async function frameBoundaryPreProcessor(buffer, {
-  maxCropFrac = 0.25,
-  minEdgeDensity = 0.40,
-  edgeThreshold = 20,
+  maxCropFrac        = 0.25,
+  minEdgeDensity     = 0.40,
+  edgeThreshold      = 20,
+  thinBorderVariance = 200,
+  thinBorderMaxFrac  = 0.06,
 } = {}) {
   const meta = await sharp(buffer).metadata();
   const { width: origW, height: origH } = meta;
@@ -122,10 +170,19 @@ async function frameBoundaryPreProcessor(buffer, {
   const maxV = Math.floor(anaH * maxCropFrac);
   const maxH = Math.floor(anaW * maxCropFrac);
 
-  const cTop    = findInnerEdge(edges, anaW, anaH, 'top',    maxV, minEdgeDensity, edgeThreshold);
-  const cBottom = findInnerEdge(edges, anaW, anaH, 'bottom', maxV, minEdgeDensity, edgeThreshold);
-  const cLeft   = findInnerEdge(edges, anaW, anaH, 'left',   maxH, minEdgeDensity, edgeThreshold);
-  const cRight  = findInnerEdge(edges, anaW, anaH, 'right',  maxH, minEdgeDensity, edgeThreshold);
+  // Pass 1: Sobel edge-density scan.
+  let cTop    = findInnerEdge(edges, anaW, anaH, 'top',    maxV, minEdgeDensity, edgeThreshold);
+  let cBottom = findInnerEdge(edges, anaW, anaH, 'bottom', maxV, minEdgeDensity, edgeThreshold);
+  let cLeft   = findInnerEdge(edges, anaW, anaH, 'left',   maxH, minEdgeDensity, edgeThreshold);
+  let cRight  = findInnerEdge(edges, anaW, anaH, 'right',  maxH, minEdgeDensity, edgeThreshold);
+
+  // Pass 2: thin uniform border fallback on sides Sobel missed.
+  const thinV = Math.min(Math.floor(anaH * thinBorderMaxFrac), 20);
+  const thinH = Math.min(Math.floor(anaW * thinBorderMaxFrac), 20);
+  if (cTop    === 0) cTop    = findThinUniformBorder(gray, anaW, anaH, 'top',    thinV, thinBorderVariance);
+  if (cBottom === 0) cBottom = findThinUniformBorder(gray, anaW, anaH, 'bottom', thinV, thinBorderVariance);
+  if (cLeft   === 0) cLeft   = findThinUniformBorder(gray, anaW, anaH, 'left',   thinH, thinBorderVariance);
+  if (cRight  === 0) cRight  = findThinUniformBorder(gray, anaW, anaH, 'right',  thinH, thinBorderVariance);
 
   if (cTop === 0 && cBottom === 0 && cLeft === 0 && cRight === 0) return buffer;
 
@@ -138,7 +195,7 @@ async function frameBoundaryPreProcessor(buffer, {
   const newH = origH - t - b;
   if (newW < 64 || newH < 64) return buffer;
 
-  console.log(`[frame-boundary] crop t=${t} b=${b} l=${l} r=${r} (density≥${minEdgeDensity}, thresh=${edgeThreshold})`);
+  console.log(`[frame-boundary] crop t=${t} b=${b} l=${l} r=${r}`);
   return sharp(buffer)
     .extract({ left: l, top: t, width: newW, height: newH })
     .toBuffer();
