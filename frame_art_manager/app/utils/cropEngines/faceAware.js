@@ -177,13 +177,21 @@ async function detectFaceFocal(buffer, origW, origH, scoreThreshold, targetW, ta
     // Variance-weighted attention focal point.
     const att = await computeAttentionFocal(buffer, origW, origH);
 
-    // Valid range of crop centers that keep all faces fully within the crop window.
+    // Add headroom above the face union: treat the space above the head as part of
+    // the region that must stay in frame.  This shifts the valid crop-center range
+    // upward so paintings with faces near the top of the composition include a bit
+    // of breathing room above the head rather than being pulled down by attention.
+    const HEADROOM_FRAC = 0.30; // fraction of face height to pad above the face
+    const faceH    = uY2 - uY1;
+    const uY1Padded = Math.max(0, uY1 - faceH * HEADROOM_FRAC);
+
+    // Valid range of crop centers that keep all faces (+ headroom) within the crop.
     // minCx: centre must be far enough right that left edge (cx-halfCropW) ≤ uX1
     // maxCx: centre must be far enough left that right edge (cx+halfCropW) ≥ uX2
     const minCx = Math.max(uX2 - halfCropW, halfCropW);
     const maxCx = Math.min(uX1 + halfCropW, origW - halfCropW);
     const minCy = Math.max(uY2 - halfCropH, halfCropH);
-    const maxCy = Math.min(uY1 + halfCropH, origH - halfCropH);
+    const maxCy = Math.min(uY1Padded + halfCropH, origH - halfCropH);
 
     if (minCx <= maxCx && minCy <= maxCy) {
       // A valid range exists: snap attention focal toward it as far as possible.
