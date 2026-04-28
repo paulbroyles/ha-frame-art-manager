@@ -177,31 +177,32 @@ async function detectFaceFocal(buffer, origW, origH, scoreThreshold, targetW, ta
     // Variance-weighted attention focal point.
     const att = await computeAttentionFocal(buffer, origW, origH);
 
-    // Add headroom above the face union: treat the space above the head as part of
-    // the region that must stay in frame.  This shifts the valid crop-center range
-    // upward so paintings with faces near the top of the composition include a bit
-    // of breathing room above the head rather than being pulled down by attention.
-    const HEADROOM_FRAC = 0.30; // fraction of face height to pad above the face
-    const faceH    = uY2 - uY1;
-    const uY1Padded = Math.max(0, uY1 - faceH * HEADROOM_FRAC);
+    // Headroom: pad above the face union so the crop keeps breathing room above the
+    // head by default.  Strong entropy below the face can override this — the more
+    // the attention focal is below the face center, the less headroom is applied.
+    const HEADROOM_FRAC = 0.30; // fraction of face height to pad above faces
+    const faceH      = uY2 - uY1;
+    const faceCenterY = (uY1 + uY2) / 2;
+    const uY1Padded  = Math.max(0, uY1 - faceH * HEADROOM_FRAC);
 
-    // Valid range of crop centers that keep all faces (+ headroom) within the crop.
-    // minCx: centre must be far enough right that left edge (cx-halfCropW) ≤ uX1
-    // maxCx: centre must be far enough left that right edge (cx+halfCropW) ≥ uX2
-    const minCx = Math.max(uX2 - halfCropW, halfCropW);
-    const maxCx = Math.min(uX1 + halfCropW, origW - halfCropW);
-    const minCy = Math.max(uY2 - halfCropH, halfCropH);
-    const maxCy = Math.min(uY1Padded + halfCropH, origH - halfCropH);
+    // Valid range of crop centers — computed both with and without headroom.
+    const minCx        = Math.max(uX2 - halfCropW, halfCropW);
+    const maxCx        = Math.min(uX1  + halfCropW, origW - halfCropW);
+    const minCy        = Math.max(uY2  - halfCropH, halfCropH);
+    const maxCy_head   = Math.min(uY1Padded + halfCropH, origH - halfCropH);
+    const maxCy_nohead = Math.min(uY1  + halfCropH, origH - halfCropH);
 
-    if (minCx <= maxCx && minCy <= maxCy) {
-      // A valid range exists: snap attention focal toward it as far as possible.
-      // This maximises high-entropy coverage while keeping all faces in frame.
-      return {
-        x: Math.max(minCx, Math.min(maxCx, att.x)),
-        y: Math.max(minCy, Math.min(maxCy, att.y)),
-        count: faces.length,
-        mode: 'face+attention',
-      };
+    if (minCx <= maxCx && minCy <= Math.max(maxCy_head, maxCy_nohead)) {
+      const cx = Math.max(minCx, Math.min(maxCx, att.x));
+
+      // Blend headroom toward zero as attention pulls further below the face center.
+      // pullStrength goes 0→1 as att.y travels from faceCenterY to faceCenterY+halfCropH.
+      const attPull     = Math.max(0, att.y - faceCenterY);
+      const pullStrength = Math.min(1, attPull / halfCropH);
+      const maxCy       = maxCy_head + pullStrength * (maxCy_nohead - maxCy_head);
+
+      const cy = Math.max(minCy, Math.min(maxCy, att.y));
+      return { x: cx, y: cy, count: faces.length, mode: 'face+attention' };
     }
 
     // Face union is larger than the crop window — fall back to weighted centroid.

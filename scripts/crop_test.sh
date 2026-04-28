@@ -28,7 +28,7 @@ IMAGE_IDS=(
   "436838"
   "435896"
   "442488"
-  "436533"
+  "436252"
 )
 IMAGE_DESCS=(
   "thick ornate gilt frame"
@@ -41,7 +41,7 @@ IMAGE_DESCS=(
   "moderate frame warm edge"
   "multi-layer frame undercrop risk"
   "no frame simple bg"
-  "large deep ornate gilt frame"
+  "large ornate gilt frame (van Dyck full-length)"
 )
 
 # ---------------------------------------------------------------------------
