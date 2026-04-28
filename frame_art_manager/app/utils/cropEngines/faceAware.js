@@ -42,14 +42,92 @@ async function ensureFaceApi() {
 }
 
 /**
- * Detect faces and return a weighted centroid in original image coordinates.
- * Returns null if face-api is unavailable or no faces are found.
+ * Compute a variance-weighted focal point — the "most visually interesting"
+ * region of the image, approximating Sharp's attention strategy.
+ *
+ * Divides a downscaled greyscale thumbnail into a GRID×GRID cell grid, computes
+ * per-cell variance, and returns the variance-weighted centroid in original
+ * image coordinates.
  */
-async function detectFaceCentroid(buffer, origW, origH, scoreThreshold) {
+async function computeAttentionFocal(buffer, origW, origH) {
+  const GRID       = 16;
+  const THUMB_SIZE = 256;
+
+  const scale  = Math.min(1.0, THUMB_SIZE / Math.max(origW, origH));
+  const thumbW = Math.max(1, Math.round(origW * scale));
+  const thumbH = Math.max(1, Math.round(origH * scale));
+
+  const { data: pixels } = await sharp(buffer)
+    .resize(thumbW, thumbH, { fit: 'fill', kernel: 'lanczos3' })
+    .greyscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const cellW = thumbW / GRID;
+  const cellH = thumbH / GRID;
+  let totalVar = 0, wx = 0, wy = 0;
+
+  for (let gy = 0; gy < GRID; gy++) {
+    for (let gx = 0; gx < GRID; gx++) {
+      const x0 = Math.floor(gx * cellW);
+      const y0 = Math.floor(gy * cellH);
+      const x1 = Math.min(thumbW, Math.floor((gx + 1) * cellW));
+      const y1 = Math.min(thumbH, Math.floor((gy + 1) * cellH));
+
+      let sum = 0, count = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          sum += pixels[y * thumbW + x];
+          count++;
+        }
+      }
+      const mean = sum / count;
+
+      let variance = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const diff = pixels[y * thumbW + x] - mean;
+          variance += diff * diff;
+        }
+      }
+      variance /= count;
+
+      const cx = ((gx + 0.5) * cellW) / scale;
+      const cy = ((gy + 0.5) * cellH) / scale;
+      wx += cx * variance;
+      wy += cy * variance;
+      totalVar += variance;
+    }
+  }
+
+  if (totalVar === 0) return { x: origW / 2, y: origH / 2 };
+  return { x: wx / totalVar, y: wy / totalVar };
+}
+
+/**
+ * Detect faces and compute a focal point that tries to accommodate both
+ * faces and the most visually interesting region of the image in one crop.
+ *
+ * Logic:
+ *  1. Detect all faces; compute their union bounding box.
+ *  2. Compute variance-based attention focal point.
+ *  3. Try to fit face-union + attention focal in target crop → center on combined region.
+ *  4. If they don't fit together, try face-union alone.
+ *  5. Fall back to confidence×area weighted centroid.
+ *
+ * Returns null if face-api is unavailable or no faces are found.
+ *
+ * @param {Buffer} buffer
+ * @param {number} origW        Original image width
+ * @param {number} origH        Original image height
+ * @param {number} scoreThreshold
+ * @param {number} targetW      Final crop width (used to test fit)
+ * @param {number} targetH      Final crop height
+ */
+async function detectFaceFocal(buffer, origW, origH, scoreThreshold, targetW, targetH) {
   if (!await ensureFaceApi()) return null;
 
   try {
-    // Face detection works well at 416 px; keep aspect ratio.
     const DETECT_SIZE = 416;
     const detScale = Math.min(1.0, DETECT_SIZE / Math.max(origW, origH));
     const detW = Math.max(1, Math.round(origW * detScale));
@@ -61,7 +139,6 @@ async function detectFaceCentroid(buffer, origW, origH, scoreThreshold) {
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    // Build a tensor directly from raw pixels — avoids the browser canvas API.
     const tensor = tf.tensor3d(new Uint8Array(pixels), [info.height, info.width, 3]);
     const opts   = new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold });
     const dets   = await faceapi.detectAllFaces(tensor, opts);
@@ -69,17 +146,70 @@ async function detectFaceCentroid(buffer, origW, origH, scoreThreshold) {
 
     if (!dets.length) return null;
 
-    // Weighted centroid: weight = face area × confidence score.
-    let totalW = 0, wx = 0, wy = 0;
-    for (const det of dets) {
+    // Convert detections to original image coordinates.
+    const faces = dets.map(det => {
       const { x, y, width, height } = det.box;
-      const w = width * height * det.score;
-      wx += (x + width  / 2) / detScale * w;
-      wy += (y + height / 2) / detScale * w;
-      totalW += w;
+      return {
+        x1: x / detScale,
+        y1: y / detScale,
+        x2: (x + width)  / detScale,
+        y2: (y + height) / detScale,
+        cx: (x + width  / 2) / detScale,
+        cy: (y + height / 2) / detScale,
+        score: det.score,
+        area: (width / detScale) * (height / detScale),
+      };
+    });
+
+    // Union bounding box of all detected faces.
+    const uX1 = Math.min(...faces.map(f => f.x1));
+    const uY1 = Math.min(...faces.map(f => f.y1));
+    const uX2 = Math.max(...faces.map(f => f.x2));
+    const uY2 = Math.max(...faces.map(f => f.y2));
+
+    // Size of the crop window in original coordinates.
+    const coverScale  = Math.max(targetW / origW, targetH / origH);
+    const cropW       = targetW / coverScale;
+    const cropH       = targetH / coverScale;
+    const halfCropW   = cropW / 2;
+    const halfCropH   = cropH / 2;
+
+    // Variance-weighted attention focal point.
+    const att = await computeAttentionFocal(buffer, origW, origH);
+
+    // Valid range of crop centers that keep all faces fully within the crop window.
+    // minCx: centre must be far enough right that left edge (cx-halfCropW) ≤ uX1
+    // maxCx: centre must be far enough left that right edge (cx+halfCropW) ≥ uX2
+    const minCx = Math.max(uX2 - halfCropW, halfCropW);
+    const maxCx = Math.min(uX1 + halfCropW, origW - halfCropW);
+    const minCy = Math.max(uY2 - halfCropH, halfCropH);
+    const maxCy = Math.min(uY1 + halfCropH, origH - halfCropH);
+
+    if (minCx <= maxCx && minCy <= maxCy) {
+      // A valid range exists: snap attention focal toward it as far as possible.
+      // This maximises high-entropy coverage while keeping all faces in frame.
+      return {
+        x: Math.max(minCx, Math.min(maxCx, att.x)),
+        y: Math.max(minCy, Math.min(maxCy, att.y)),
+        count: faces.length,
+        mode: 'face+attention',
+      };
     }
 
-    return { x: wx / totalW, y: wy / totalW, count: dets.length };
+    // Face union is larger than the crop window — fall back to weighted centroid.
+    let totalW = 0, wx = 0, wy = 0;
+    for (const f of faces) {
+      const w = f.area * f.score;
+      wx += f.cx * w;
+      wy += f.cy * w;
+      totalW += w;
+    }
+    return {
+      x: wx / totalW,
+      y: wy / totalW,
+      count: faces.length,
+      mode: 'centroid',
+    };
   } catch (err) {
     console.warn('[face-aware] Detection error:', err.message);
     return null;
@@ -109,9 +239,11 @@ async function focalCrop(buffer, inputW, inputH, targetW, targetH, focalX, focal
  * Face-aware crop engine.
  *
  * Detects faces using the TinyFaceDetector model (via @vladmandic/face-api with
- * a pure-JS TF.js CPU backend).  When faces are found the crop is centred on
- * the confidence×area-weighted face centroid; otherwise falls back to Sharp's
- * built-in 'attention' (or a caller-supplied fallback) strategy.
+ * a pure-JS TF.js CPU backend).  When faces are found the crop tries to frame
+ * both the detected faces and the most visually interesting region of the image
+ * (variance-based attention focal point) within the crop window.  If they don't
+ * both fit, faces are prioritised.  Falls back to Sharp attention when no faces
+ * are detected.
  *
  * Works best on: portraits, figurative paintings, religious/historical scenes.
  * For abstract or landscape work with no faces, the fallback takes over.
@@ -135,10 +267,10 @@ async function faceAwareCropEngine(buffer, inputW, inputH, targetW, targetH, {
 } = {}) {
   if (targetW === inputW && targetH === inputH) return buffer;
 
-  const focal = await detectFaceCentroid(buffer, inputW, inputH, scoreThreshold);
+  const focal = await detectFaceFocal(buffer, inputW, inputH, scoreThreshold, targetW, targetH);
 
   if (focal) {
-    console.log(`[face-aware] ${focal.count} face(s) → focal (${Math.round(focal.x)}, ${Math.round(focal.y)})`);
+    console.log(`[face-aware] ${focal.count} face(s) [${focal.mode}] → focal (${Math.round(focal.x)}, ${Math.round(focal.y)})`);
     return focalCrop(buffer, inputW, inputH, targetW, targetH, focal.x, focal.y);
   }
 

@@ -28,19 +28,26 @@ function computeSobel(gray, width, height) {
 }
 
 /**
- * Scan inward from one image edge looking for the innermost row/column
- * where the fraction of pixels with edge magnitude ≥ threshold exceeds minDensity.
+ * Scan inward from one image edge looking for the frame-to-canvas boundary.
  *
- * The innermost such row/column is the inner boundary of the picture frame.
+ * A valid boundary is a dense-edge row/column (≥ minDensity fraction of pixels
+ * above threshold) that is immediately followed by sparse rows (< sparseDensity
+ * fraction for the next peekRows rows).  This distinguishes the innermost frame
+ * edge from ornate-frame interior lines that have dense edges throughout.
+ *
  * Returns the number of pixels to crop from that side (0 = no frame found).
  */
-function findInnerEdge(edges, width, height, side, maxDepth, minDensity, threshold) {
-  let lastDense = 0;
+function findInnerEdge(
+  edges, width, height, side, maxDepth, minDensity, threshold,
+  peekRows = 4, sparseDensity = 0.18,
+) {
+  // Precompute row/column density for maxDepth + peekRows rows.
+  const scanLimit = Math.min(maxDepth + peekRows, side === 'top' || side === 'bottom' ? height - 1 : width - 1);
+  const densities = new Float32Array(scanLimit + 1);
 
-  for (let d = 1; d <= maxDepth; d++) {
+  for (let d = 1; d <= scanLimit; d++) {
     let above = 0;
     let total;
-
     if (side === 'top' || side === 'bottom') {
       const row = side === 'top' ? d : height - 1 - d;
       total = width;
@@ -54,11 +61,22 @@ function findInnerEdge(edges, width, height, side, maxDepth, minDensity, thresho
         if (edges[y * width + col] >= threshold) above++;
       }
     }
-
-    if (above / total >= minDensity) lastDense = d;
+    densities[d] = above / total;
   }
 
-  return lastDense;
+  // Accept candidate at depth d only if it is dense AND the next peekRows are sparse.
+  // Keep the innermost (largest d) such candidate.
+  let lastValidEdge = 0;
+  for (let d = 1; d <= maxDepth; d++) {
+    if (densities[d] < minDensity) continue;
+    let allSparse = true;
+    for (let p = 1; p <= peekRows && d + p <= scanLimit; p++) {
+      if (densities[d + p] >= sparseDensity) { allSparse = false; break; }
+    }
+    if (allSparse) lastValidEdge = d;
+  }
+
+  return lastValidEdge;
 }
 
 /**
