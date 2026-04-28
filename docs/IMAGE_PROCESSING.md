@@ -215,6 +215,34 @@ Delegates to Sharp's built-in `trim()`. Removes edge pixels that match the corne
 
 ---
 
+### Frame Boundary (`frame_boundary`)
+
+Detects the inner edge of a picture frame using per-row/column Sobel edge-density analysis. The frame-to-canvas boundary creates a nearly continuous horizontal or vertical line of strong edges spanning the full image width or height. The pre-processor scans inward from each edge within `maxCropFrac` and crops to the innermost row/column where the fraction of above-threshold edge pixels exceeds `minEdgeDensity`.
+
+**Best for**: Ornate gilt frames, carved wood frames, multi-profile gilded frames — any frame where the inner canvas edge creates a clean, strong line.
+
+**Algorithm**:
+1. Downscale to 600 px (long side) for analysis speed.
+2. Greyscale + Gaussian blur σ=1.5 to suppress texture noise while preserving hard frame edges.
+3. Compute Sobel edge magnitude at each pixel.
+4. Scan each edge inward up to `maxCropFrac`; find the innermost row/column where edge density ≥ `minEdgeDensity`.
+5. Extract original image inside the detected boundary.
+
+**Tuning**:
+- If the crop is eating into the painting, raise `minEdgeDensity` (→ 0.50+) or lower `maxCropFrac`.
+- If the frame is not being removed, lower `edgeThreshold` or raise `maxCropFrac`.
+- The Gaussian pre-blur (σ=1.5) is fixed; strong ornament detail in the frame may still produce high magnitude values, but individual pixels in the painting interior won't typically form a full-width dense line.
+
+**Parameters**:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `maxCropFrac` | 0.25 | Maximum fraction of each dimension to scan inward |
+| `minEdgeDensity` | 0.40 | Fraction of row/col pixels above threshold that defines a frame boundary line |
+| `edgeThreshold` | 20 | Sobel magnitude threshold (post-blur) |
+
+---
+
 ## Crop Engines
 
 Crop engines run after Phase 2. They receive a clean image buffer and fit it to the TV's 4K resolution.
@@ -229,7 +257,7 @@ The engine must scale down if needed and crop to the target dimensions. It must 
 
 ---
 
-### Sharp (`sharp`) — the only current engine
+### Sharp (`sharp`)
 
 Uses Sharp's `resize()` with `fit: 'cover'`. The `position` option controls where the crop anchor lands.
 
@@ -240,6 +268,32 @@ Uses Sharp's `resize()` with `fit: 'cover'`. The `position` option controls wher
 | `attention` | Saliency-based — favors faces and high-contrast subjects. Best for paintings, especially portraits and figurative work. **(recommended)** |
 | `entropy` | Maximizes Shannon entropy — favors complex, textured regions |
 | `centre` | Crops from the geometric center — predictable, no analysis |
+
+---
+
+### Face-Aware (`face_aware`)
+
+Detects faces using `@vladmandic/face-api` (TinyFaceDetector model, ~190 KB weights, bundled in the package). Runs inference on a pure-JS TF.js CPU backend — no native deps, Alpine/musl compatible.
+
+**Algorithm**:
+1. Downscale to 416 px (max dimension) for detection.
+2. Build a `tf.Tensor3D` from Sharp raw pixels (bypasses the browser canvas API).
+3. Run TinyFaceDetector with `scoreThreshold` (default 0.35 — lower than the photo default of 0.5 to catch stylised/painted faces).
+4. Compute a confidence×area-weighted centroid over all detected face bounding boxes.
+5. Perform a cover-fit crop centred on the focal point (Sharp resize + extract).
+6. If no faces are detected (or face-api fails to load), falls back to Sharp's `fallbackStrategy`.
+
+**Best for**: Portraits, figurative and religious paintings, historical group scenes.  
+**Fallback behaviour**: Abstract, landscape, and still-life paintings with no detectable faces automatically use Sharp attention/entropy/centre (configurable via `fallbackStrategy`).
+
+**Performance**: Model loads once at first call (~1–2 s). Subsequent calls: ~0.5–1 s for detection + crop. First boot may be slower if the model is not yet cached.
+
+**Parameters**:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `scoreThreshold` | 0.35 | Minimum face confidence (0–1). Lower catches more stylised faces; raise to reduce false positives. |
+| `fallbackStrategy` | `'attention'` | Sharp strategy to use when no faces are found (`'attention'`, `'entropy'`, `'centre'`). |
 
 ---
 

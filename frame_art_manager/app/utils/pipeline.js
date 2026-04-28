@@ -41,6 +41,7 @@ const sharp                         = require('sharp');
 const { TV_TARGETS }                = require('./thumbSize');
 const { backgroundStripProcessor }  = require('./processors/backgroundStrip');
 const { sharpCropProcessor }        = require('./processors/sharpCrop');
+const { faceAwareCropProcessor }    = require('./processors/faceAwareCrop');
 const { frameAwareCropProcessor }   = require('./processors/frameAwareCrop');
 const { scoredCropProcessor }       = require('./processors/scoredCrop');
 const { coherenceCropProcessor }    = require('./processors/coherenceCrop');
@@ -131,6 +132,11 @@ const PROCESSORS = {
     fn: sharpCropProcessor,
     type: 'aspect_crop',
     label: 'Sharp Crop — scale and crop to TV aspect ratio',
+  },
+  face_aware_crop: {
+    fn: faceAwareCropProcessor,
+    type: 'aspect_crop',
+    label: 'Face-Aware Crop — detect faces and centre the crop on the weighted face centroid; falls back to Sharp attention when no faces found',
   },
   frame_aware_crop: {
     fn: frameAwareCropProcessor,
