@@ -83,47 +83,73 @@ function findInnerEdge(
 }
 
 /**
- * Fallback for sides where Sobel finds nothing: scan for a thin strip of
- * uniformly low-variance pixels (solid black or gold border).  Stops at the
- * first high-variance row (painting content) and returns that depth.
+ * TOP/BOTTOM thin border fallback: full-row variance scan.
  *
- * Guards:
- *  - maxThinDepth caps how deep we'll look (prevents confusing a large uniform
- *    background with a frame border).
- *  - minBorderDepth: requires at least this many low-variance rows before we
- *    accept the detection (filters single-row noise).
- *  - Must actually hit a high-variance row within maxThinDepth; if the
- *    uniform region extends all the way to the cap we return 0 (too ambiguous).
+ * Works because each row at a given depth is homogeneous content (all mat,
+ * all frame, or all painting).  Stops at the first high-variance row and
+ * returns the depth of the last low-variance (frame material) row before it.
  */
-function findThinUniformBorder(gray, width, height, side, maxThinDepth, varianceThreshold, minBorderDepth = 2) {
+function findThinUniformBorderHoriz(gray, width, height, side, maxThinDepth, varianceThreshold, minBorderDepth = 2) {
   let uniformCount = 0;
-
   for (let d = 1; d <= maxThinDepth; d++) {
-    let sum = 0, sumSq = 0, total;
-    if (side === 'top' || side === 'bottom') {
-      const row = side === 'top' ? d : height - 1 - d;
-      total = width;
-      for (let x = 0; x < width; x++) { const v = gray[row * width + x]; sum += v; sumSq += v * v; }
-    } else {
-      const col = side === 'left' ? d : width - 1 - d;
-      total = height;
-      for (let y = 0; y < height; y++) { const v = gray[y * width + col]; sum += v; sumSq += v * v; }
-    }
-    const mean     = sum / total;
-    const variance = sumSq / total - mean * mean;
-
-    if (d <= 30) console.log(`[frame-boundary] thin ${side} d=${d}: mean=${mean.toFixed(1)} var=${variance.toFixed(0)}`);
-
+    const row = side === 'top' ? d : height - 1 - d;
+    let sum = 0, sumSq = 0;
+    for (let x = 0; x < width; x++) { const v = gray[row * width + x]; sum += v; sumSq += v * v; }
+    const mean     = sum / width;
+    const variance = sumSq / width - mean * mean;
     if (variance < varianceThreshold) {
       uniformCount++;
     } else {
-      // First high-variance row — this is the painting content.
       if (uniformCount >= minBorderDepth) return d - 1;
-      return 0; // variance rose immediately, no clean uniform border
+      return 0;
     }
   }
+  return 0;
+}
 
-  return 0; // never hit painting content within cap — too ambiguous to crop
+/**
+ * LEFT/RIGHT thin border fallback: per-row local-window scan.
+ *
+ * Full-column variance mixes mat/frame/painting content at different heights,
+ * making it useless for vertical borders.  Instead, sample SAMPLE_ROWS
+ * horizontal positions across the image height.  At each sample row, scan
+ * inward using a LOCAL 5-pixel horizontal window; find the last depth within
+ * maxThinDepth that has low local variance (= frame material).  Take the 25th
+ * percentile across sample rows to get a conservative estimate.
+ */
+function findThinUniformBorderVert(gray, width, height, side, maxThinDepth, localVarThreshold, sampleRows = 20) {
+  const depths = [];
+
+  for (let i = 0; i < sampleRows; i++) {
+    const y = Math.floor((i + 0.5) * height / sampleRows);
+    let lastFrameD = 0;
+    let inContiguous = true; // must be a contiguous run from d=1
+
+    for (let d = 1; d <= maxThinDepth && inContiguous; d++) {
+      // 5-pixel horizontal window centred at depth d for this row
+      let sum = 0, sumSq = 0, count = 0;
+      for (let k = -2; k <= 2; k++) {
+        const col = side === 'left' ? d + k : width - 1 - d - k;
+        if (col < 0 || col >= width) continue;
+        const v = gray[y * width + col];
+        sum += v; sumSq += v * v; count++;
+      }
+      const mean     = sum / count;
+      const localVar = sumSq / count - mean * mean;
+
+      if (localVar < localVarThreshold) {
+        lastFrameD = d;
+      } else {
+        inContiguous = false; // first non-frame depth ends the contiguous run
+      }
+    }
+
+    if (lastFrameD >= 2) depths.push(lastFrameD);
+  }
+
+  if (depths.length < sampleRows * 0.4) return 0; // too few rows detected anything
+  depths.sort((a, b) => a - b);
+  return depths[Math.floor(depths.length * 0.25)]; // 25th percentile = conservative
 }
 
 /**
@@ -204,23 +230,19 @@ async function frameBoundaryPreProcessor(buffer, {
   const scaleRatio = thinScale / scale; // convert thin-buffer coords → Sobel-buffer coords
 
   if (cTop    === 0 && thinGray) {
-    const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'top',    thinV, thinBorderVariance);
-    console.log(`[frame-boundary] thin-pass top: raw=${raw} → ${Math.round(raw/thinScale)}px orig`);
+    const raw = findThinUniformBorderHoriz(thinGray, thinW, thinH_dim, 'top',    thinV, thinBorderVariance);
     cTop    = Math.round(raw / scaleRatio);
   }
   if (cBottom === 0 && thinGray) {
-    const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'bottom', thinV, thinBorderVariance);
-    console.log(`[frame-boundary] thin-pass bottom: raw=${raw} → ${Math.round(raw/thinScale)}px orig`);
+    const raw = findThinUniformBorderHoriz(thinGray, thinW, thinH_dim, 'bottom', thinV, thinBorderVariance);
     cBottom = Math.round(raw / scaleRatio);
   }
   if (cLeft   === 0 && thinGray) {
-    const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'left',   thinH, thinBorderVariance);
-    console.log(`[frame-boundary] thin-pass left: raw=${raw} → ${Math.round(raw/thinScale)}px orig`);
+    const raw = findThinUniformBorderVert(thinGray, thinW, thinH_dim, 'left',   thinH, thinBorderVariance);
     cLeft   = Math.round(raw / scaleRatio);
   }
   if (cRight  === 0 && thinGray) {
-    const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'right',  thinH, thinBorderVariance);
-    console.log(`[frame-boundary] thin-pass right: raw=${raw} → ${Math.round(raw/thinScale)}px orig`);
+    const raw = findThinUniformBorderVert(thinGray, thinW, thinH_dim, 'right',  thinH, thinBorderVariance);
     cRight  = Math.round(raw / scaleRatio);
   }
 
