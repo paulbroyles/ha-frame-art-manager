@@ -28,7 +28,6 @@ IMAGE_IDS=(
   "436838"
   "435896"
   "442488"
-  "437248"
 )
 IMAGE_DESCS=(
   "thick ornate gilt frame"
@@ -41,7 +40,6 @@ IMAGE_DESCS=(
   "moderate frame warm edge"
   "multi-layer frame undercrop risk"
   "no frame simple bg"
-  "engaged gilt frame (Paolo di Giovanni Fei panel)"
 )
 
 # ---------------------------------------------------------------------------

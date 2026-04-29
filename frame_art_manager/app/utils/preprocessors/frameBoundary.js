@@ -2,8 +2,11 @@
 
 const sharp = require('sharp');
 
-// Downscale long side to this for edge analysis (speed vs. accuracy trade-off).
+// Downscale long side to this for Sobel edge analysis (speed vs. accuracy trade-off).
 const ANALYSIS_LONG_SIDE = 600;
+// Higher resolution for the thin uniform border pass — needs more pixels to
+// distinguish a 20–80px border that Sobel loses after blur + downscale.
+const THIN_ANALYSIS_LONG_SIDE = 1500;
 
 /**
  * Compute per-pixel Sobel edge magnitude on a grayscale buffer.
@@ -177,12 +180,43 @@ async function frameBoundaryPreProcessor(buffer, {
   let cRight  = findInnerEdge(edges, anaW, anaH, 'right',  maxH, minEdgeDensity, edgeThreshold);
 
   // Pass 2: thin uniform border fallback on sides Sobel missed.
-  const thinV = Math.min(Math.floor(anaH * thinBorderMaxFrac), 20);
-  const thinH = Math.min(Math.floor(anaW * thinBorderMaxFrac), 20);
-  if (cTop    === 0) cTop    = findThinUniformBorder(gray, anaW, anaH, 'top',    thinV, thinBorderVariance);
-  if (cBottom === 0) cBottom = findThinUniformBorder(gray, anaW, anaH, 'bottom', thinV, thinBorderVariance);
-  if (cLeft   === 0) cLeft   = findThinUniformBorder(gray, anaW, anaH, 'left',   thinH, thinBorderVariance);
-  if (cRight  === 0) cRight  = findThinUniformBorder(gray, anaW, anaH, 'right',  thinH, thinBorderVariance);
+  // Uses a separate higher-res unblurred buffer so thin borders (20–80px original)
+  // aren't averaged away before the variance calculation.
+  const thinScale = Math.min(1.0, THIN_ANALYSIS_LONG_SIDE / Math.max(origW, origH));
+  const thinW     = Math.max(2, Math.round(origW * thinScale));
+  const thinH_dim = Math.max(2, Math.round(origH * thinScale));
+
+  const needsThinPass = cTop === 0 || cBottom === 0 || cLeft === 0 || cRight === 0;
+  let thinGray = null;
+  if (needsThinPass) {
+    thinGray = await sharp(buffer)
+      .resize(thinW, thinH_dim, { fit: 'fill', kernel: 'lanczos3' })
+      .greyscale()
+      .raw()
+      .toBuffer();
+  }
+
+  const thinV = Math.min(Math.floor(thinH_dim * thinBorderMaxFrac), 50);
+  const thinH = Math.min(Math.floor(thinW     * thinBorderMaxFrac), 50);
+
+  const scaleRatio = thinScale / scale; // convert thin-buffer coords → Sobel-buffer coords
+
+  if (cTop    === 0 && thinGray) {
+    const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'top',    thinV, thinBorderVariance);
+    cTop    = Math.round(raw / scaleRatio);
+  }
+  if (cBottom === 0 && thinGray) {
+    const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'bottom', thinV, thinBorderVariance);
+    cBottom = Math.round(raw / scaleRatio);
+  }
+  if (cLeft   === 0 && thinGray) {
+    const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'left',   thinH, thinBorderVariance);
+    cLeft   = Math.round(raw / scaleRatio);
+  }
+  if (cRight  === 0 && thinGray) {
+    const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'right',  thinH, thinBorderVariance);
+    cRight  = Math.round(raw / scaleRatio);
+  }
 
   if (cTop === 0 && cBottom === 0 && cLeft === 0 && cRight === 0) return buffer;
 
