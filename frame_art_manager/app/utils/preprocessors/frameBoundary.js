@@ -109,8 +109,10 @@ function findThinUniformBorder(gray, width, height, side, maxThinDepth, variance
       total = height;
       for (let y = 0; y < height; y++) { const v = gray[y * width + col]; sum += v; sumSq += v * v; }
     }
-    const mean   = sum / total;
+    const mean     = sum / total;
     const variance = sumSq / total - mean * mean;
+
+    if (d <= 30) console.log(`[frame-boundary] thin ${side} d=${d}: mean=${mean.toFixed(1)} var=${variance.toFixed(0)}`);
 
     if (variance < varianceThreshold) {
       uniformCount++;
@@ -203,18 +205,22 @@ async function frameBoundaryPreProcessor(buffer, {
 
   if (cTop    === 0 && thinGray) {
     const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'top',    thinV, thinBorderVariance);
+    console.log(`[frame-boundary] thin-pass top: raw=${raw} → ${Math.round(raw/thinScale)}px orig`);
     cTop    = Math.round(raw / scaleRatio);
   }
   if (cBottom === 0 && thinGray) {
     const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'bottom', thinV, thinBorderVariance);
+    console.log(`[frame-boundary] thin-pass bottom: raw=${raw} → ${Math.round(raw/thinScale)}px orig`);
     cBottom = Math.round(raw / scaleRatio);
   }
   if (cLeft   === 0 && thinGray) {
     const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'left',   thinH, thinBorderVariance);
+    console.log(`[frame-boundary] thin-pass left: raw=${raw} → ${Math.round(raw/thinScale)}px orig`);
     cLeft   = Math.round(raw / scaleRatio);
   }
   if (cRight  === 0 && thinGray) {
     const raw = findThinUniformBorder(thinGray, thinW, thinH_dim, 'right',  thinH, thinBorderVariance);
+    console.log(`[frame-boundary] thin-pass right: raw=${raw} → ${Math.round(raw/thinScale)}px orig`);
     cRight  = Math.round(raw / scaleRatio);
   }
 
