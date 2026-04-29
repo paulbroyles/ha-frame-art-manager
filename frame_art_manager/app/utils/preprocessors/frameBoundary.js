@@ -144,7 +144,10 @@ function findThinUniformBorderVert(gray, width, height, side, maxThinDepth, loca
       }
     }
 
-    if (lastFrameD >= 2) depths.push(lastFrameD);
+    // Only count if we actually found the boundary (inContiguous=false means we hit
+    // non-frame content within the cap).  If the uniform region extends all the way
+    // to maxThinDepth without a boundary, skip — it's background, not a thin frame.
+    if (lastFrameD >= 2 && !inContiguous) depths.push(lastFrameD);
   }
 
   if (depths.length < sampleRows * 0.4) return 0; // too few rows detected anything
