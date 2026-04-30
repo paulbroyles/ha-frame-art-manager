@@ -878,6 +878,12 @@ router.put('/image-processing', async (req, res) => {
         if (step.options !== undefined && (typeof step.options !== 'object' || Array.isArray(step.options))) {
           return res.status(400).json({ error: `pipeline step '${step.key}' options must be an object` });
         }
+        if (step.recursive !== undefined && typeof step.recursive !== 'boolean') {
+          return res.status(400).json({ error: `pipeline step '${step.key}' recursive must be a boolean` });
+        }
+        if (step.maxPasses !== undefined && (!Number.isInteger(step.maxPasses) || step.maxPasses < 1)) {
+          return res.status(400).json({ error: `pipeline step '${step.key}' maxPasses must be a positive integer` });
+        }
       }
     }
     if (preProcessorOptions !== undefined && (typeof preProcessorOptions !== 'object' || Array.isArray(preProcessorOptions))) {

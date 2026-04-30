@@ -83,6 +83,47 @@ function findInnerEdge(
 }
 
 /**
+ * Sample mean and variance over a depth range along the middle 60% of a side.
+ * Using the central band avoids corner effects and vertical lighting gradients.
+ * Using a depth range (rather than a single row/column) gives a more stable estimate
+ * of the frame material color and avoids painting-adjacent fringe pixels.
+ *
+ * @param {Uint8Array} thinGray
+ * @param {number} thinW
+ * @param {number} thinH
+ * @param {'top'|'bottom'|'left'|'right'} side
+ * @param {number} fromDepth  first depth to sample (≥ 1)
+ * @param {number} toDepth    last depth to sample (inclusive)
+ */
+function sampleBandStats(thinGray, thinW, thinH, side, fromDepth, toDepth) {
+  const maxD = (side === 'top' || side === 'bottom') ? thinH - 2 : thinW - 2;
+  const d0 = Math.max(1, fromDepth);
+  const d1 = Math.min(toDepth, maxD);
+  if (d0 > d1) return { mean: 0, variance: 0 };
+
+  const samples = [];
+  for (let d = d0; d <= d1; d++) {
+    if (side === 'top' || side === 'bottom') {
+      const row = side === 'top' ? d : thinH - 1 - d;
+      const x0 = Math.floor(thinW * 0.20);
+      const x1 = Math.ceil(thinW * 0.80);
+      for (let x = x0; x < x1; x++) samples.push(thinGray[row * thinW + x]);
+    } else {
+      const col = side === 'left' ? d : thinW - 1 - d;
+      const y0 = Math.floor(thinH * 0.20);
+      const y1 = Math.ceil(thinH * 0.80);
+      for (let y = y0; y < y1; y++) samples.push(thinGray[y * thinW + col]);
+    }
+  }
+
+  const n = samples.length;
+  if (n === 0) return { mean: 0, variance: 0 };
+  const mean = samples.reduce((a, b) => a + b, 0) / n;
+  const variance = samples.reduce((s, v) => s + (v - mean) ** 2, 0) / n;
+  return { mean, variance };
+}
+
+/**
  * TOP/BOTTOM thin border fallback: full-row variance scan.
  *
  * Works because each row at a given depth is homogeneous content (all mat,
@@ -108,51 +149,54 @@ function findThinUniformBorderHoriz(gray, width, height, side, maxThinDepth, var
 }
 
 /**
- * LEFT/RIGHT thin border fallback: per-row local-window scan.
+ * LEFT/RIGHT thin border fallback: corner-band mean consistency scan.
  *
- * Full-column variance mixes mat/frame/painting content at different heights,
- * making it useless for vertical borders.  Instead, sample SAMPLE_ROWS
- * horizontal positions across the image height.  At each sample row, scan
- * inward using a LOCAL 5-pixel horizontal window; find the last depth within
- * maxThinDepth that has low local variance (= frame material).  Take the 25th
- * percentile across sample rows to get a conservative estimate.
+ * Full-column variance fails for vertical borders because museum photo lighting
+ * gradients along the column height inflate variance even for uniform frame
+ * material.  Instead, sample only the TOP and BOTTOM 20% of each column
+ * (corner bands).  These bands:
+ *  - Are all frame material when a border exists
+ *  - Have a relatively stable mean within a single column (short vertical span)
+ *  - Allow a direct interior reference comparison at depth ≥ maxThinDepth + 15
+ *
+ * Scans inward while each column's corner-band mean stays within
+ * `consistencyThreshold` of the initial edge reference.  The first column that
+ * deviates signals the frame-to-canvas boundary.  A contrast guard rejects
+ * images where the edge material is indistinguishable from the interior
+ * (painting extends to the edge, no real border).
  */
-function findThinUniformBorderVert(gray, width, height, side, maxThinDepth, localVarThreshold, sampleRows = 20) {
-  const depths = [];
+function findThinUniformBorderVert(gray, width, height, side, maxThinDepth, consistencyThreshold, minBorderDepth = 2) {
+  const bandH = Math.max(4, Math.floor(height * 0.20));
 
-  for (let i = 0; i < sampleRows; i++) {
-    const y = Math.floor((i + 0.5) * height / sampleRows);
-    let lastFrameD = 0;
-    let inContiguous = true; // must be a contiguous run from d=1
-
-    for (let d = 1; d <= maxThinDepth && inContiguous; d++) {
-      // 5-pixel horizontal window centred at depth d for this row
-      let sum = 0, sumSq = 0, count = 0;
-      for (let k = -2; k <= 2; k++) {
-        const col = side === 'left' ? d + k : width - 1 - d - k;
-        if (col < 0 || col >= width) continue;
-        const v = gray[y * width + col];
-        sum += v; sumSq += v * v; count++;
-      }
-      const mean     = sum / count;
-      const localVar = sumSq / count - mean * mean;
-
-      if (localVar < localVarThreshold) {
-        lastFrameD = d;
-      } else {
-        inContiguous = false; // first non-frame depth ends the contiguous run
-      }
+  function cornerMean(d) {
+    const col = side === 'left' ? d : width - 1 - d;
+    let sum = 0, count = 0;
+    for (let y = 0; y < bandH; y++) {
+      sum += gray[y * width + col]; count++;
     }
-
-    // Only count if we actually found the boundary (inContiguous=false means we hit
-    // non-frame content within the cap).  If the uniform region extends all the way
-    // to maxThinDepth without a boundary, skip — it's background, not a thin frame.
-    if (lastFrameD >= 2 && !inContiguous) depths.push(lastFrameD);
+    for (let y = height - bandH; y < height; y++) {
+      sum += gray[y * width + col]; count++;
+    }
+    return sum / count;
   }
 
-  if (depths.length < sampleRows * 0.4) return 0; // too few rows detected anything
-  depths.sort((a, b) => a - b);
-  return depths[Math.floor(depths.length * 0.25)]; // 25th percentile = conservative
+  // Establish edge reference from the outermost two columns.
+  const edgeRef = (cornerMean(1) + cornerMean(2)) / 2;
+
+  // Contrast guard: only proceed if edge is noticeably different from interior.
+  const interiorDepth = Math.min(maxThinDepth + 15, Math.floor(width * 0.12));
+  if (Math.abs(edgeRef - cornerMean(interiorDepth)) < 15) return 0;
+
+  let uniformCount = 0;
+  for (let d = 1; d <= maxThinDepth; d++) {
+    if (Math.abs(cornerMean(d) - edgeRef) < consistencyThreshold) {
+      uniformCount++;
+    } else {
+      if (uniformCount >= minBorderDepth) return d - 1;
+      return 0;
+    }
+  }
+  return 0;
 }
 
 /**
@@ -174,15 +218,28 @@ function findThinUniformBorderVert(gray, width, height, side, maxThinDepth, loca
  * @param {number} [options.maxCropFrac=0.25]       Max fraction of dimension for Sobel scan
  * @param {number} [options.minEdgeDensity=0.40]    Sobel: min fraction of pixels above threshold
  * @param {number} [options.edgeThreshold=20]       Sobel magnitude threshold (post-blur)
- * @param {number} [options.thinBorderVariance=200] Variance threshold for uniform border pass
- * @param {number} [options.thinBorderMaxFrac=0.06] Max fraction of dimension for thin-border scan
+ * @param {number}  [options.thinBorderVariance=200]    Row-variance threshold for top/bottom thin-border pass
+ * @param {number}  [options.thinBorderConsistency=40]  Corner-band mean consistency threshold for left/right pass (max deviation from edge reference; ~35 for mean_profile, ~40 here)
+ * @param {number}  [options.thinBorderMaxFrac=0.06]    Max fraction of dimension for thin-border scan
+ * @param {boolean} [options.crossSideValidation=true]  When T/B detect a border but L/R return 0 (or vice versa),
+ *                                                       test whether the missing sides have similar border material
+ *                                                       at the same depth. If color matches and material is uniform,
+ *                                                       infer that depth for the missing side.
+ * @param {number}  [options.crossMeanTolerance=30]     Max luminance difference (0–255) between reference and
+ *                                                       candidate side for cross-side inference to fire
+ * @param {number}  [options.crossVarMax=600]           Max pixel variance in candidate side's central band;
+ *                                                       high variance means painting content, not frame material
  */
 async function frameBoundaryPreProcessor(buffer, {
-  maxCropFrac        = 0.25,
-  minEdgeDensity     = 0.40,
-  edgeThreshold      = 20,
-  thinBorderVariance = 200,
-  thinBorderMaxFrac  = 0.06,
+  maxCropFrac           = 0.25,
+  minEdgeDensity        = 0.40,
+  edgeThreshold         = 20,
+  thinBorderVariance    = 200,
+  thinBorderConsistency = 40,
+  thinBorderMaxFrac     = 0.06,
+  crossSideValidation   = true,
+  crossMeanTolerance    = 45,
+  crossVarMax           = 800,
 } = {}) {
   const meta = await sharp(buffer).metadata();
   const { width: origW, height: origH } = meta;
@@ -241,12 +298,68 @@ async function frameBoundaryPreProcessor(buffer, {
     cBottom = Math.round(raw / scaleRatio);
   }
   if (cLeft   === 0 && thinGray) {
-    const raw = findThinUniformBorderVert(thinGray, thinW, thinH_dim, 'left',   thinH, thinBorderVariance);
+    const raw = findThinUniformBorderVert(thinGray, thinW, thinH_dim, 'left',   thinH, thinBorderConsistency);
     cLeft   = Math.round(raw / scaleRatio);
   }
   if (cRight  === 0 && thinGray) {
-    const raw = findThinUniformBorderVert(thinGray, thinW, thinH_dim, 'right',  thinH, thinBorderVariance);
+    const raw = findThinUniformBorderVert(thinGray, thinW, thinH_dim, 'right',  thinH, thinBorderConsistency);
     cRight  = Math.round(raw / scaleRatio);
+  }
+
+  // Pass 3: cross-side validation.
+  // For each undetected side, pick the best reference (prefer opposite, fall back to
+  // any detected side) and test whether the candidate has similar border material at
+  // the same depth. We iterate until no new inferences are possible.
+  //
+  // The reference variance guard is the key safety check: if the reference side's
+  // material is itself high-variance (multi-layer frame), we skip inference and let
+  // the recursive pipeline strip layers one at a time. Cross-side only fires when the
+  // reference is confirmed uniform (single-layer), where the depth transfer is safe.
+  //
+  // Sampling range: depth 1..thinDepth/2. Wide enough to characterize variance
+  // (distinguish single- vs multi-layer), shallow enough to avoid painting bleed.
+  if (crossSideValidation && thinGray) {
+    const SIDES    = ['top', 'bottom', 'left', 'right'];
+    const OPPOSITE = { top: 'bottom', bottom: 'top', left: 'right', right: 'left' };
+    const cByName   = { top: () => cTop, bottom: () => cBottom, left: () => cLeft, right: () => cRight };
+    const setByName = { top: v => { cTop = v; }, bottom: v => { cBottom = v; },
+                        left: v => { cLeft = v; }, right:  v => { cRight  = v; } };
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const miss of SIDES) {
+        if (cByName[miss]() > 0) continue;
+
+        const detected = SIDES.filter(s => cByName[s]() > 0);
+        if (detected.length === 0) break;
+
+        const opp           = OPPOSITE[miss];
+        const refSide       = (cByName[opp]() > 0) ? opp : detected[0];
+        const refSobelDepth = cByName[refSide]();
+        const thinDepth     = Math.max(2, Math.round(refSobelDepth * scaleRatio));
+        const outerTo       = Math.max(1, Math.round(thinDepth / 2));
+
+        const refStats = sampleBandStats(thinGray, thinW, thinH_dim, refSide, 1, outerTo);
+
+        // Guard: skip if reference is multi-layer (high variance). Let recursion
+        // strip layers until a uniform single-layer reference is exposed.
+        if (refStats.variance > crossVarMax) {
+          console.log(`[frame-boundary] cross-side: ${miss} skipped — ref ${refSide} var=${refStats.variance.toFixed(0)} (multi-layer, defer to recursion)`);
+          continue;
+        }
+
+        const cand = sampleBandStats(thinGray, thinW, thinH_dim, miss, 1, outerTo);
+
+        if (cand.variance < crossVarMax && Math.abs(cand.mean - refStats.mean) <= crossMeanTolerance) {
+          setByName[miss](Math.round(thinDepth / scaleRatio));
+          console.log(`[frame-boundary] cross-side: inferred ${miss}=${cByName[miss]()} from ${refSide} (Δmean=${Math.abs(cand.mean - refStats.mean).toFixed(1)}, var=${cand.variance.toFixed(0)})`);
+          changed = true;
+        } else {
+          console.log(`[frame-boundary] cross-side: ${miss} rejected (Δmean=${Math.abs(cand.mean - refStats.mean).toFixed(1)}, var=${cand.variance.toFixed(0)}, refMean=${refStats.mean.toFixed(1)})`);
+        }
+      }
+    }
   }
 
   if (cTop === 0 && cBottom === 0 && cLeft === 0 && cRight === 0) return buffer;

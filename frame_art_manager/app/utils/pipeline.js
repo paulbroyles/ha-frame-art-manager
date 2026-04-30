@@ -174,9 +174,17 @@ const PROCESSORS = {
 /**
  * Run a list of pipeline steps against an input buffer.
  *
+ * Each step is `{ key, options?, recursive?, maxPasses? }`.
+ *
+ * When `recursive: true` the step is re-applied until the image dimensions
+ * are stable or `maxPasses` (default 3) is reached.  Useful for multi-layer
+ * frame removal: each pass strips one detectable boundary, exposing the next.
+ * Target dimensions are recomputed from the new (smaller) image after each
+ * pass so downstream crop steps see the correct target.
+ *
  * @param {Buffer} buffer - Input image buffer
  * @param {'landscape'|'portrait'} orientation - TV orientation
- * @param {Array<{ key: string, options?: object }>} steps - Ordered processor steps
+ * @param {Array<{ key: string, options?: object, recursive?: boolean, maxPasses?: number }>} steps
  * @returns {Promise<{ buffer: Buffer, debug: object }>}
  */
 async function runPipeline(buffer, orientation, steps) {
@@ -209,7 +217,29 @@ async function runPipeline(buffer, orientation, steps) {
       console.warn(`[pipeline] Unknown processor key: '${step.key}', skipping`);
       continue;
     }
-    context = await entry.fn(context, step.options || {});
+
+    if (!step.recursive) {
+      context = await entry.fn(context, step.options || {});
+      continue;
+    }
+
+    // Recursive mode: repeat until dimensions are stable or maxPasses exhausted.
+    const maxPasses = step.maxPasses || 3;
+    for (let pass = 0; pass < maxPasses; pass++) {
+      const prevW = context.width;
+      const prevH = context.height;
+      context = await entry.fn(context, step.options || {});
+      if (context.width === prevW && context.height === prevH) {
+        if (pass > 0) console.log(`[pipeline] ${step.key} stable after ${pass + 1} pass(es)`);
+        break;
+      }
+      console.log(`[pipeline] ${step.key} pass ${pass + 1}: ${prevW}×${prevH} → ${context.width}×${context.height}`);
+      // Recompute target from new (cropped) dimensions so subsequent passes and
+      // downstream crop steps see the correct TV target.
+      const { finalW: newFW, finalH: newFH } = computeTargetDimensions(context.width, context.height, orientation);
+      context.targetW = newFW;
+      context.targetH = newFH;
+    }
   }
 
   return { buffer: context.buffer, debug: context.debug };

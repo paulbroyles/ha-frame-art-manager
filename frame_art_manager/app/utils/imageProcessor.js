@@ -34,6 +34,8 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
   preProcessOptions = {},
   cropEngine = 'sharp',
   cropEngineOptions = {},
+  recursive = false,
+  maxPasses = 3,
 } = {}) {
   // Map legacy params to pipeline steps.
   // preProcess = null  → skip phases 1+2; only crop
@@ -44,7 +46,7 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
   if (preProcess != null) {
     steps.push({ key: 'background_strip' });
     if (preProcess !== 'none' && PROCESSORS[preProcess]) {
-      steps.push({ key: preProcess, options: preProcessOptions });
+      steps.push({ key: preProcess, options: preProcessOptions, recursive, maxPasses });
     }
   }
 
@@ -96,6 +98,12 @@ const IMAGE_PROCESSING_SCHEMA = {
           description: 'Fraction of pixels in a row or column that must exceed the edge threshold to be considered a frame boundary line (0–1). Raise (0.5+) to avoid false positives on paintings with prominent horizontal/vertical composition lines.' },
         { key: 'edgeThreshold', label: 'Edge Threshold', type: 'number', default: 20,
           description: 'Sobel magnitude threshold (post Gaussian blur) above which a pixel is counted as an edge (0–255). Lower catches softer frame edges; raise to ignore subtle texture gradients.' },
+        { key: 'crossSideValidation', label: 'Cross-Side Validation', type: 'boolean', default: true,
+          description: 'When top/bottom detect a border but left/right return nothing (or vice versa), test whether the missing sides have similar border material at the same depth. Helps with thin uniform borders where Sobel finds the horizontal edge line but misses the vertical.' },
+        { key: 'crossMeanTolerance', label: 'Cross-Side Mean Tolerance', type: 'number', default: 45,
+          description: 'Maximum luminance difference (0–255) between the reference and candidate side for cross-side inference to fire. Lower values are more conservative; raise if similar-colored frames on different sides are being missed.' },
+        { key: 'crossVarMax', label: 'Cross-Side Variance Max', type: 'number', default: 800,
+          description: 'Maximum pixel variance in the candidate side\'s central band. High variance indicates painting content rather than frame material; the inference is suppressed. Lower to require more uniform material.' },
       ] },
     { value: 'variance_scan',    label: 'Variance Scan — detect frames by local edge variance (legacy)' },
     { value: 'trim',             label: 'Sharp Trim — background strip only (same as None; redundant with automatic Stage 1)' },

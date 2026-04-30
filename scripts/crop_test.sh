@@ -51,9 +51,12 @@ IMAGE_DESCS=(
 CONFIGS=(
   'sharp_attention|{"preProcessor":"none","cropEngine":"sharp","cropEngineOptions":{"strategy":"attention"},"pipeline":null,"unifiedProcessor":null}'
   'frame_boundary+sharp|{"preProcessor":"frame_boundary","cropEngine":"sharp","cropEngineOptions":{"strategy":"attention"},"pipeline":null,"unifiedProcessor":null}'
+  'fb_no_crossside|{"pipeline":[{"key":"background_strip"},{"key":"frame_boundary","options":{"crossSideValidation":false}},{"key":"sharp_crop","options":{"strategy":"attention"}}],"preProcessor":null,"unifiedProcessor":null}'
   'frame_boundary+face_aware|{"preProcessor":"frame_boundary","cropEngine":"face_aware","cropEngineOptions":{"scoreThreshold":0.35,"fallbackStrategy":"attention"},"pipeline":null,"unifiedProcessor":null}'
   'face_aware_only|{"preProcessor":"none","cropEngine":"face_aware","cropEngineOptions":{"scoreThreshold":0.35,"fallbackStrategy":"attention"},"pipeline":null,"unifiedProcessor":null}'
   'mean_profile+sharp|{"preProcessor":"mean_profile","cropEngine":"sharp","cropEngineOptions":{"strategy":"attention"},"pipeline":null,"unifiedProcessor":null}'
+  'fb_recursive_preonly|{"pipeline":[{"key":"background_strip"},{"key":"frame_boundary","recursive":true,"maxPasses":3}],"preProcessor":null,"unifiedProcessor":null}'
+  'fb_recursive+sharp|{"pipeline":[{"key":"background_strip"},{"key":"frame_boundary","recursive":true,"maxPasses":3},{"key":"sharp_crop","options":{"strategy":"attention"}}],"preProcessor":null,"unifiedProcessor":null}'
 )
 
 # ---------------------------------------------------------------------------
