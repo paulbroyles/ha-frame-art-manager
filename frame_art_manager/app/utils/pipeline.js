@@ -228,7 +228,11 @@ async function runPipeline(buffer, orientation, steps) {
     for (let pass = 0; pass < maxPasses; pass++) {
       const prevW = context.width;
       const prevH = context.height;
-      context = await entry.fn(context, step.options || {});
+      // isFirstPass lets processors tighten guards on subsequent passes — e.g.
+      // frame_boundary blocks below-gate cross-side references on pass 1+ to
+      // prevent false-positive chains from painting content exposed by pass 0.
+      const opts = Object.assign({ isFirstPass: pass === 0 }, step.options || {});
+      context = await entry.fn(context, opts);
       if (context.width === prevW && context.height === prevH) {
         if (pass > 0) console.log(`[pipeline] ${step.key} stable after ${pass + 1} pass(es)`);
         break;

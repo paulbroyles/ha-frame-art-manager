@@ -57,6 +57,7 @@ CONFIGS=(
   'mean_profile+sharp|{"preProcessor":"mean_profile","cropEngine":"sharp","cropEngineOptions":{"strategy":"attention"},"pipeline":null,"unifiedProcessor":null}'
   'fb_recursive_preonly|{"pipeline":[{"key":"background_strip"},{"key":"frame_boundary","recursive":true,"maxPasses":3}],"preProcessor":null,"unifiedProcessor":null}'
   'fb_recursive+sharp|{"pipeline":[{"key":"background_strip"},{"key":"frame_boundary","recursive":true,"maxPasses":3},{"key":"sharp_crop","options":{"strategy":"attention"}}],"preProcessor":null,"unifiedProcessor":null}'
+  'fb_recursive+face_aware|{"pipeline":[{"key":"background_strip"},{"key":"frame_boundary","recursive":true,"maxPasses":3},{"key":"face_aware_crop","options":{"scoreThreshold":0.35,"fallbackStrategy":"attention"}}],"preProcessor":null,"unifiedProcessor":null}'
 )
 
 # ---------------------------------------------------------------------------
