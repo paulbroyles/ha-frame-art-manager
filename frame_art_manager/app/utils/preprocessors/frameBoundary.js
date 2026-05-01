@@ -94,9 +94,10 @@ function findInnerEdge(
   if (lastValidEdge === 0) return { depth: 0, confidence: 0 };
 
   // Coverage uniformity: check each third of the row/column independently.
-  // A genuine frame edge has nonzero density across the full span; a localized
-  // painting feature (head, composition line) is concentrated in one third with
-  // near-zero density in the outer thirds.
+  // A genuine frame edge spans the full width/height; a localized painting feature
+  // is concentrated in fewer thirds. Used as a confidence weight (uniformity = thirdsPass/3)
+  // rather than a hard gate — the gate caused regressions on textured frames (wood grain)
+  // whose boundary row has uneven edge density across thirds.
   const thirdLen = Math.floor(total / 3);
   let thirdsPass = 0;
   for (let t = 0; t < 3; t++) {
@@ -210,6 +211,29 @@ function findThinUniformBorderHoriz(gray, width, height, side, maxThinDepth, var
       uniformCount++;
     } else {
       if (uniformCount >= minBorderDepth) {
+        // Boundary consistency check: only applied when the uniform run is suspiciously
+        // long (≥ 10 rows). Short runs are genuine thin frames; long runs may be a dark
+        // painting background (which has low variance across many rows). For long runs,
+        // require the transition row to be high-variance across ≥ 2 of 3 horizontal thirds
+        // — genuine frame boundaries end consistently across the full width, while painting
+        // content (e.g. a figure's head emerging from a dark background) produces high
+        // variance only in the centre third.
+        if (uniformCount >= 30) {
+          const bW = Math.floor((x1 - x0) / 3);
+          let thirdsHigh = 0;
+          for (let b = 0; b < 3; b++) {
+            const bx0 = x0 + b * bW;
+            const bx1 = (b === 2) ? x1 : (bx0 + bW);
+            const bN  = bx1 - bx0;
+            let s = 0, sq = 0;
+            for (let x = bx0; x < bx1; x++) { const v = gray[row * width + x]; s += v; sq += v * v; }
+            const bMean = s / bN;
+            if (sq / bN - bMean * bMean >= varianceThreshold) thirdsHigh++;
+          }
+          if (thirdsHigh < 2) {
+            return { depth: 0, confidence: 0 };
+          }
+        }
         const avgVar          = sumVariance / uniformCount;
         const uniformityQual  = Math.max(0, 1 - avgVar / varianceThreshold);
         const boundaryClarity = Math.min(1, (variance - varianceThreshold) / varianceThreshold);
@@ -224,7 +248,6 @@ function findThinUniformBorderHoriz(gray, width, height, side, maxThinDepth, var
       return { depth: 0, confidence: 0 };
     }
   }
-  if (side === 'bottom') console.log(`[thinBorder-diag] bottom: scan exhausted maxThinDepth=${maxThinDepth}`);
   return { depth: 0, confidence: 0 };
 }
 
