@@ -70,7 +70,13 @@ function findInnerEdge(
     densities[d] = above / total;
   }
 
-  // Accept candidate at depth d only if dense AND the next peekRows are sparse.
+  // Accept candidate at depth d only if dense AND the next peekRows indicate sparse
+  // interior. Two acceptance modes:
+  //   (a) All peek rows strictly sparse (< sparseDensity): existing behaviour.
+  //   (b) Dramatic-drop: candidate density ≥ 3× peek average AND peek average
+  //       stays below sparseDensity×1.5. Handles ornate/complex frames where a
+  //       single transition row slightly exceeds the absolute sparse threshold due
+  //       to paint or texture bleed at the exact frame-to-canvas boundary.
   // Keep the innermost (largest d) such candidate.
   let lastValidEdge  = 0;
   let bestDensity    = 0;
@@ -78,16 +84,26 @@ function findInnerEdge(
 
   for (let d = 1; d <= maxDepth; d++) {
     if (densities[d] < minDensity) continue;
-    let allSparse = true;
     let peekSum = 0, peekCount = 0;
+    let anyNonSparse = false;
     for (let p = 1; p <= peekRows && d + p <= scanLimit; p++) {
-      peekSum += densities[d + p]; peekCount++;
-      if (densities[d + p] >= sparseDensity) { allSparse = false; break; }
+      const pd = densities[d + p];
+      peekSum += pd; peekCount++;
+      if (pd >= sparseDensity) anyNonSparse = true;
     }
-    if (allSparse) {
+    const peekAvg  = peekCount > 0 ? peekSum / peekCount : 0;
+    const allSparse = !anyNonSparse;
+    // Secondary criterion: allows ornate frames whose inner boundary row produces
+    // one slightly-above-threshold peek value. Requires a sharp drop (candidate
+    // density ≥ 4× peek average) so gradual interior patterns don't trigger it.
+    const dramaticDrop = !allSparse &&
+      peekAvg < sparseDensity * 1.5 &&
+      densities[d] >= peekAvg * 4.0;
+
+    if (allSparse || dramaticDrop) {
       lastValidEdge = d;
       bestDensity   = densities[d];
-      bestPeekAvg   = peekCount > 0 ? peekSum / peekCount : 0;
+      bestPeekAvg   = peekAvg;
     }
   }
 
@@ -333,7 +349,7 @@ function findThinUniformBorderVert(gray, width, height, side, maxThinDepth, cons
  * @param {number} [options.thinBorderMaxFrac=0.10]   Max fraction of dimension for thin-border scan
  * @param {boolean} [options.crossSideValidation=true] Infer missing sides from detected sides
  * @param {number}  [options.crossMeanTolerance=45]   Max luminance difference for cross-side inference
- * @param {number}  [options.crossVarMax=800]         Max variance for the REFERENCE band (blocks ornate/multi-layer refs; defer to recursion)
+ * @param {number}  [options.crossVarMax=1240]        Max variance for the REFERENCE band (blocks ornate/multi-layer refs; defer to recursion)
  * @param {number}  [options.crossCandVarMax=1500]    Max variance for the CANDIDATE band (allows textured single-layer like wood grain)
  * @param {number}  [options.minConfidence=0.40]      Discard detections below this confidence (0..1)
  * @param {boolean} [options.isFirstPass=true]        Set false on recursive pass 2+ to block below-gate cross-side fallback refs
@@ -347,7 +363,7 @@ async function frameBoundaryPreProcessor(buffer, {
   thinBorderMaxFrac     = 0.10,
   crossSideValidation   = true,
   crossMeanTolerance    = 45,
-  crossVarMax           = 800,
+  crossVarMax           = 1240,
   crossCandVarMax       = 1500,
   minConfidence         = 0.40,
   isFirstPass           = true,
@@ -400,6 +416,10 @@ async function frameBoundaryPreProcessor(buffer, {
   if (cLeft   > 0 && confLeft   < confGate) { console.log(`[frame-boundary] left   rejected by confidence (${confLeft.toFixed(2)} < ${minConfidence})`);   cLeft   = 0; confLeft   = 0; }
   if (cRight  > 0 && confRight  < confGate) { console.log(`[frame-boundary] right  rejected by confidence (${confRight.toFixed(2)} < ${minConfidence})`);  cRight  = 0; confRight  = 0; }
 
+  // Asymmetry guard: if one side of an opposite pair is detected much shallower
+  // than the other (< 25% of its depth), it likely fired on an intermediate frame
+  // layer rather than the true inner boundary. Zero the shallower detection so
+  // cross-side can infer the correct depth from the deeper reference.
   // Pass 2: thin uniform border — runs on sides still zero after Sobel + gate.
   // Runs BEFORE cross-side so thin-border detections are first-class seeds for
   // cross-side inference (e.g. gold top detected by thin-border → infer bottom).
@@ -446,6 +466,26 @@ async function frameBoundaryPreProcessor(buffer, {
     const { depth: raw, confidence } = findThinUniformBorderVert(thinGray, thinW, thinH_dim, 'right',  thinH, thinBorderConsistency);
     const d = Math.round(raw / scaleRatio);
     if (d > 0) { cRight = d; confRight = confidence; }
+  }
+
+  // Asymmetry guard (post-thin-border): if one side of an opposite pair is much shallower
+  // than the other (< 25% of its depth), it likely fired on an intermediate frame layer
+  // rather than the true inner boundary. Zero the shallower detection so cross-side can
+  // infer the correct depth from the deeper reference. Runs after thin-border so that
+  // sides detected only by thin-border (not Sobel) participate in the comparison.
+  if (cLeft > 0 && cRight > 0 && cRight < cLeft * 0.25) {
+    console.log(`[frame-boundary] right zeroed by asymmetry guard (right=${cRight} < left=${cLeft} * 0.25)`);
+    cRight = 0; confRight = 0;
+  } else if (cLeft > 0 && cRight > 0 && cLeft < cRight * 0.25) {
+    console.log(`[frame-boundary] left zeroed by asymmetry guard (left=${cLeft} < right=${cRight} * 0.25)`);
+    cLeft = 0; confLeft = 0;
+  }
+  if (cTop > 0 && cBottom > 0 && cBottom < cTop * 0.25) {
+    console.log(`[frame-boundary] bottom zeroed by asymmetry guard (bottom=${cBottom} < top=${cTop} * 0.25)`);
+    cBottom = 0; confBottom = 0;
+  } else if (cTop > 0 && cBottom > 0 && cTop < cBottom * 0.25) {
+    console.log(`[frame-boundary] top zeroed by asymmetry guard (top=${cTop} < bottom=${cBottom} * 0.25)`);
+    cTop = 0; confTop = 0;
   }
 
   // Pass 3: cross-side validation.
@@ -553,6 +593,35 @@ async function frameBoundaryPreProcessor(buffer, {
           if (csEdgeDensity < csMinDensity) {
             console.log(`[frame-boundary] cross-side: ${miss} no edge at depth (density=${csEdgeDensity.toFixed(2)} < ${csMinDensity.toFixed(2)})`);
           } else {
+            // Profile variance guard: the inferred band should be laterally uniform
+            // (frame material), not a defined shape with high contrast between one
+            // side and the other (arch, figure silhouette). Computes the variance of
+            // column means (for top/bottom) or row means (for left/right) across the
+            // full width of the inferred band in the thin buffer.
+            if (thinDepth > 1) {
+              const profileLen = csIsH ? thinW : thinH_dim;
+              let pSum = 0, pSumSq = 0;
+              for (let p = 0; p < profileLen; p++) {
+                let bandSum = 0;
+                for (let d = 0; d < thinDepth; d++) {
+                  const px = csIsH
+                    ? (miss === 'top' ? d : thinH_dim - 1 - d) * thinW + p
+                    : p * thinW + (miss === 'left' ? d : thinW - 1 - d);
+                  bandSum += thinGray[px];
+                }
+                const colMean = bandSum / thinDepth;
+                pSum   += colMean;
+                pSumSq += colMean * colMean;
+              }
+              const pMean = pSum / profileLen;
+              const profileVar = pSumSq / profileLen - pMean * pMean;
+              const maxProfileVar = 600;
+              console.log(`[frame-boundary] cross-side: ${miss} profile-var=${profileVar.toFixed(0)} (from ${refSide})`);
+              if (profileVar > maxProfileVar) {
+                console.log(`[frame-boundary] cross-side: ${miss} blocked — shaped content (profile-var=${profileVar.toFixed(0)} > ${maxProfileVar})`);
+                continue;
+              }
+            }
             const matchQuality    = Math.max(0, 1 - Math.abs(cand.mean - refStats.mean) / crossMeanTolerance);
             const crossConfidence = (0.5 + 0.5 * matchQuality) * 0.85;
             const inferredDepth   = Math.round(thinDepth / scaleRatio);
