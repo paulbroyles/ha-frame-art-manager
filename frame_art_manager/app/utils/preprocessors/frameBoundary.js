@@ -349,8 +349,8 @@ function findThinUniformBorderVert(gray, width, height, side, maxThinDepth, cons
  * @param {number} [options.thinBorderMaxFrac=0.10]   Max fraction of dimension for thin-border scan
  * @param {boolean} [options.crossSideValidation=true] Infer missing sides from detected sides
  * @param {number}  [options.crossMeanTolerance=45]   Max luminance difference for cross-side inference
- * @param {number}  [options.crossVarMax=1240]        Max variance for the REFERENCE band (blocks ornate/multi-layer refs; defer to recursion)
- * @param {number}  [options.crossCandVarMax=2500]    Max variance for the CANDIDATE band (allows textured single-layer like wood grain)
+ * @param {number}  [options.crossVarMax=2500]        Max variance for the REFERENCE band (blocks ornate/multi-layer refs; defer to recursion)
+ * @param {number}  [options.crossCandVarMax=4000]    Max variance for the CANDIDATE band (allows textured single-layer like wood grain)
  * @param {number}  [options.minConfidence=0.40]      Discard detections below this confidence (0..1)
  * @param {boolean} [options.isFirstPass=true]        Set false on recursive pass 2+ to block below-gate cross-side fallback refs
  */
@@ -363,8 +363,8 @@ async function frameBoundaryPreProcessor(buffer, {
   thinBorderMaxFrac     = 0.10,
   crossSideValidation   = true,
   crossMeanTolerance    = 45,
-  crossVarMax           = 1240,
-  crossCandVarMax       = 2500,
+  crossVarMax           = 2500,
+  crossCandVarMax       = 4000,
   minConfidence         = 0.40,
   isFirstPass           = true,
 } = {}) {
@@ -393,6 +393,7 @@ async function frameBoundaryPreProcessor(buffer, {
   let { depth: cBottom, confidence: confBottom } = findInnerEdge(edges, anaW, anaH, 'bottom', maxV, minEdgeDensity, edgeThreshold);
   let { depth: cLeft,   confidence: confLeft   } = findInnerEdge(edges, anaW, anaH, 'left',   maxH, minEdgeDensity, edgeThreshold);
   let { depth: cRight,  confidence: confRight  } = findInnerEdge(edges, anaW, anaH, 'right',  maxH, minEdgeDensity, edgeThreshold);
+
 
   // Confidence gate: applied to Sobel detections BEFORE thin-border and cross-side run.
   // Below-gate Sobel sides are zeroed so they don't pollute thin-border upgrade logic
@@ -550,54 +551,67 @@ async function frameBoundaryPreProcessor(buffer, {
 
         if (detected.length === 0) break;
 
-        const opp     = OPPOSITE[miss];
-        const refSide = (detected.includes(opp)) ? opp : detected[0];
-        const refSobelDepth = usingFallback ? pregate[refSide].depth : depthByName[refSide]();
-        const thinDepth     = Math.max(2, Math.round(refSobelDepth * scaleRatio));
-        const outerTo       = Math.max(1, Math.round(thinDepth / 2));
+        // Try references in priority order: opposite side first, then others.
+        // A single disqualified reference (e.g. multi-layer ref variance) no longer
+        // blocks inference — we fall through to the next available reference instead.
+        const opp = OPPOSITE[miss];
+        const refsInOrder = [
+          ...(detected.includes(opp) ? [opp] : []),
+          ...detected.filter(s => s !== opp),
+        ];
 
-        const refStats = sampleBandStats(thinGray, thinW, thinH_dim, refSide, 1, outerTo);
+        for (const refSide of refsInOrder) {
+          if (depthByName[miss]() > 0) break; // already inferred by a previous ref
 
-        // Guard: skip if reference is multi-layer (high variance).
-        if (refStats.variance > crossVarMax) {
-          console.log(`[frame-boundary] cross-side: ${miss} skipped — ref ${refSide} var=${refStats.variance.toFixed(0)} (multi-layer, defer to recursion)`);
-          continue;
-        }
+          const refSobelDepth = usingFallback ? pregate[refSide].depth : depthByName[refSide]();
+          const thinDepth     = Math.max(2, Math.round(refSobelDepth * scaleRatio));
+          const outerTo       = Math.max(1, Math.round(thinDepth / 2));
 
-        const cand = sampleBandStats(thinGray, thinW, thinH_dim, miss, 1, outerTo);
+          const refStats = sampleBandStats(thinGray, thinW, thinH_dim, refSide, 1, outerTo);
 
-        if (cand.variance < crossCandVarMax && Math.abs(cand.mean - refStats.mean) <= crossMeanTolerance) {
-          // Material match passed. Also verify that the candidate side has a real Sobel
-          // edge at the inferred depth — not just matching color. A physical frame boundary
-          // produces an edge signal everywhere it goes; a head contour or uniform painting
-          // background matches in color but has no corresponding edge on other sides.
-          const csD     = Math.max(1, Math.min(refSobelDepth,
-            (miss === 'top' || miss === 'bottom') ? anaH - 2 : anaW - 2));
-          const csIsH   = miss === 'top' || miss === 'bottom';
-          const csTotal = csIsH ? anaW : anaH;
-          let csAbove = 0;
-          if (csIsH) {
-            const csRow = miss === 'top' ? csD : anaH - 1 - csD;
-            for (let x = 0; x < anaW; x++) if (edges[csRow * anaW + x] >= edgeThreshold) csAbove++;
-          } else {
-            const csCol = miss === 'left' ? csD : anaW - 1 - csD;
-            for (let y = 0; y < anaH; y++) if (edges[y * anaW + csCol] >= edgeThreshold) csAbove++;
+          // Guard: skip if reference is multi-layer (high variance) — try next ref.
+          if (refStats.variance > crossVarMax) {
+            console.log(`[frame-boundary] cross-side: ${miss} skipped — ref ${refSide} var=${refStats.variance.toFixed(0)} (multi-layer, defer to recursion)`);
+            continue;
           }
-          const csEdgeDensity = csAbove / csTotal;
-          // 0.05 absolute floor: any real frame material produces at least 5% edge pixels
-          // at analysis scale. Truly empty sides (dark background, ~0.00–0.01) are blocked;
-          // weak frame edges (0.10+) pass. Well below minEdgeDensity (0.40) since cross-side
-          // is a fallback for sides Sobel couldn't directly detect.
-          const csMinDensity  = 0.05;
 
-          if (csEdgeDensity < csMinDensity) {
-            console.log(`[frame-boundary] cross-side: ${miss} no edge at depth (density=${csEdgeDensity.toFixed(2)} < ${csMinDensity.toFixed(2)})`);
-          } else {
+          const cand = sampleBandStats(thinGray, thinW, thinH_dim, miss, 1, outerTo);
+
+          if (cand.variance < crossCandVarMax && Math.abs(cand.mean - refStats.mean) <= crossMeanTolerance) {
+            // Material match passed. Also verify that the candidate side has a real Sobel
+            // edge at the inferred depth — not just matching color. A physical frame boundary
+            // produces an edge signal everywhere it goes; a head contour or uniform painting
+            // background matches in color but has no corresponding edge on other sides.
+            const csD     = Math.max(1, Math.min(refSobelDepth,
+              (miss === 'top' || miss === 'bottom') ? anaH - 2 : anaW - 2));
+            const csIsH   = miss === 'top' || miss === 'bottom';
+            const csTotal = csIsH ? anaW : anaH;
+            let csAbove = 0;
+            if (csIsH) {
+              const csRow = miss === 'top' ? csD : anaH - 1 - csD;
+              for (let x = 0; x < anaW; x++) if (edges[csRow * anaW + x] >= edgeThreshold) csAbove++;
+            } else {
+              const csCol = miss === 'left' ? csD : anaW - 1 - csD;
+              for (let y = 0; y < anaH; y++) if (edges[y * anaW + csCol] >= edgeThreshold) csAbove++;
+            }
+            const csEdgeDensity = csAbove / csTotal;
+            // 0.05 absolute floor: any real frame material produces at least 5% edge pixels
+            // at analysis scale. Truly empty sides (dark background, ~0.00–0.01) are blocked;
+            // weak frame edges (0.10+) pass. Well below minEdgeDensity (0.40) since cross-side
+            // is a fallback for sides Sobel couldn't directly detect.
+            const csMinDensity = 0.05;
+
+            if (csEdgeDensity < csMinDensity) {
+              console.log(`[frame-boundary] cross-side: ${miss} no edge at depth (density=${csEdgeDensity.toFixed(2)} < ${csMinDensity.toFixed(2)}) — trying next ref`);
+              continue;
+            }
+
             // Profile variance guard: the inferred band should be laterally uniform
             // (frame material), not a defined shape with high contrast between one
             // side and the other (arch, figure silhouette). Computes the variance of
             // column means (for top/bottom) or row means (for left/right) across the
-            // full width of the inferred band in the thin buffer.
+            // full width of the inferred band in the thin buffer. The reference side's
+            // profile variance is logged for diagnostics but not used for gating.
             if (thinDepth > 1) {
               const profileLen = csIsH ? thinW : thinH_dim;
               let pSum = 0, pSumSq = 0;
@@ -615,10 +629,29 @@ async function frameBoundaryPreProcessor(buffer, {
               }
               const pMean = pSum / profileLen;
               const profileVar = pSumSq / profileLen - pMean * pMean;
+
+              const refIsH = refSide === 'top' || refSide === 'bottom';
+              const refProfileLen = refIsH ? thinW : thinH_dim;
+              let rpSum = 0, rpSumSq = 0;
+              for (let p = 0; p < refProfileLen; p++) {
+                let bandSum = 0;
+                for (let d = 0; d < thinDepth; d++) {
+                  const px = refIsH
+                    ? (refSide === 'top' ? d : thinH_dim - 1 - d) * thinW + p
+                    : p * thinW + (refSide === 'left' ? d : thinW - 1 - d);
+                  bandSum += thinGray[px];
+                }
+                const colMean = bandSum / thinDepth;
+                rpSum   += colMean;
+                rpSumSq += colMean * colMean;
+              }
+              const rpMean = rpSum / refProfileLen;
+              const refProfileVar = rpSumSq / refProfileLen - rpMean * rpMean;
+
               const maxProfileVar = 600;
-              console.log(`[frame-boundary] cross-side: ${miss} profile-var=${profileVar.toFixed(0)} (from ${refSide})`);
+              console.log(`[frame-boundary] cross-side: ${miss} profile-var=${profileVar.toFixed(0)} ref-profile-var=${refProfileVar.toFixed(0)} ratio=${refProfileVar > 0 ? (profileVar / refProfileVar).toFixed(2) : 'inf'} (from ${refSide})`);
               if (profileVar > maxProfileVar) {
-                console.log(`[frame-boundary] cross-side: ${miss} blocked — shaped content (profile-var=${profileVar.toFixed(0)} > ${maxProfileVar})`);
+                console.log(`[frame-boundary] cross-side: ${miss} blocked — profile-var=${profileVar.toFixed(0)} > max=${maxProfileVar} — trying next ref`);
                 continue;
               }
             }
@@ -629,9 +662,9 @@ async function frameBoundaryPreProcessor(buffer, {
             corroboration[refSide].push(matchQuality);
             console.log(`[frame-boundary] cross-side: inferred ${miss}=${inferredDepth} from ${refSide} conf=${crossConfidence.toFixed(2)} edge=${csEdgeDensity.toFixed(2)} (Δmean=${Math.abs(cand.mean - refStats.mean).toFixed(1)}, var=${cand.variance.toFixed(0)})`);
             changed = true;
+          } else {
+            console.log(`[frame-boundary] cross-side: ${miss} rejected (Δmean=${Math.abs(cand.mean - refStats.mean).toFixed(1)}, var=${cand.variance.toFixed(0)}, refMean=${refStats.mean.toFixed(1)}) — trying next ref`);
           }
-        } else {
-          console.log(`[frame-boundary] cross-side: ${miss} rejected (Δmean=${Math.abs(cand.mean - refStats.mean).toFixed(1)}, var=${cand.variance.toFixed(0)}, refMean=${refStats.mean.toFixed(1)})`);
         }
       }
     }
@@ -649,6 +682,7 @@ async function frameBoundaryPreProcessor(buffer, {
       setByName[side](depthByName[side](), newConf);
       console.log(`[frame-boundary] cross-side: corroboration boosted ${side} ${oldConf.toFixed(2)} → ${newConf.toFixed(2)} (${corroboration[side].length} inferences, boost=${boost.toFixed(2)})`);
     }
+
   }
 
   if (cTop === 0 && cBottom === 0 && cLeft === 0 && cRight === 0) return buffer;
