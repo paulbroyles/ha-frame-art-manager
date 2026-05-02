@@ -350,7 +350,7 @@ function findThinUniformBorderVert(gray, width, height, side, maxThinDepth, cons
  * @param {boolean} [options.crossSideValidation=true] Infer missing sides from detected sides
  * @param {number}  [options.crossMeanTolerance=45]   Max luminance difference for cross-side inference
  * @param {number}  [options.crossVarMax=1240]        Max variance for the REFERENCE band (blocks ornate/multi-layer refs; defer to recursion)
- * @param {number}  [options.crossCandVarMax=1500]    Max variance for the CANDIDATE band (allows textured single-layer like wood grain)
+ * @param {number}  [options.crossCandVarMax=2500]    Max variance for the CANDIDATE band (allows textured single-layer like wood grain)
  * @param {number}  [options.minConfidence=0.40]      Discard detections below this confidence (0..1)
  * @param {boolean} [options.isFirstPass=true]        Set false on recursive pass 2+ to block below-gate cross-side fallback refs
  */
@@ -364,7 +364,7 @@ async function frameBoundaryPreProcessor(buffer, {
   crossSideValidation   = true,
   crossMeanTolerance    = 45,
   crossVarMax           = 1240,
-  crossCandVarMax       = 1500,
+  crossCandVarMax       = 2500,
   minConfidence         = 0.40,
   isFirstPass           = true,
 } = {}) {
