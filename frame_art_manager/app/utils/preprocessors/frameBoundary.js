@@ -474,19 +474,20 @@ async function frameBoundaryPreProcessor(buffer, {
   // rather than the true inner boundary. Zero the shallower detection so cross-side can
   // infer the correct depth from the deeper reference. Runs after thin-border so that
   // sides detected only by thin-border (not Sobel) participate in the comparison.
+  const asymmetryZeroed = new Set();
   if (cLeft > 0 && cRight > 0 && cRight < cLeft * 0.25) {
     console.log(`[frame-boundary] right zeroed by asymmetry guard (right=${cRight} < left=${cLeft} * 0.25)`);
-    cRight = 0; confRight = 0;
+    cRight = 0; confRight = 0; asymmetryZeroed.add('right');
   } else if (cLeft > 0 && cRight > 0 && cLeft < cRight * 0.25) {
     console.log(`[frame-boundary] left zeroed by asymmetry guard (left=${cLeft} < right=${cRight} * 0.25)`);
-    cLeft = 0; confLeft = 0;
+    cLeft = 0; confLeft = 0; asymmetryZeroed.add('left');
   }
   if (cTop > 0 && cBottom > 0 && cBottom < cTop * 0.25) {
     console.log(`[frame-boundary] bottom zeroed by asymmetry guard (bottom=${cBottom} < top=${cTop} * 0.25)`);
-    cBottom = 0; confBottom = 0;
+    cBottom = 0; confBottom = 0; asymmetryZeroed.add('bottom');
   } else if (cTop > 0 && cBottom > 0 && cTop < cBottom * 0.25) {
     console.log(`[frame-boundary] top zeroed by asymmetry guard (top=${cTop} < bottom=${cBottom} * 0.25)`);
-    cTop = 0; confTop = 0;
+    cTop = 0; confTop = 0; asymmetryZeroed.add('top');
   }
 
   // Pass 3: cross-side validation.
@@ -681,6 +682,26 @@ async function frameBoundaryPreProcessor(buffer, {
       const newConf = Math.min(1.0, oldConf + boost);
       setByName[side](depthByName[side](), newConf);
       console.log(`[frame-boundary] cross-side: corroboration boosted ${side} ${oldConf.toFixed(2)} → ${newConf.toFixed(2)} (${corroboration[side].length} inferences, boost=${boost.toFixed(2)})`);
+    }
+
+    // Isolated-detection guard: if exactly one side is non-zero, no cross-side
+    // inference succeeded, AND the opposite side was zeroed by the asymmetry guard,
+    // the detection is almost certainly a false positive. Real frames produce
+    // symmetric material — an asymmetric pair where the weak side was explicitly
+    // zeroed and the strong side can't find any matching material on any other side
+    // is more likely a dark-edge false positive (arch, bg strip) than an actual frame.
+    // Restricting to asymmetry-zeroed-opposite avoids firing on legitimate isolated
+    // single-side detections where the other sides simply weren't detected yet (e.g.
+    // thin inner frame in a recursive pass where cross-side happens to fail by Δmean).
+    const totalInferences = SIDES.reduce((sum, s) => sum + corroboration[s].length, 0);
+    const nonZeroSides = SIDES.filter(s => depthByName[s]() > 0);
+    if (nonZeroSides.length === 1 && totalInferences === 0) {
+      const isolatedSide = nonZeroSides[0];
+      const opp = { top: 'bottom', bottom: 'top', left: 'right', right: 'left' }[isolatedSide];
+      if (asymmetryZeroed.has(opp)) {
+        setByName[isolatedSide](0, 0);
+        console.log(`[frame-boundary] ${isolatedSide} zeroed — isolated detection, opposite (${opp}) was asymmetry-zeroed, no cross-side corroboration`);
+      }
     }
 
   }
