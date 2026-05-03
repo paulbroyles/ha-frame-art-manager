@@ -1033,6 +1033,8 @@ function switchToAdvancedSubTab(tabName) {
     loadBlacklistTab();
   } else if (targetTab === 'moods') {
     loadMoodsTab();
+  } else if (targetTab === 'calendar-events') {
+    loadCalendarEventsTab();
   }
 }
 
@@ -1369,6 +1371,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initGalleryInfiniteScroll(); // Initialize infinite scroll for gallery
   initTagsetModalListeners(); // Initialize tagset modal event listeners
   initMoodModalListeners();   // Initialize mood modal event listeners
+  initCalendarEventModalListeners(); // Initialize calendar event modal listeners
   initWebSourceSettingsModal(); // Initialize web source settings modal
   initVirtualTagModal(); // Initialize virtual tag modal
   
@@ -18829,4 +18832,437 @@ function renderPreviewSearchResults(data, query, container) {
   html += '</div>';
 
   container.innerHTML = html;
+}
+
+// ============================================================================
+// CALENDAR EVENTS TAB
+// ============================================================================
+
+let allCalendarEvents = {};          // id -> eventDef (from server)
+let calendarEntityId = null;         // currently configured HA calendar entity ID
+let calEventModalId = null;          // null = create, string = edit
+let allHaCalendars = [];             // [{ entity_id, name }]
+
+// ── Data loading ──────────────────────────────────────────────────────────────
+
+async function loadCalendarEventsData() {
+  try {
+    const resp = await fetch(`${API_BASE}/calendar-events`);
+    const data = await resp.json();
+    allCalendarEvents = data.events || {};
+    calendarEntityId = data.calendar_entity_id || null;
+  } catch (err) {
+    console.error('[calendar-events] Failed to load:', err);
+    allCalendarEvents = {};
+    calendarEntityId = null;
+  }
+}
+
+async function loadCalendarEventsTab() {
+  await loadCalendarEventsData();
+  renderCalendarEntityConfig();
+  renderCalendarEventsTable();
+}
+
+// ── Calendar entity config row ────────────────────────────────────────────────
+
+async function loadHaCalendarsForConfig() {
+  const select = document.getElementById('calendar-entity-select');
+  if (!select) return;
+  try {
+    const resp = await fetch(`${API_BASE}/calendar-events/calendars`);
+    const data = await resp.json();
+    allHaCalendars = data.calendars || [];
+    const currentVal = calendarEntityId || '';
+    select.innerHTML = '<option value="">— Not configured —</option>' +
+      allHaCalendars.map(c =>
+        `<option value="${escapeHtml(c.entity_id)}"${c.entity_id === currentVal ? ' selected' : ''}>${escapeHtml(c.name || c.entity_id)}</option>`
+      ).join('');
+  } catch {
+    select.innerHTML = '<option value="">Failed to load calendars</option>';
+  }
+}
+
+function renderCalendarEntityConfig() {
+  loadHaCalendarsForConfig();
+  const status = document.getElementById('calendar-entity-status');
+  if (status) status.textContent = calendarEntityId ? `Active: ${calendarEntityId}` : 'Not configured';
+}
+
+async function saveCalendarEntityId() {
+  const select = document.getElementById('calendar-entity-select');
+  const status = document.getElementById('calendar-entity-status');
+  if (!select) return;
+  const val = select.value || null;
+  try {
+    const resp = await fetch(`${API_BASE}/calendar-events/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ calendar_entity_id: val }),
+    });
+    const result = await resp.json();
+    if (result.success) {
+      calendarEntityId = result.calendar_entity_id;
+      if (status) status.textContent = calendarEntityId ? `Saved: ${calendarEntityId}` : 'Cleared';
+    } else {
+      alert(result.error || 'Failed to save');
+    }
+  } catch (err) {
+    alert('Error saving calendar entity: ' + err.message);
+  }
+}
+
+// ── Table rendering ───────────────────────────────────────────────────────────
+
+function renderCalendarEventsTable() {
+  const container = document.getElementById('calendar-events-table-container');
+  if (!container) return;
+
+  const ids = Object.keys(allCalendarEvents).sort((a, b) => {
+    const ea = allCalendarEvents[a], eb = allCalendarEvents[b];
+    return (ea.label || '').localeCompare(eb.label || '');
+  });
+
+  if (ids.length === 0) {
+    container.innerHTML = '<p class="empty-state">No scheduled events. Click "+ New Event" to create one.</p>';
+    initNewCalendarEventButton();
+    return;
+  }
+
+  let html = `
+    <table class="tagsets-table">
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th class="desktop-only">Tagset</th>
+          <th class="desktop-only">Moods</th>
+          <th class="desktop-only">Linked</th>
+          <th class="th-actions"></th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  for (const id of ids) {
+    const ev = allCalendarEvents[id];
+    const suppressBadge = ev.suppress_moods
+      ? '<span class="weighting-badge" style="background:#7f5af0;color:#fff;margin-left:4px;">suppressed</span>'
+      : '<span style="color:#888;font-size:12px;">active</span>';
+    const linkedBadge = ev.linked_calendar
+      ? `<span class="weighting-badge" style="background:#2196f3;color:#fff;" title="${escapeHtml(ev.linked_calendar)}">linked</span>`
+      : '<span style="color:#aaa;font-size:12px;">—</span>';
+    const syncBtn = ev.linked_calendar
+      ? `<button class="btn-icon cal-sync-btn" data-event-id="${escapeHtml(id)}" title="Sync times from linked event">↻</button>`
+      : '';
+
+    html += `
+      <tr class="tagset-row clickable-row" data-cal-event-id="${escapeHtml(id)}">
+        <td class="td-name">
+          <div class="tagset-name-row">
+            <span class="tagset-name-text">${escapeHtml(ev.label || id)}</span>
+          </div>
+          <div class="mobile-tagset-meta" style="font-size:11px;color:#888;">${escapeHtml(ev.tagset_name || '')}</div>
+        </td>
+        <td class="desktop-only" style="font-size:13px;">${escapeHtml(ev.tagset_name || '—')}</td>
+        <td class="desktop-only">${suppressBadge}</td>
+        <td class="desktop-only">${linkedBadge}</td>
+        <td class="td-actions" style="display:flex;gap:4px;align-items:center;">
+          ${syncBtn}
+          <button class="btn-icon cal-delete-btn" data-event-id="${escapeHtml(id)}" title="Delete">×</button>
+        </td>
+      </tr>
+    `;
+  }
+
+  html += `</tbody></table>`;
+  container.innerHTML = html;
+
+  container.querySelectorAll('.tagset-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.cal-delete-btn') || e.target.closest('.cal-sync-btn')) return;
+      openCalendarEventModal(row.dataset.calEventId);
+    });
+  });
+
+  container.querySelectorAll('.cal-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.eventId;
+      const ev = allCalendarEvents[id];
+      if (ev && confirm(`Delete event "${ev.label || id}"?`)) {
+        await deleteCalendarEvent(id);
+      }
+    });
+  });
+
+  container.querySelectorAll('.cal-sync-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await syncCalendarEventFromLinked(btn.dataset.eventId);
+    });
+  });
+
+  initNewCalendarEventButton();
+}
+
+function initNewCalendarEventButton() {
+  const btn = document.getElementById('new-calendar-event-btn');
+  if (btn) btn.onclick = () => openCalendarEventModal(null);
+}
+
+// ── Modal open/close ──────────────────────────────────────────────────────────
+
+async function openCalendarEventModal(eventId) {
+  calEventModalId = eventId || null;
+  const ev = eventId ? (allCalendarEvents[eventId] || {}) : {};
+
+  document.getElementById('calendar-event-modal-title').textContent = eventId ? 'Edit Event' : 'New Scheduled Event';
+  document.getElementById('cal-event-id').value = eventId || '';
+  document.getElementById('cal-event-ha-uid').value = ev.ha_event_uid || '';
+  document.getElementById('cal-event-label').value = ev.label || '';
+  document.getElementById('cal-event-suppress-moods').checked = !!ev.suppress_moods;
+  document.getElementById('delete-calendar-event-btn').style.display = eventId ? '' : 'none';
+
+  // Populate tagset dropdown
+  const tagsetSelect = document.getElementById('cal-event-tagset');
+  const tagsetNames = Object.keys(allGlobalTagsets || {}).sort((a, b) => a.localeCompare(b));
+  tagsetSelect.innerHTML = '<option value="">— Select tagset —</option>' +
+    tagsetNames.map(n =>
+      `<option value="${escapeHtml(n)}"${n === ev.tagset_name ? ' selected' : ''}>${escapeHtml(n)}</option>`
+    ).join('');
+
+  // Clear datetimes (filled when user picks a linked event or enters manually)
+  document.getElementById('cal-event-start').value = '';
+  document.getElementById('cal-event-end').value = '';
+
+  // Linked calendar
+  document.getElementById('cal-linked-uid').value = ev.linked_uid || '';
+  await populateLinkedCalendarPicker(ev.linked_calendar || '', ev.linked_uid || '');
+
+  document.getElementById('calendar-event-modal').classList.add('active');
+}
+
+function closeCalendarEventModal() {
+  document.getElementById('calendar-event-modal').classList.remove('active');
+}
+
+// ── Linked calendar picker ────────────────────────────────────────────────────
+
+async function populateLinkedCalendarPicker(selectedCalendar, selectedUid) {
+  const calSelect = document.getElementById('cal-linked-calendar-select');
+  const eventRow = document.getElementById('cal-linked-event-row');
+  const badge = document.getElementById('cal-linked-badge');
+  if (!calSelect) return;
+
+  if (allHaCalendars.length === 0) {
+    try {
+      const resp = await fetch(`${API_BASE}/calendar-events/calendars`);
+      const data = await resp.json();
+      allHaCalendars = data.calendars || [];
+    } catch { allHaCalendars = []; }
+  }
+
+  calSelect.innerHTML = '<option value="">— No link —</option>' +
+    allHaCalendars.map(c =>
+      `<option value="${escapeHtml(c.entity_id)}"${c.entity_id === selectedCalendar ? ' selected' : ''}>${escapeHtml(c.name || c.entity_id)}</option>`
+    ).join('');
+
+  if (selectedCalendar) {
+    await loadLinkedEventPicker(selectedCalendar, selectedUid);
+    eventRow.style.display = '';
+    if (selectedUid && badge) {
+      badge.style.display = '';
+      badge.textContent = `Linked to event UID: ${selectedUid.slice(0, 12)}…`;
+    }
+  } else {
+    eventRow.style.display = 'none';
+    if (badge) badge.style.display = 'none';
+  }
+
+  calSelect.onchange = async () => {
+    const val = calSelect.value;
+    document.getElementById('cal-linked-uid').value = '';
+    if (val) {
+      eventRow.style.display = '';
+      await loadLinkedEventPicker(val, '');
+    } else {
+      eventRow.style.display = 'none';
+      if (badge) badge.style.display = 'none';
+    }
+  };
+}
+
+async function loadLinkedEventPicker(calEntityId, selectedUid) {
+  const select = document.getElementById('cal-linked-event-select');
+  const badge = document.getElementById('cal-linked-badge');
+  if (!select) return;
+  select.innerHTML = '<option value="">Loading…</option>';
+
+  try {
+    const start = new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString();
+    const end = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString();
+    const resp = await fetch(`${API_BASE}/calendar-events/calendars/${encodeURIComponent(calEntityId)}/events?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+    const data = await resp.json();
+    const events = data.events || [];
+
+    if (events.length === 0) {
+      select.innerHTML = '<option value="">No events found in ±90 days</option>';
+      return;
+    }
+
+    select.innerHTML = '<option value="">— Pick an event —</option>' +
+      events.map(e => {
+        const uid = e.uid || '';
+        const dt = e.start?.dateTime || e.start?.date || '';
+        const label = `${e.summary || uid} (${dt.slice(0, 10)})`;
+        return `<option value="${escapeHtml(uid)}"${uid === selectedUid ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+      }).join('');
+
+    if (selectedUid && badge) {
+      const match = events.find(e => e.uid === selectedUid);
+      badge.style.display = match ? '' : 'none';
+      if (match) badge.textContent = `Linked: ${match.summary || selectedUid} (${(match.start?.dateTime || match.start?.date || '').slice(0, 10)})`;
+    }
+
+    select.onchange = () => {
+      const uid = select.value;
+      document.getElementById('cal-linked-uid').value = uid;
+      if (badge) {
+        if (uid) {
+          const match = events.find(e => e.uid === uid);
+          if (match) {
+            badge.style.display = '';
+            badge.textContent = `Linked: ${match.summary || uid} (${(match.start?.dateTime || match.start?.date || '').slice(0, 10)})`;
+            // Auto-fill start/end from linked event
+            const eStart = match.start?.dateTime || match.start?.date;
+            const eEnd = match.end?.dateTime || match.end?.date;
+            if (eStart) document.getElementById('cal-event-start').value = toDatetimeLocalValue(eStart);
+            if (eEnd) document.getElementById('cal-event-end').value = toDatetimeLocalValue(eEnd);
+          }
+        } else {
+          badge.style.display = 'none';
+        }
+      }
+    };
+  } catch (err) {
+    select.innerHTML = '<option value="">Failed to load events</option>';
+    console.error('[calendar-events] loadLinkedEventPicker:', err);
+  }
+}
+
+function toDatetimeLocalValue(isoStr) {
+  try {
+    const d = new Date(isoStr);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch { return ''; }
+}
+
+// ── Save / Delete / Sync ──────────────────────────────────────────────────────
+
+async function saveCalendarEvent(e) {
+  if (e) e.preventDefault();
+
+  const id = document.getElementById('cal-event-id').value;
+  const label = document.getElementById('cal-event-label').value.trim();
+  const tagset_name = document.getElementById('cal-event-tagset').value;
+  const start_date_time = document.getElementById('cal-event-start').value;
+  const end_date_time = document.getElementById('cal-event-end').value;
+  const suppress_moods = document.getElementById('cal-event-suppress-moods').checked;
+  const linked_calendar = document.getElementById('cal-linked-calendar-select').value || null;
+  const linked_uid = document.getElementById('cal-linked-uid').value || null;
+
+  if (!tagset_name) { alert('Tagset is required'); return; }
+  if (!id && (!start_date_time || !end_date_time)) { alert('Start and end date/time are required'); return; }
+
+  const payload = { label, tagset_name, suppress_moods, linked_calendar, linked_uid };
+  if (start_date_time) payload.start_date_time = new Date(start_date_time).toISOString();
+  if (end_date_time) payload.end_date_time = new Date(end_date_time).toISOString();
+
+  try {
+    let resp;
+    if (id) {
+      resp = await fetch(`${API_BASE}/calendar-events/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } else {
+      resp = await fetch(`${API_BASE}/calendar-events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+    const result = await resp.json();
+    if (result.success) {
+      closeCalendarEventModal();
+      await loadCalendarEventsTab();
+    } else {
+      alert(result.error || 'Failed to save event');
+    }
+  } catch (err) {
+    alert('Error saving event: ' + err.message);
+  }
+}
+
+async function deleteCalendarEvent(eventId) {
+  try {
+    const resp = await fetch(`${API_BASE}/calendar-events/${encodeURIComponent(eventId)}`, { method: 'DELETE' });
+    const result = await resp.json();
+    if (result.success) {
+      delete allCalendarEvents[eventId];
+      renderCalendarEventsTable();
+    } else {
+      alert(result.error || 'Failed to delete event');
+    }
+  } catch (err) {
+    alert('Error deleting event: ' + err.message);
+  }
+}
+
+async function syncCalendarEventFromLinked(eventId) {
+  try {
+    const resp = await fetch(`${API_BASE}/calendar-events/${encodeURIComponent(eventId)}/sync-from-linked`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const result = await resp.json();
+    if (result.success) {
+      if (result.changed) {
+        allCalendarEvents[eventId] = result.event;
+        alert(`Times synced: ${result.newStart?.slice(0,16)} → ${result.newEnd?.slice(0,16)}`);
+      }
+    } else {
+      alert(result.error || 'Failed to sync');
+    }
+  } catch (err) {
+    alert('Error syncing: ' + err.message);
+  }
+}
+
+// ── Modal listeners ───────────────────────────────────────────────────────────
+
+function initCalendarEventModalListeners() {
+  const modal = document.getElementById('calendar-event-modal');
+  if (!modal) return;
+
+  document.getElementById('calendar-event-modal-close')?.addEventListener('click', closeCalendarEventModal);
+  document.getElementById('cancel-calendar-event-btn')?.addEventListener('click', closeCalendarEventModal);
+  document.getElementById('calendar-event-form')?.addEventListener('submit', saveCalendarEvent);
+
+  document.getElementById('delete-calendar-event-btn')?.addEventListener('click', async () => {
+    const id = document.getElementById('cal-event-id').value;
+    const ev = allCalendarEvents[id];
+    if (id && confirm(`Delete event "${ev?.label || id}"?`)) {
+      await deleteCalendarEvent(id);
+      closeCalendarEventModal();
+    }
+  });
+
+  document.getElementById('save-calendar-entity-btn')?.addEventListener('click', saveCalendarEntityId);
+
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeCalendarEventModal();
+  });
 }

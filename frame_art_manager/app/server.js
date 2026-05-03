@@ -25,6 +25,7 @@ const moodsRouter   = require('./routes/moods');
 const oelRouter     = require('./routes/oel');
 const artistRouter    = require('./routes/artist');
 const blacklistRouter = require('./routes/blacklist');
+const calendarEventsRouter = require('./routes/calendar_events');
 
 const app = express();
 const PORT = process.env.PORT || 8099;
@@ -86,6 +87,7 @@ app.use('/api/moods',   moodsRouter);
 app.use('/api/oel',     oelRouter);
 app.use('/api/artist-suggest', artistRouter);
 app.use('/api/blacklist',      blacklistRouter);
+app.use('/api/calendar-events', calendarEventsRouter);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

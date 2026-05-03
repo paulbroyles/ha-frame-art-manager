@@ -368,6 +368,7 @@
           <button class="advanced-tab-btn" data-tab="sync">Sync Detail</button>
           <button class="advanced-tab-btn" data-tab="blacklist">Blacklist</button>
           <button class="advanced-tab-btn" data-tab="moods">Moods</button>
+          <button class="advanced-tab-btn" data-tab="calendar-events">Events</button>
         </div>
 
         <!-- Settings Sub-tab -->
@@ -553,6 +554,26 @@
             <p class="pool-health-description">Moods are composable shuffle modifiers driven by Home Assistant sensors. Multiple moods can be active at once — each boosts or suppresses local image tags, injects web search terms, and filters web results. Moods layer on top of tagsets without requiring pre-built combinations.</p>
             <div id="moods-table-container">
               <div class="loading-indicator">Loading moods...</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Calendar Events Sub-tab -->
+        <div id="advanced-calendar-events-content" class="advanced-tab-content">
+          <div class="subsection subsection-no-card">
+            <div class="tagsets-header">
+              <h3>Scheduled Events</h3>
+              <button type="button" id="new-calendar-event-btn" class="btn-primary btn-small">+ New Event</button>
+            </div>
+            <p class="pool-health-description">Scheduled events automatically apply a tagset override for a specific date range — useful for holidays, themed days, or seasonal changes. Timing is managed via a dedicated HA calendar entity.</p>
+            <div id="calendar-events-config-row" style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;">
+              <label for="calendar-entity-select" style="font-size:13px;font-weight:600;white-space:nowrap;">HA Calendar:</label>
+              <select id="calendar-entity-select" style="min-width:220px;flex:1;max-width:360px;"></select>
+              <button type="button" id="save-calendar-entity-btn" class="btn-secondary btn-small">Save</button>
+              <span id="calendar-entity-status" style="font-size:12px;color:#666;"></span>
+            </div>
+            <div id="calendar-events-table-container">
+              <div class="loading-indicator">Loading events...</div>
             </div>
           </div>
         </div>
@@ -1405,6 +1426,76 @@
         <div style="display:flex;gap:10px;">
           <button type="button" id="cancel-mood-btn" class="btn-secondary">Cancel</button>
           <button type="submit" form="mood-form" id="save-mood-btn" class="btn-primary">Save Mood</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Calendar Event Modal -->
+  <div id="calendar-event-modal" class="modal">
+    <div class="modal-content">
+      <button class="close close-simple" id="calendar-event-modal-close">✕</button>
+      <div class="modal-details">
+        <h3 id="calendar-event-modal-title">New Scheduled Event</h3>
+      </div>
+      <div class="modal-body-scroll">
+        <form id="calendar-event-form">
+          <div class="form-group">
+            <label for="cal-event-label">Label <span class="form-hint-inline">(display name)</span></label>
+            <input type="text" id="cal-event-label" placeholder="e.g., Star Wars Day, Christmas" required />
+          </div>
+          <div class="form-group">
+            <label for="cal-event-tagset">Tagset</label>
+            <select id="cal-event-tagset" required></select>
+          </div>
+          <div class="form-group" style="display:flex;gap:16px;flex-wrap:wrap;">
+            <div style="flex:1;min-width:180px;">
+              <label for="cal-event-start">Start</label>
+              <input type="datetime-local" id="cal-event-start" required />
+            </div>
+            <div style="flex:1;min-width:180px;">
+              <label for="cal-event-end">End</label>
+              <input type="datetime-local" id="cal-event-end" required />
+            </div>
+          </div>
+          <div class="form-group" style="margin-top:4px;">
+            <label style="font-size:13px;font-weight:normal;cursor:pointer;">
+              <input type="checkbox" id="cal-event-suppress-moods" style="margin-right:5px;" />
+              Suppress moods during this event
+              <span class="form-hint-inline">(mood sensor and manual overrides are ignored)</span>
+            </label>
+          </div>
+          <div id="cal-event-linked-section" style="border-top:1px solid #eee;margin-top:12px;padding-top:12px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+              <span style="font-size:13px;font-weight:600;">Link to main calendar event</span>
+              <span class="form-hint-inline" style="margin-left:8px;">Sync start/end times automatically</span>
+            </div>
+            <div class="form-group" style="margin-bottom:6px;">
+              <label for="cal-linked-calendar-select" style="font-size:13px;">Calendar</label>
+              <select id="cal-linked-calendar-select" style="width:100%;">
+                <option value="">— No link —</option>
+              </select>
+            </div>
+            <div class="form-group" id="cal-linked-event-row" style="display:none;">
+              <label for="cal-linked-event-select" style="font-size:13px;">Event</label>
+              <select id="cal-linked-event-select" style="width:100%;">
+                <option value="">Loading...</option>
+              </select>
+            </div>
+            <div id="cal-linked-badge" style="display:none;font-size:12px;color:#666;margin-top:4px;"></div>
+          </div>
+          <input type="hidden" id="cal-event-id" />
+          <input type="hidden" id="cal-event-ha-uid" />
+          <input type="hidden" id="cal-linked-uid" />
+        </form>
+      </div>
+      <div class="modal-actions" style="display:flex;justify-content:space-between;align-items:center;padding:12px 20px;border-top:1px solid #eee;background:#f9f9f9;">
+        <div>
+          <button type="button" id="delete-calendar-event-btn" class="btn-danger" style="display:none;">Delete</button>
+        </div>
+        <div style="display:flex;gap:10px;">
+          <button type="button" id="cancel-calendar-event-btn" class="btn-secondary">Cancel</button>
+          <button type="submit" form="calendar-event-form" id="save-calendar-event-btn" class="btn-primary">Save Event</button>
         </div>
       </div>
     </div>
