@@ -529,23 +529,46 @@ class MetadataHelper {
    */
   async getAllImages() {
     const metadata = await this.readMetadata();
-    
+    const entityTypes = metadata.entityTypes || [];
+    const entityInstances = metadata.entityInstances || {};
+
     // Enrich each image with file size from disk
     const enrichedImages = {};
     for (const [filename, imageData] of Object.entries(metadata.images)) {
       const imagePath = path.join(this.libraryPath, filename);
+      let enriched;
       try {
         const stats = await fs.stat(imagePath);
-        enrichedImages[filename] = {
-          ...imageData,
-          fileSize: stats.size // Add file size in bytes
-        };
+        enriched = { ...imageData, fileSize: stats.size };
       } catch (error) {
-        // If file doesn't exist on disk, just use metadata
-        enrichedImages[filename] = imageData;
+        enriched = { ...imageData };
       }
+
+      // Resolve entityRefs into flat attributes for sensor/OEL consumption.
+      // e.g. entityRefs.creator → creator_name, creator_lifespan, creator_nationality
+      const refs = enriched.entityRefs || {};
+      if (Object.keys(refs).length > 0) {
+        const resolved = {};
+        for (const [entityId, instanceKey] of Object.entries(refs)) {
+          const instance = entityInstances?.[entityId]?.[instanceKey];
+          if (!instance) continue;
+          const entityType = entityTypes.find(e => e.id === entityId);
+          const attrs = entityType?.attributes || Object.keys(instance);
+          for (const attr of attrs) {
+            const val = instance[attr];
+            if (val !== undefined && val !== null && val !== '') {
+              resolved[`${entityId}_${attr}`] = val;
+            }
+          }
+        }
+        if (Object.keys(resolved).length > 0) {
+          enriched.resolvedEntityAttributes = resolved;
+        }
+      }
+
+      enrichedImages[filename] = enriched;
     }
-    
+
     return enrichedImages;
   }
 
