@@ -1,5 +1,20 @@
 ## Future Investigations
 
+### Calendar Events UI polish
+
+The Events tab (manager UI) has several known gaps noted after initial testing (2026-05-02):
+
+**Time entry UX** (`index.html` / `app.js`):
+- `datetime-local` inputs require clicking the calendar before typing works; entering hours/minutes is more awkward than necessary. Consider a custom time-picker or at minimum ensure the input handles direct keyboard entry cleanly.
+- No validation that end time is after start time — should be enforced client-side on form submit.
+
+**Event management / HA calendar sync** (`routes/calendar_events.js` + `app.js`):
+- Delete in the manager UI does not currently delete from the HA calendar. The delete route calls `deleteHaCalendarEvent` but that function silently does nothing if `uid` is null (which it often is, since the UID lookup in `createHaCalendarEvent` uses `e.start?.dateTime` — a dict-access pattern that won't match the flat string format returned by `calendar.get_events`). Fix the UID lookup first, then verify delete propagates to HA.
+- Edit support: allow changing label, tagset, times, and suppress_moods on existing events. Edits to in-progress events need extra care (the override is already active; an edit to the end time should update the running timer).
+- Browse/view expired events: the current GET endpoint only returns events as stored locally; add a way to surface past events in the UI (e.g., a "show past" toggle, with events fetched from HA calendar for a wider time window).
+- Duplicate event: one-click copy with times shifted by one year (for recurring annual events like Star Wars Day or Christmas).
+- Auto-delete old events: optional setting to automatically remove HA calendar events (and local config entries) that ended more than N days ago.
+
 ### Server-side OEL placard rendering (frame-art-manager endpoint)
 
 **Idea**: Instead of constructing the OEL `drawcustom` payload in a Jinja2 blueprint template with hardcoded pixel positions, expose a `/api/oel-placard` endpoint in frame-art-manager that accepts artwork metadata and returns a fully-positioned OEL JSON payload.
