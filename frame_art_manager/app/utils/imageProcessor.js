@@ -34,6 +34,8 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
   preProcessOptions = {},
   cropEngine = 'sharp',
   cropEngineOptions = {},
+  recursive = false,
+  maxPasses = 3,
 } = {}) {
   // Map legacy params to pipeline steps.
   // preProcess = null  → skip phases 1+2; only crop
@@ -44,7 +46,7 @@ async function processWebSourceImage(buffer, orientation = 'landscape', {
   if (preProcess != null) {
     steps.push({ key: 'background_strip' });
     if (preProcess !== 'none' && PROCESSORS[preProcess]) {
-      steps.push({ key: preProcess, options: preProcessOptions });
+      steps.push({ key: preProcess, options: preProcessOptions, recursive, maxPasses });
     }
   }
 
@@ -87,6 +89,25 @@ const IMAGE_PROCESSING_SCHEMA = {
           description: 'Tile luminance variance below this = frame material. Lower = stricter (misses textured frames). Higher = more permissive (may bleed into flat painting regions).' },
         { key: 'minCoherentFrac', label: 'Min Coherent Fraction', type: 'number', default: 0.70,
           description: 'Fraction of tiles in a row or column that must be coherent to extend the frame band (0.5–1.0). Lower tolerates more noise or texture in frame material.' },
+      ] },
+    { value: 'frame_boundary',   label: 'Frame Boundary — detect frame edge using Sobel edge-density analysis; finds the innermost near-continuous line spanning the full image width/height',
+      options: [
+        { key: 'maxCropFrac', label: 'Max Crop Fraction', type: 'number', default: 0.25,
+          description: 'Maximum fraction of each dimension to scan inward from the edge (0.05–0.40). Increase for wide frames, decrease to protect paintings with strong compositional lines near the border.' },
+        { key: 'minEdgeDensity', label: 'Min Edge Density', type: 'number', default: 0.40,
+          description: 'Fraction of pixels in a row or column that must exceed the edge threshold to be considered a frame boundary line (0–1). Raise (0.5+) to avoid false positives on paintings with prominent horizontal/vertical composition lines.' },
+        { key: 'edgeThreshold', label: 'Edge Threshold', type: 'number', default: 20,
+          description: 'Sobel magnitude threshold (post Gaussian blur) above which a pixel is counted as an edge (0–255). Lower catches softer frame edges; raise to ignore subtle texture gradients.' },
+        { key: 'crossSideValidation', label: 'Cross-Side Validation', type: 'boolean', default: true,
+          description: 'When top/bottom detect a border but left/right return nothing (or vice versa), test whether the missing sides have similar border material at the same depth. Helps with thin uniform borders where Sobel finds the horizontal edge line but misses the vertical.' },
+        { key: 'crossMeanTolerance', label: 'Cross-Side Mean Tolerance', type: 'number', default: 45,
+          description: 'Maximum luminance difference (0–255) between the reference and candidate side for cross-side inference to fire. Lower values are more conservative; raise if similar-colored frames on different sides are being missed.' },
+        { key: 'crossVarMax', label: 'Cross-Side Reference Variance Max', type: 'number', default: 2500,
+          description: 'Maximum pixel variance in the reference side\'s central band. High variance indicates a complex or multi-layer frame that should not be used as a cross-side anchor — defer to recursive stripping instead. Raise cautiously; increasing this risks propagating false detections from ornate outer layers.' },
+        { key: 'crossCandVarMax', label: 'Cross-Side Candidate Variance Max', type: 'number', default: 4000,
+          description: 'Maximum pixel variance in the candidate (missing) side\'s central band. Higher than the reference threshold to allow textured or ornate frame materials to be inferred. Lower to 1500 if false positives appear.' },
+        { key: 'minConfidence', label: 'Min Detection Confidence', type: 'number', default: 0.40,
+          description: 'Discard per-side detections below this confidence score (0–1). Higher values are more conservative: non-uniform edges (e.g. a rounded head at the border) are rejected before cropping. Lower values allow thinner or weaker frame detections through.' },
       ] },
     { value: 'variance_scan',    label: 'Variance Scan — detect frames by local edge variance (legacy)' },
     { value: 'trim',             label: 'Sharp Trim — background strip only (same as None; redundant with automatic Stage 1)' },
@@ -184,6 +205,18 @@ const IMAGE_PROCESSING_SCHEMA = {
             { value: 'attention', label: 'Attention — focus on faces and salient regions (recommended for paintings)' },
             { value: 'entropy',   label: 'Entropy — focus on high-detail, textured regions' },
             { value: 'centre',    label: 'Center — crop from the geometric center' },
+          ] },
+      ] },
+    { value: 'face_aware', label: 'Face-Aware — detect faces and centre the crop on the confidence-weighted face centroid; falls back to Sharp attention (or configurable strategy) when no faces are found',
+      options: [
+        { key: 'scoreThreshold', label: 'Face Confidence Threshold', type: 'number', default: 0.35,
+          description: 'Minimum face detection confidence (0–1). Default 0.35 is intentionally lower than the photo default (0.5) to catch stylised painted faces. Raise to reduce false positives on face-shaped objects in abstract work.' },
+        { key: 'fallbackStrategy', label: 'Fallback Strategy', type: 'select', default: 'attention',
+          description: 'Sharp crop strategy used when no faces are detected.',
+          choices: [
+            { value: 'attention', label: 'Attention — saliency-based (default)' },
+            { value: 'entropy',   label: 'Entropy — high-detail regions' },
+            { value: 'centre',    label: 'Center — geometric center' },
           ] },
       ] },
   ],

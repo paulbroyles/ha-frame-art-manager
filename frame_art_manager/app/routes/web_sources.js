@@ -878,6 +878,12 @@ router.put('/image-processing', async (req, res) => {
         if (step.options !== undefined && (typeof step.options !== 'object' || Array.isArray(step.options))) {
           return res.status(400).json({ error: `pipeline step '${step.key}' options must be an object` });
         }
+        if (step.recursive !== undefined && typeof step.recursive !== 'boolean') {
+          return res.status(400).json({ error: `pipeline step '${step.key}' recursive must be a boolean` });
+        }
+        if (step.maxPasses !== undefined && (!Number.isInteger(step.maxPasses) || step.maxPasses < 1)) {
+          return res.status(400).json({ error: `pipeline step '${step.key}' maxPasses must be a positive integer` });
+        }
       }
     }
     if (preProcessorOptions !== undefined && (typeof preProcessorOptions !== 'object' || Array.isArray(preProcessorOptions))) {
@@ -1619,7 +1625,15 @@ async function fetchAndProcessWebSource(req, { sourceId, virtualTagId, tvOrienta
     });
   }
 
-  const ext = contentType.includes('png') ? 'png' : 'jpg';
+  // Force JPEG output. dezoomify-rs always outputs lossless PNG regardless of the
+  // temp filename extension, and contentType is not updated after dezoomify runs —
+  // so it can't be used to detect PNG. Sharp preserves input format by default, so
+  // a PNG input would propagate through the pipeline as a ~22MB lossless PNG.
+  const { format: processedFormat } = await sharp(processedBuffer).metadata();
+  if (processedFormat === 'png') {
+    processedBuffer = await sharp(processedBuffer).jpeg({ quality: 92 }).toBuffer();
+  }
+  const ext = 'jpg';
 
   const userMapping = webSources.sources[chosenSourceId]?.userMapping || {};
   const sourceSettings = webSources.sources?.[chosenSourceId]?.settings;
@@ -2255,11 +2269,14 @@ router.post('/test-fetch', async (req, res) => {
 
     // rawOnly: save raw image and return immediately — caller will invoke test-reprocess next.
     if (rawOnly) {
-      const ext = contentType.includes('png') ? 'png' : 'jpg';
+      const { format: rawFmt } = await sharp(imageBuffer).metadata();
+      if (rawFmt === 'png') {
+        imageBuffer = await sharp(imageBuffer).jpeg({ quality: 92 }).toBuffer();
+      }
       const cacheDir = cacheDirFor(req.frameArtPath);
       await fs.mkdir(cacheDir, { recursive: true });
       await clearTestCacheFile(req.frameArtPath);
-      const rawFilename = `_test_raw.${ext}`;
+      const rawFilename = `_test_raw.jpg`;
       await fs.writeFile(path.join(cacheDir, rawFilename), imageBuffer);
       const rawUserMapping = webSources.sources[chosenSourceId]?.userMapping || {};
       const rawSourceSettings = webSources.sources?.[chosenSourceId]?.settings;
@@ -2345,7 +2362,15 @@ router.post('/test-fetch', async (req, res) => {
       }
     }
 
-    const ext = contentType.includes('png') ? 'png' : 'jpg';
+    const { format: processedFmt } = await sharp(processedBuffer).metadata();
+    if (processedFmt === 'png') {
+      processedBuffer = await sharp(processedBuffer).jpeg({ quality: 92 }).toBuffer();
+    }
+    const { format: rawFmt2 } = await sharp(imageBuffer).metadata();
+    if (rawFmt2 === 'png') {
+      imageBuffer = await sharp(imageBuffer).jpeg({ quality: 92 }).toBuffer();
+    }
+    const ext = 'jpg';
     const cacheDir = cacheDirFor(req.frameArtPath);
     await fs.mkdir(cacheDir, { recursive: true });
     await clearTestCacheFile(req.frameArtPath);
