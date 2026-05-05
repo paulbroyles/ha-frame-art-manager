@@ -242,6 +242,8 @@ router.post('/', async (req, res) => {
       label: (label || tagset_name).trim(),
       tagset_name: tagset_name.trim(),
       suppress_moods: suppress_moods === true,
+      start_date_time,
+      end_date_time,
       ha_event_uid: null,
       linked_calendar: null,
       linked_uid: null,
@@ -296,6 +298,8 @@ router.put('/:id', async (req, res) => {
       const newStart = start_date_time || null;
       const newEnd = end_date_time || null;
       if (newStart && newEnd) {
+        updated.start_date_time = newStart;
+        updated.end_date_time = newEnd;
         await deleteHaCalendarEvent(cfg.calendar_entity_id, existing.ha_event_uid);
         const newUid = await createHaCalendarEvent(
           cfg.calendar_entity_id,
@@ -443,6 +447,8 @@ router.post('/:id/sync-from-linked', async (req, res) => {
     );
 
     event.ha_event_uid = newUid;
+    event.start_date_time = newStart;
+    event.end_date_time = newEnd;
     event.last_synced_at = new Date().toISOString();
     cfg.events[id] = event;
     await writeCalendarEventsConfig(req.frameArtPath, cfg);

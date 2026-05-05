@@ -19012,6 +19012,13 @@ function initNewCalendarEventButton() {
 
 // ── Modal open/close ──────────────────────────────────────────────────────────
 
+function toDatetimeLocal(isoString) {
+  if (!isoString) return '';
+  const d = new Date(isoString);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 async function openCalendarEventModal(eventId) {
   calEventModalId = eventId || null;
   const ev = eventId ? (allCalendarEvents[eventId] || {}) : {};
@@ -19031,9 +19038,9 @@ async function openCalendarEventModal(eventId) {
       `<option value="${escapeHtml(n)}"${n === ev.tagset_name ? ' selected' : ''}>${escapeHtml(n)}</option>`
     ).join('');
 
-  // Clear datetimes (filled when user picks a linked event or enters manually)
-  document.getElementById('cal-event-start').value = '';
-  document.getElementById('cal-event-end').value = '';
+  // Pre-populate dates from stored times (blank for new events)
+  document.getElementById('cal-event-start').value = toDatetimeLocal(ev.start_date_time || '');
+  document.getElementById('cal-event-end').value = toDatetimeLocal(ev.end_date_time || '');
 
   // Linked calendar
   document.getElementById('cal-linked-uid').value = ev.linked_uid || '';
