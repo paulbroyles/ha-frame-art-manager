@@ -15,6 +15,23 @@ The Events tab (manager UI) has several known gaps noted after initial testing (
 - Duplicate event: one-click copy with times shifted by one year (for recurring annual events like Star Wars Day or Christmas).
 - Auto-delete old events: optional setting to automatically remove HA calendar events (and local config entries) that ended more than N days ago.
 
+### Recurring calendar events
+
+The calendar events system should support recurring overrides so annual events like Star Wars Day (May 4) or Christmas can be set-and-forget.
+
+**Fixed-date annual events** (May 4, Dec 25, etc.):
+- HA's local calendar supports `RRULE` in `create_event`; `FREQ=YEARLY` on a May 4 all-day event recurs every year.
+- `calendar.get_events` expands recurring events into individual occurrences, so the HA integration calendar monitor already handles these correctly with no code changes.
+- Use **all-day events** (`start_date`/`end_date`) rather than timed events for recurring annual overrides — no timezone ambiguity, and no multi-day display splitting quirk in the HA Calendar UI.
+- Manager UI change: add a "Repeat yearly" toggle that sets `FREQ=YEARLY` and switches the form to all-day date pickers.
+
+**Moveable holidays** (Easter, Thanksgiving, etc.):
+- RRULE cannot express moveable holidays.
+- Cleanest solution: the linked-calendar sync feature (already roadmapped). User links the Frame Art event to their external calendar (Google, Apple) which already has Easter computed. On tab load, manager syncs the times from the linked event.
+- A future enhancement could auto-advance a recurring Frame Art event by one year after it expires, pulling the new date from the linked calendar.
+
+**HA integration impact**: none required — the monitor already processes whatever `get_events` returns, including expanded recurrence occurrences.
+
 ### Server-side OEL placard rendering (frame-art-manager endpoint)
 
 **Idea**: Instead of constructing the OEL `drawcustom` payload in a Jinja2 blueprint template with hardcoded pixel positions, expose a `/api/oel-placard` endpoint in frame-art-manager that accepts artwork metadata and returns a fully-positioned OEL JSON payload.
