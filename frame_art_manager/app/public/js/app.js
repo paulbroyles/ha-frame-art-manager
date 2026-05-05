@@ -19025,7 +19025,7 @@ async function openCalendarEventModal(eventId) {
 
   document.getElementById('calendar-event-modal-title').textContent = eventId ? 'Edit Event' : 'New Scheduled Event';
   document.getElementById('cal-event-id').value = eventId || '';
-  document.getElementById('cal-event-ha-uid').value = ev.ha_event_uid || '';
+  document.getElementById('cal-event-ha-uid').value = ev.ha_uid || '';
   document.getElementById('cal-event-label').value = ev.label || '';
   document.getElementById('cal-event-suppress-moods').checked = !!ev.suppress_moods;
   document.getElementById('delete-calendar-event-btn').style.display = eventId ? '' : 'none';
@@ -19237,7 +19237,8 @@ async function syncCalendarEventFromLinked(eventId) {
     const result = await resp.json();
     if (result.success) {
       if (result.changed) {
-        allCalendarEvents[eventId] = result.event;
+        await loadCalendarEventsData();
+        renderCalendarEventsTable();
         alert(`Times synced: ${result.newStart?.slice(0,16)} → ${result.newEnd?.slice(0,16)}`);
       }
     } else {

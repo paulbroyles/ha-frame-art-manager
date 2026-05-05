@@ -25,7 +25,7 @@ const moodsRouter   = require('./routes/moods');
 const oelRouter     = require('./routes/oel');
 const artistRouter    = require('./routes/artist');
 const blacklistRouter = require('./routes/blacklist');
-const calendarEventsRouter = require('./routes/calendar_events');
+const { router: calendarEventsRouter, startBackgroundSync } = require('./routes/calendar_events');
 
 const app = express();
 const PORT = process.env.PORT || 8099;
@@ -212,6 +212,7 @@ app.listen(PORT, async () => {
   }
   await initializeDirectories();
   await backfillSourceHashes();
+  startBackgroundSync(FRAME_ART_PATH);
   console.log('\n✨ Server ready!\n');
 });
 

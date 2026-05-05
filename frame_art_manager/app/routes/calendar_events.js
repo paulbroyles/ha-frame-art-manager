@@ -1,27 +1,29 @@
 /**
- * Calendar events storage and HA calendar write API.
+ * Calendar events — HA calendar as sole source of truth.
  *
- * Manages Frame Art calendar events — scheduled tagset overrides tied to
- * a dedicated HA calendar entity (e.g. calendar.frame_art_events). Event
- * timing lives in HA; this file stores display metadata and optional links
- * to "main" calendar events for automatic time-syncing.
+ * All event data (timing + metadata) lives in the HA calendar. Metadata
+ * (label, suppress_moods, linked_calendar, linked_uid, stable uuid) is
+ * embedded in each event's description as structured key-value lines and
+ * parsed on read. No local events database is maintained.
+ *
+ * A separate calendar_config.json stores only the calendar entity ID setting.
  *
  * Routes:
- *   GET    /api/calendar-events                          List all events + config
+ *   GET    /api/calendar-events                          List events from HA
  *   PUT    /api/calendar-events/config                   Update calendar entity ID
  *   GET    /api/calendar-events/calendars                List all HA calendars
  *   GET    /api/calendar-events/calendars/:id/events     List events in a calendar
- *   POST   /api/calendar-events                          Create event
- *   PUT    /api/calendar-events/:id                      Update event
- *   DELETE /api/calendar-events/:id                      Delete event
- *   POST   /api/calendar-events/:id/sync-from-linked     Re-sync times from linked calendar event
+ *   POST   /api/calendar-events                          Create event in HA
+ *   PUT    /api/calendar-events/:uuid                    Update event (delete+recreate)
+ *   DELETE /api/calendar-events/:uuid                    Delete event from HA
+ *   POST   /api/calendar-events/:uuid/sync-from-linked   Sync times from linked event
  */
 
 const express = require('express');
 const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
-const { randomUUID } = require('crypto');
+const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 
 // ── HA connection ──────────────────────────────────────────────────────────
@@ -29,140 +31,285 @@ const axios = require('axios');
 const SUPERVISOR_TOKEN = process.env.SUPERVISOR_TOKEN;
 const HA_API_BASE = process.env.HA_URL || 'http://supervisor/core/api';
 
-async function haRequest(method, endpoint, data = null) {
+async function haServiceCall(endpoint, data = null) {
   if (!SUPERVISOR_TOKEN && process.env.NODE_ENV === 'development') {
-    // Dev mode: return plausible mocks
-    if (endpoint.includes('/calendars')) {
-      if (endpoint.match(/\/calendars\/[^/]+\/events/)) {
-        return [
-          { uid: 'mock-uid-1', summary: 'Star Wars Day', start: { dateTime: '2026-05-04T00:00:00' }, end: { dateTime: '2026-05-05T00:00:00' } },
-          { uid: 'mock-uid-2', summary: 'Christmas', start: { dateTime: '2026-12-25T00:00:00' }, end: { dateTime: '2026-12-26T00:00:00' } },
-        ];
-      }
-      return [
-        { entity_id: 'calendar.frame_art_events', name: 'Frame Art Events' },
-        { entity_id: 'calendar.family', name: 'Family' },
-        { entity_id: 'calendar.work', name: 'Work' },
-      ];
-    }
-    if (endpoint.includes('calendar/get_events')) {
-      return { 'calendar.frame_art_events': { events: [] } };
-    }
-    if (endpoint.includes('/services/calendar/')) {
-      return { success: true };
-    }
     return { success: true };
   }
-
-  const config = {
-    method,
+  const resp = await axios({
+    method: 'POST',
     url: `${HA_API_BASE}${endpoint}`,
     headers: {
       Authorization: `Bearer ${SUPERVISOR_TOKEN}`,
       'Content-Type': 'application/json',
     },
     data,
-  };
-  const resp = await axios(config);
+  });
   return resp.data;
 }
 
-// ── Storage ────────────────────────────────────────────────────────────────
-
-function calendarEventsConfigPath(frameArtPath) {
-  return path.join(frameArtPath, 'frame_art', 'calendar_events.json');
+/**
+ * Fetch events from the HA calendar REST API.
+ * Returns the raw HA event objects which include ha_uid, summary, description,
+ * start ({dateTime|date}), end ({dateTime|date}).
+ */
+async function haRestGetEvents(calendarEntityId, startIso, endIso) {
+  if (!SUPERVISOR_TOKEN && process.env.NODE_ENV === 'development') {
+    return [];
+  }
+  const url = `${HA_API_BASE}/calendars/${encodeURIComponent(calendarEntityId)}` +
+    `?start=${encodeURIComponent(startIso)}&end=${encodeURIComponent(endIso)}`;
+  const resp = await axios({
+    method: 'GET',
+    url,
+    headers: { Authorization: `Bearer ${SUPERVISOR_TOKEN}` },
+  });
+  return Array.isArray(resp.data) ? resp.data : [];
 }
 
-async function readCalendarEventsConfig(frameArtPath) {
+// ── Config storage (calendar entity ID only) ───────────────────────────────
+
+function calendarConfigPath(frameArtPath) {
+  return path.join(frameArtPath, 'frame_art', 'calendar_config.json');
+}
+
+async function readCalendarConfig(frameArtPath) {
+  // Also accept legacy calendar_events.json for the entity ID during transition
+  const primary = calendarConfigPath(frameArtPath);
   try {
-    const raw = await fs.readFile(calendarEventsConfigPath(frameArtPath), 'utf8');
-    const cfg = JSON.parse(raw);
-    if (!cfg.events) cfg.events = {};
-    return cfg;
+    const raw = await fs.readFile(primary, 'utf8');
+    return JSON.parse(raw);
   } catch {
-    return { version: 1, calendar_entity_id: null, events: {} };
+    try {
+      const legacy = path.join(frameArtPath, 'frame_art', 'calendar_events.json');
+      const raw = await fs.readFile(legacy, 'utf8');
+      const cfg = JSON.parse(raw);
+      return { calendar_entity_id: cfg.calendar_entity_id || null };
+    } catch {
+      return { calendar_entity_id: null };
+    }
   }
 }
 
-async function writeCalendarEventsConfig(frameArtPath, cfg) {
-  const p = calendarEventsConfigPath(frameArtPath);
+async function writeCalendarConfig(frameArtPath, cfg) {
+  const p = calendarConfigPath(frameArtPath);
   await fs.mkdir(path.dirname(p), { recursive: true });
   await fs.writeFile(p, JSON.stringify(cfg, null, 2));
 }
 
-// ── HA calendar helpers ────────────────────────────────────────────────────
+// ── Description parsing / building ────────────────────────────────────────
 
-/**
- * Build the description string for a Frame Art HA calendar event.
- * Only writes non-default values to keep descriptions clean.
- */
-function buildEventDescription(event) {
+const KNOWN_KEYS = new Set([
+  'uid', 'label', 'suppress_moods', 'force_shuffle',
+  'linked_calendar', 'linked_uid',
+]);
+
+function parseDescription(description) {
+  const result = {
+    uid: null,
+    label: null,
+    suppress_moods: false,
+    force_shuffle: false,
+    linked_calendar: null,
+    linked_uid: null,
+  };
+  if (!description) return result;
+  for (const raw of description.split('\n')) {
+    const line = raw.trim();
+    const colon = line.indexOf(':');
+    if (colon < 0) continue;
+    const key = line.slice(0, colon).trim().toLowerCase();
+    const value = line.slice(colon + 1).trim();
+    if (!KNOWN_KEYS.has(key)) continue;
+    if (key === 'suppress_moods' || key === 'force_shuffle') {
+      result[key] = value.toLowerCase() === 'true';
+    } else {
+      result[key] = value || null;
+    }
+  }
+  return result;
+}
+
+function buildDescription(meta) {
   const lines = [];
-  if (event.suppress_moods) lines.push('suppress_moods: true');
-  if (event.linked_calendar) lines.push(`linked_calendar: ${event.linked_calendar}`);
-  if (event.linked_uid) lines.push(`linked_uid: ${event.linked_uid}`);
+  if (meta.uid)             lines.push(`uid: ${meta.uid}`);
+  if (meta.label)           lines.push(`label: ${meta.label}`);
+  if (meta.suppress_moods)  lines.push('suppress_moods: true');
+  if (meta.force_shuffle)   lines.push('force_shuffle: true');
+  if (meta.linked_calendar) lines.push(`linked_calendar: ${meta.linked_calendar}`);
+  if (meta.linked_uid)      lines.push(`linked_uid: ${meta.linked_uid}`);
   return lines.join('\n');
 }
 
+// ── HA event helpers ───────────────────────────────────────────────────────
+
+function extractDateTime(haStartOrEnd) {
+  if (!haStartOrEnd) return null;
+  return haStartOrEnd.dateTime || haStartOrEnd.date || null;
+}
+
 /**
- * Create a HA calendar event and return the UID.
- * HA's create_event service doesn't return the UID, so we follow up with
- * a narrow get_events query and match by summary + start time.
+ * Create an HA calendar event. Returns null (HA create_event gives no response UID).
  */
-async function createHaCalendarEvent(calendarEntityId, tagsetName, startIso, endIso, event) {
-  const description = buildEventDescription(event);
-  await haRequest('POST', '/services/calendar/create_event', {
+async function haCreateEvent(calendarEntityId, summary, startIso, endIso, description) {
+  await haServiceCall('/services/calendar/create_event', {
     entity_id: calendarEntityId,
-    summary: tagsetName,
+    summary,
     description,
     start_date_time: startIso,
     end_date_time: endIso,
   });
+}
 
-  // Fetch back to find the UID: query a ±2 min window around the start time
-  const windowStart = new Date(new Date(startIso).getTime() - 2 * 60 * 1000).toISOString();
-  const windowEnd = new Date(new Date(startIso).getTime() + 2 * 60 * 1000).toISOString();
+/**
+ * Delete an HA calendar event by its HA-internal uid.
+ */
+async function haDeleteEvent(calendarEntityId, haUid) {
+  if (!haUid) return;
   try {
-    const result = await haRequest('POST', '/services/calendar/get_events', {
+    await haServiceCall('/services/calendar/delete_event', {
       entity_id: calendarEntityId,
-      start_date_time: windowStart,
-      end_date_time: windowEnd,
+      uid: haUid,
     });
-    const events = (result?.[calendarEntityId]?.events) || [];
-    const match = events.find((e) => {
-      const eStart = e.start?.dateTime || e.start?.date || '';
-      return e.summary === tagsetName && eStart.startsWith(startIso.slice(0, 16));
-    });
-    return match?.uid || null;
-  } catch {
-    return null;
+  } catch (err) {
+    if (err?.response?.status !== 404) throw err;
   }
 }
 
 /**
- * Delete a HA calendar event by UID. Gracefully ignores 404.
+ * Find a Frame Art event by our stable uuid, within a wide time window.
+ * Returns the raw HA event object (with ha_uid) or null.
  */
-async function deleteHaCalendarEvent(calendarEntityId, uid) {
-  if (!uid) return;
+async function findHaEventByUuid(calendarEntityId, uuid) {
+  const now = new Date();
+  const startIso = new Date(now.getTime() - 366 * 24 * 3600 * 1000).toISOString();
+  const endIso   = new Date(now.getTime() + 366 * 24 * 3600 * 1000).toISOString();
+  const events = await haRestGetEvents(calendarEntityId, startIso, endIso);
+  return events.find((e) => parseDescription(e.description).uid === uuid) || null;
+}
+
+/**
+ * Normalize raw HA REST event into the shape the UI expects.
+ */
+function normalizeEvent(raw) {
+  const meta = parseDescription(raw.description);
+  const startIso = extractDateTime(raw.start);
+  const endIso   = extractDateTime(raw.end);
+  return {
+    id: meta.uid || null,           // our stable uuid (null for unmanaged events)
+    ha_uid: raw.uid || null,        // HA-internal uid (for delete/update)
+    tagset_name: raw.summary || '',
+    label: meta.label || raw.summary || '',
+    suppress_moods: meta.suppress_moods,
+    force_shuffle: meta.force_shuffle,
+    linked_calendar: meta.linked_calendar,
+    linked_uid: meta.linked_uid,
+    start_date_time: startIso,
+    end_date_time: endIso,
+  };
+}
+
+// ── Background sync for linked events ─────────────────────────────────────
+
+let _backgroundSyncFrameArtPath = null;
+
+async function syncLinkedEvents(frameArtPath) {
+  const cfg = await readCalendarConfig(frameArtPath);
+  if (!cfg.calendar_entity_id) return;
+
+  const now = new Date();
+  const startIso = new Date(now.getTime() - 90 * 24 * 3600 * 1000).toISOString();
+  const endIso   = new Date(now.getTime() + 366 * 24 * 3600 * 1000).toISOString();
+
+  let faEvents;
   try {
-    await haRequest('POST', '/services/calendar/delete_event', {
-      entity_id: calendarEntityId,
-      uid,
-    });
+    faEvents = await haRestGetEvents(cfg.calendar_entity_id, startIso, endIso);
   } catch (err) {
-    if (!err?.response?.status === 404) throw err;
+    console.warn('[calendar-events] background sync: failed to fetch FA events:', err.message);
+    return;
   }
+
+  for (const faEvent of faEvents) {
+    const meta = parseDescription(faEvent.description);
+    if (!meta.linked_calendar || !meta.linked_uid || !meta.uid) continue;
+
+    try {
+      // Find the linked event in its source calendar
+      const linkedEvents = await haRestGetEvents(
+        meta.linked_calendar,
+        new Date(now.getTime() - 90 * 24 * 3600 * 1000).toISOString(),
+        endIso,
+      );
+      const linked = linkedEvents.find((e) => e.uid === meta.linked_uid);
+      if (!linked) {
+        console.warn(`[calendar-events] background sync: linked event ${meta.linked_uid} not found`);
+        continue;
+      }
+
+      const newStart = extractDateTime(linked.start);
+      const newEnd   = extractDateTime(linked.end);
+      const curStart = extractDateTime(faEvent.start);
+      const curEnd   = extractDateTime(faEvent.end);
+
+      if (newStart === curStart && newEnd === curEnd) continue;
+
+      console.log(`[calendar-events] background sync: updating times for '${faEvent.summary}'`);
+      await haDeleteEvent(cfg.calendar_entity_id, faEvent.uid);
+      await haCreateEvent(
+        cfg.calendar_entity_id,
+        faEvent.summary,
+        newStart,
+        newEnd,
+        faEvent.description, // description unchanged — all metadata preserved
+      );
+    } catch (err) {
+      console.warn(`[calendar-events] background sync: error for '${faEvent.summary}':`, err.message);
+    }
+  }
+}
+
+// Start 24-hour background sync loop. Called from server.js after middleware setup.
+function startBackgroundSync(frameArtPath) {
+  _backgroundSyncFrameArtPath = frameArtPath;
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  // Run once 60s after startup (gives HA time to be ready), then every 24h
+  setTimeout(async () => {
+    await syncLinkedEvents(frameArtPath).catch((e) =>
+      console.warn('[calendar-events] initial background sync error:', e.message)
+    );
+    setInterval(() => {
+      syncLinkedEvents(frameArtPath).catch((e) =>
+        console.warn('[calendar-events] background sync error:', e.message)
+      );
+    }, MS_PER_DAY);
+  }, 60 * 1000);
 }
 
 // ── GET /api/calendar-events ───────────────────────────────────────────────
 
 router.get('/', async (req, res) => {
   try {
-    const cfg = await readCalendarEventsConfig(req.frameArtPath);
-    res.json({ calendar_entity_id: cfg.calendar_entity_id || null, events: cfg.events });
+    const cfg = await readCalendarConfig(req.frameArtPath);
+    if (!cfg.calendar_entity_id) {
+      return res.json({ calendar_entity_id: null, events: {} });
+    }
+
+    const now = new Date();
+    // Fetch upcoming + recently-ended events (±30 days) for the list view
+    const startIso = new Date(now.getTime() - 30 * 24 * 3600 * 1000).toISOString();
+    const endIso   = new Date(now.getTime() + 366 * 24 * 3600 * 1000).toISOString();
+    const rawEvents = await haRestGetEvents(cfg.calendar_entity_id, startIso, endIso);
+
+    const events = {};
+    for (const raw of rawEvents) {
+      const normalized = normalizeEvent(raw);
+      const key = normalized.id || `unmanaged-${raw.uid || normalized.start_date_time}`;
+      events[key] = normalized;
+    }
+
+    res.json({ calendar_entity_id: cfg.calendar_entity_id, events });
   } catch (err) {
     console.error('[calendar-events] GET /: error:', err.message);
-    res.status(500).json({ error: 'Failed to read calendar events' });
+    res.status(500).json({ error: 'Failed to fetch calendar events' });
   }
 });
 
@@ -170,13 +317,14 @@ router.get('/', async (req, res) => {
 
 router.put('/config', async (req, res) => {
   const { calendar_entity_id } = req.body;
-  if (calendar_entity_id !== undefined && calendar_entity_id !== null && typeof calendar_entity_id !== 'string') {
+  if (calendar_entity_id !== undefined && calendar_entity_id !== null &&
+      typeof calendar_entity_id !== 'string') {
     return res.status(400).json({ error: 'calendar_entity_id must be a string or null' });
   }
   try {
-    const cfg = await readCalendarEventsConfig(req.frameArtPath);
+    const cfg = await readCalendarConfig(req.frameArtPath);
     cfg.calendar_entity_id = calendar_entity_id || null;
-    await writeCalendarEventsConfig(req.frameArtPath, cfg);
+    await writeCalendarConfig(req.frameArtPath, cfg);
     res.json({ success: true, calendar_entity_id: cfg.calendar_entity_id });
   } catch (err) {
     console.error('[calendar-events] PUT /config: error:', err.message);
@@ -188,8 +336,18 @@ router.put('/config', async (req, res) => {
 
 router.get('/calendars', async (req, res) => {
   try {
-    const calendars = await haRequest('GET', '/calendars');
-    res.json({ calendars: Array.isArray(calendars) ? calendars : [] });
+    if (!SUPERVISOR_TOKEN && process.env.NODE_ENV === 'development') {
+      return res.json({ calendars: [
+        { entity_id: 'calendar.frame_art_events', name: 'Frame Art Events' },
+        { entity_id: 'calendar.family', name: 'Family' },
+      ]});
+    }
+    const resp = await axios({
+      method: 'GET',
+      url: `${HA_API_BASE}/calendars`,
+      headers: { Authorization: `Bearer ${SUPERVISOR_TOKEN}` },
+    });
+    res.json({ calendars: Array.isArray(resp.data) ? resp.data : [] });
   } catch (err) {
     console.error('[calendar-events] GET /calendars: error:', err.message);
     res.status(500).json({ error: 'Failed to fetch calendars from HA' });
@@ -202,15 +360,9 @@ router.get('/calendars/:entityId/events', async (req, res) => {
   const { entityId } = req.params;
   const { start, end } = req.query;
   const startIso = start || new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString();
-  const endIso = end || new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString();
-
+  const endIso   = end   || new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString();
   try {
-    const result = await haRequest('POST', '/services/calendar/get_events', {
-      entity_id: entityId,
-      start_date_time: startIso,
-      end_date_time: endIso,
-    });
-    const events = (result?.[entityId]?.events) || [];
+    const events = await haRestGetEvents(entityId, startIso, endIso);
     res.json({ events });
   } catch (err) {
     console.error('[calendar-events] GET /calendars/:id/events: error:', err.message);
@@ -221,9 +373,13 @@ router.get('/calendars/:entityId/events', async (req, res) => {
 // ── POST /api/calendar-events ─────────────────────────────────────────────
 
 router.post('/', async (req, res) => {
-  const { label, tagset_name, suppress_moods, start_date_time, end_date_time } = req.body;
+  const {
+    label, tagset_name, suppress_moods, force_shuffle,
+    start_date_time, end_date_time,
+    linked_calendar, linked_uid,
+  } = req.body;
 
-  if (!tagset_name || typeof tagset_name !== 'string' || !tagset_name.trim()) {
+  if (!tagset_name?.trim()) {
     return res.status(400).json({ error: 'tagset_name is required' });
   }
   if (!start_date_time || !end_date_time) {
@@ -231,37 +387,32 @@ router.post('/', async (req, res) => {
   }
 
   try {
-    const cfg = await readCalendarEventsConfig(req.frameArtPath);
+    const cfg = await readCalendarConfig(req.frameArtPath);
     if (!cfg.calendar_entity_id) {
-      return res.status(400).json({ error: 'No Frame Art calendar configured. Set calendar_entity_id first.' });
+      return res.status(400).json({ error: 'No Frame Art calendar configured.' });
     }
 
-    const id = randomUUID();
-    const event = {
-      id,
-      label: (label || tagset_name).trim(),
-      tagset_name: tagset_name.trim(),
+    const uuid = uuidv4();
+    const meta = {
+      uid: uuid,
+      label: (label || tagset_name).trim() || null,
       suppress_moods: suppress_moods === true,
-      start_date_time,
-      end_date_time,
-      ha_event_uid: null,
-      linked_calendar: null,
-      linked_uid: null,
-      created_at: new Date().toISOString(),
+      force_shuffle: force_shuffle === true,
+      linked_calendar: linked_calendar || null,
+      linked_uid: linked_uid || null,
     };
+    const description = buildDescription(meta);
 
-    const uid = await createHaCalendarEvent(
-      cfg.calendar_entity_id,
-      event.tagset_name,
+    await haCreateEvent(cfg.calendar_entity_id, tagset_name.trim(), start_date_time, end_date_time, description);
+
+    const event = {
+      id: uuid,
+      ha_uid: null, // HA doesn't return uid on create; available on next read
+      tagset_name: tagset_name.trim(),
+      ...meta,
       start_date_time,
       end_date_time,
-      event,
-    );
-    event.ha_event_uid = uid;
-
-    cfg.events[id] = event;
-    await writeCalendarEventsConfig(req.frameArtPath, cfg);
-
+    };
     res.json({ success: true, event });
   } catch (err) {
     console.error('[calendar-events] POST /: error:', err.message);
@@ -269,144 +420,107 @@ router.post('/', async (req, res) => {
   }
 });
 
-// ── PUT /api/calendar-events/:id ──────────────────────────────────────────
+// ── PUT /api/calendar-events/:uuid ────────────────────────────────────────
 
-router.put('/:id', async (req, res) => {
-  const { id } = req.params;
-  const { label, tagset_name, suppress_moods, start_date_time, end_date_time } = req.body;
+router.put('/:uuid', async (req, res) => {
+  const { uuid } = req.params;
+  const {
+    label, tagset_name, suppress_moods, force_shuffle,
+    start_date_time, end_date_time,
+    linked_calendar, linked_uid,
+  } = req.body;
 
   try {
-    const cfg = await readCalendarEventsConfig(req.frameArtPath);
-    const existing = cfg.events[id];
-    if (!existing) {
-      return res.status(404).json({ error: `Event '${id}' not found` });
-    }
+    const cfg = await readCalendarConfig(req.frameArtPath);
     if (!cfg.calendar_entity_id) {
       return res.status(400).json({ error: 'No Frame Art calendar configured.' });
     }
 
-    const updated = {
-      ...existing,
-      label: (label ?? existing.label).trim(),
-      tagset_name: ((tagset_name ?? existing.tagset_name) || '').trim(),
-      suppress_moods: suppress_moods !== undefined ? suppress_moods === true : existing.suppress_moods,
-      updated_at: new Date().toISOString(),
-    };
-
-    // Update HA calendar event: delete old + recreate (HA has no generic update service)
-    if (start_date_time || end_date_time) {
-      const newStart = start_date_time || null;
-      const newEnd = end_date_time || null;
-      if (newStart && newEnd) {
-        updated.start_date_time = newStart;
-        updated.end_date_time = newEnd;
-        await deleteHaCalendarEvent(cfg.calendar_entity_id, existing.ha_event_uid);
-        const newUid = await createHaCalendarEvent(
-          cfg.calendar_entity_id,
-          updated.tagset_name,
-          newStart,
-          newEnd,
-          updated,
-        );
-        updated.ha_event_uid = newUid;
-      }
-    } else if (
-      updated.tagset_name !== existing.tagset_name ||
-      updated.suppress_moods !== existing.suppress_moods
-    ) {
-      // Metadata changed but no time change — delete + recreate to update summary/description
-      // We need the original times; query HA for them
-      if (existing.ha_event_uid) {
-        const now = new Date();
-        const scanStart = new Date(now.getTime() - 366 * 24 * 3600 * 1000).toISOString();
-        const scanEnd = new Date(now.getTime() + 366 * 24 * 3600 * 1000).toISOString();
-        try {
-          const result = await haRequest('POST', '/services/calendar/get_events', {
-            entity_id: cfg.calendar_entity_id,
-            start_date_time: scanStart,
-            end_date_time: scanEnd,
-          });
-          const events = (result?.[cfg.calendar_entity_id]?.events) || [];
-          const haEvent = events.find((e) => e.uid === existing.ha_event_uid);
-          if (haEvent) {
-            const eStart = haEvent.start?.dateTime || haEvent.start?.date;
-            const eEnd = haEvent.end?.dateTime || haEvent.end?.date;
-            await deleteHaCalendarEvent(cfg.calendar_entity_id, existing.ha_event_uid);
-            const newUid = await createHaCalendarEvent(
-              cfg.calendar_entity_id,
-              updated.tagset_name,
-              eStart,
-              eEnd,
-              updated,
-            );
-            updated.ha_event_uid = newUid;
-          }
-        } catch (e) {
-          console.warn('[calendar-events] PUT /:id: could not re-sync HA event:', e.message);
-        }
-      }
+    const haEvent = await findHaEventByUuid(cfg.calendar_entity_id, uuid);
+    if (!haEvent) {
+      return res.status(404).json({ error: `Event with uid '${uuid}' not found in HA calendar` });
     }
 
-    cfg.events[id] = updated;
-    await writeCalendarEventsConfig(req.frameArtPath, cfg);
+    const currentMeta = parseDescription(haEvent.description);
+    const updatedMeta = {
+      uid: uuid,
+      label: (label ?? currentMeta.label ?? '').trim() || null,
+      suppress_moods: suppress_moods !== undefined ? suppress_moods === true : currentMeta.suppress_moods,
+      force_shuffle: force_shuffle !== undefined ? force_shuffle === true : currentMeta.force_shuffle,
+      linked_calendar: linked_calendar !== undefined ? (linked_calendar || null) : currentMeta.linked_calendar,
+      linked_uid: linked_uid !== undefined ? (linked_uid || null) : currentMeta.linked_uid,
+    };
+    const newTagset = (tagset_name ?? haEvent.summary ?? '').trim();
+    const newStart  = start_date_time || extractDateTime(haEvent.start);
+    const newEnd    = end_date_time   || extractDateTime(haEvent.end);
+    const newDesc   = buildDescription(updatedMeta);
 
-    res.json({ success: true, event: updated });
+    await haDeleteEvent(cfg.calendar_entity_id, haEvent.uid);
+    await haCreateEvent(cfg.calendar_entity_id, newTagset, newStart, newEnd, newDesc);
+
+    const event = {
+      id: uuid,
+      ha_uid: null,
+      tagset_name: newTagset,
+      ...updatedMeta,
+      start_date_time: newStart,
+      end_date_time: newEnd,
+    };
+    res.json({ success: true, event });
   } catch (err) {
-    console.error('[calendar-events] PUT /:id: error:', err.message);
+    console.error('[calendar-events] PUT /:uuid: error:', err.message);
     res.status(500).json({ error: 'Failed to update calendar event' });
   }
 });
 
-// ── DELETE /api/calendar-events/:id ───────────────────────────────────────
+// ── DELETE /api/calendar-events/:uuid ─────────────────────────────────────
 
-router.delete('/:id', async (req, res) => {
-  const { id } = req.params;
+router.delete('/:uuid', async (req, res) => {
+  const { uuid } = req.params;
   try {
-    const cfg = await readCalendarEventsConfig(req.frameArtPath);
-    const existing = cfg.events[id];
-    if (!existing) {
-      return res.status(404).json({ error: `Event '${id}' not found` });
-    }
-
-    if (cfg.calendar_entity_id && existing.ha_event_uid) {
-      await deleteHaCalendarEvent(cfg.calendar_entity_id, existing.ha_event_uid);
-    }
-
-    delete cfg.events[id];
-    await writeCalendarEventsConfig(req.frameArtPath, cfg);
-
-    res.json({ success: true, message: `Event '${existing.label}' deleted` });
-  } catch (err) {
-    console.error('[calendar-events] DELETE /:id: error:', err.message);
-    res.status(500).json({ error: 'Failed to delete calendar event' });
-  }
-});
-
-// ── POST /api/calendar-events/:id/sync-from-linked ────────────────────────
-
-router.post('/:id/sync-from-linked', async (req, res) => {
-  const { id } = req.params;
-  try {
-    const cfg = await readCalendarEventsConfig(req.frameArtPath);
-    const event = cfg.events[id];
-    if (!event) return res.status(404).json({ error: `Event '${id}' not found` });
-    if (!event.linked_calendar || !event.linked_uid) {
-      return res.status(400).json({ error: 'Event has no linked calendar event' });
-    }
+    const cfg = await readCalendarConfig(req.frameArtPath);
     if (!cfg.calendar_entity_id) {
       return res.status(400).json({ error: 'No Frame Art calendar configured.' });
     }
 
-    // Find the linked event in its source calendar
-    const scanStart = new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString();
-    const scanEnd = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString();
-    const result = await haRequest('POST', '/services/calendar/get_events', {
-      entity_id: event.linked_calendar,
-      start_date_time: scanStart,
-      end_date_time: scanEnd,
-    });
-    const linkedEvents = (result?.[event.linked_calendar]?.events) || [];
-    const linked = linkedEvents.find((e) => e.uid === event.linked_uid);
+    const haEvent = await findHaEventByUuid(cfg.calendar_entity_id, uuid);
+    if (!haEvent) {
+      return res.status(404).json({ error: `Event with uid '${uuid}' not found in HA calendar` });
+    }
+
+    await haDeleteEvent(cfg.calendar_entity_id, haEvent.uid);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[calendar-events] DELETE /:uuid: error:', err.message);
+    res.status(500).json({ error: 'Failed to delete calendar event' });
+  }
+});
+
+// ── POST /api/calendar-events/:uuid/sync-from-linked ──────────────────────
+
+router.post('/:uuid/sync-from-linked', async (req, res) => {
+  const { uuid } = req.params;
+  try {
+    const cfg = await readCalendarConfig(req.frameArtPath);
+    if (!cfg.calendar_entity_id) {
+      return res.status(400).json({ error: 'No Frame Art calendar configured.' });
+    }
+
+    const haEvent = await findHaEventByUuid(cfg.calendar_entity_id, uuid);
+    if (!haEvent) {
+      return res.status(404).json({ error: `Event with uid '${uuid}' not found` });
+    }
+
+    const meta = parseDescription(haEvent.description);
+    if (!meta.linked_calendar || !meta.linked_uid) {
+      return res.status(400).json({ error: 'Event has no linked calendar event' });
+    }
+
+    const now = new Date();
+    const scanStart = new Date(now.getTime() - 90 * 24 * 3600 * 1000).toISOString();
+    const scanEnd   = new Date(now.getTime() + 366 * 24 * 3600 * 1000).toISOString();
+    const linkedEvents = await haRestGetEvents(meta.linked_calendar, scanStart, scanEnd);
+    const linked = linkedEvents.find((e) => e.uid === meta.linked_uid);
 
     if (!linked) {
       return res.status(404).json({
@@ -415,49 +529,29 @@ router.post('/:id/sync-from-linked', async (req, res) => {
       });
     }
 
-    const newStart = linked.start?.dateTime || linked.start?.date;
-    const newEnd = linked.end?.dateTime || linked.end?.date;
+    const newStart  = extractDateTime(linked.start);
+    const newEnd    = extractDateTime(linked.end);
+    const curStart  = extractDateTime(haEvent.start);
+    const curEnd    = extractDateTime(haEvent.end);
 
-    // Get current HA event times to compare
-    const faScanResult = await haRequest('POST', '/services/calendar/get_events', {
-      entity_id: cfg.calendar_entity_id,
-      start_date_time: scanStart,
-      end_date_time: scanEnd,
-    });
-    const faEvents = (faScanResult?.[cfg.calendar_entity_id]?.events) || [];
-    const faEvent = faEvents.find((e) => e.uid === event.ha_event_uid);
-    const currentStart = faEvent?.start?.dateTime || faEvent?.start?.date;
-    const currentEnd = faEvent?.end?.dateTime || faEvent?.end?.date;
-
-    if (newStart === currentStart && newEnd === currentEnd) {
-      event.last_synced_at = new Date().toISOString();
-      cfg.events[id] = event;
-      await writeCalendarEventsConfig(req.frameArtPath, cfg);
+    if (newStart === curStart && newEnd === curEnd) {
       return res.json({ success: true, changed: false });
     }
 
-    // Times differ — delete old HA event, create new one
-    await deleteHaCalendarEvent(cfg.calendar_entity_id, event.ha_event_uid);
-    const newUid = await createHaCalendarEvent(
+    await haDeleteEvent(cfg.calendar_entity_id, haEvent.uid);
+    await haCreateEvent(
       cfg.calendar_entity_id,
-      event.tagset_name,
+      haEvent.summary,
       newStart,
       newEnd,
-      event,
+      haEvent.description, // all metadata preserved
     );
 
-    event.ha_event_uid = newUid;
-    event.start_date_time = newStart;
-    event.end_date_time = newEnd;
-    event.last_synced_at = new Date().toISOString();
-    cfg.events[id] = event;
-    await writeCalendarEventsConfig(req.frameArtPath, cfg);
-
-    res.json({ success: true, changed: true, newStart, newEnd, event });
+    res.json({ success: true, changed: true, newStart, newEnd });
   } catch (err) {
-    console.error('[calendar-events] POST /:id/sync-from-linked: error:', err.message);
+    console.error('[calendar-events] POST /:uuid/sync-from-linked: error:', err.message);
     res.status(500).json({ error: 'Failed to sync from linked calendar' });
   }
 });
 
-module.exports = router;
+module.exports = { router, startBackgroundSync };
