@@ -71,6 +71,12 @@ Maps to the `keyword` parameter on `artworksConnection`. First value is used. Co
 
 Unlike the Google Arts `/api/search` endpoint, this filter is applied server-side by Artsy and returns works matching the keyword in title, artist name, or description. Pagination across sort orders still applies, so the accessible result pool is the full 60,000 positions (not a fixed result set).
 
+### Artist (`type: 'artist'`, `mode: 'require'`)
+
+Single-value (`inputStyle: 'search'`). The artist **name** is resolved to an Artsy slug via `resolveArtistSlug()` and passed as `artistID` on `artworksConnection`. Combinable with medium, collection, and search filters.
+
+If the name cannot be resolved to a slug, the source logs a warning and **proceeds without the artist filter** rather than failing — an unresolvable name therefore silently widens results instead of returning none.
+
 ## Metadata Fields
 
 | Key | Description |
@@ -94,6 +100,70 @@ The `normalized` version is used (~1831×2048px). Other available versions (test
 - `normalized`: ~1831×2048px ← used by this source
 
 Aspect ratio is available from the API (`image.aspectRatio` float) — no post-download `sharp.metadata()` call needed.
+
+## Artist search and metadata
+
+### What this source implements
+
+`suggestArtists(query, limit)` is exported and feeds the shared artist autocomplete in `utils/artistResolver.js`:
+
+```graphql
+{ searchConnection(query: "<query>", first: <n>, entities: [ARTIST]) {
+    edges { node { displayLabel ... on Artist { slug } } } } }
+```
+
+It returns `{ name: displayLabel, slug, source: 'artsy' }` and seeds the slug cache as a side effect.
+
+`resolveArtistSlug(name)` (internal, not exported) backs the artist filter. It prefers an exact case-insensitive `displayLabel` match and falls back to the first result.
+
+| Cache | Key | TTL |
+|-------|-----|-----|
+| `_artistSuggestCache` | lowercased query | 1 hour |
+| `_artistSlugCache` | lowercased artist name | 24 hours |
+
+Artsy does **not** export `countArtistArtworks`, so it contributes no artwork counts to the artist counts breakdown.
+
+**Gotcha:** `artistsConnection(keyword:)` returns HTTP 400. `searchConnection(entities: [ARTIST])` is the only working path for name→slug resolution.
+
+### Available but unused: `artist(id:)`
+
+Artsy exposes a full artist record this source never reads. Verified September 2026 against `artist(id: "pablo-picasso")`:
+
+| Field | Example |
+|-------|---------|
+| `name` / `slug` | `Pablo Picasso` / `pablo-picasso` |
+| `internalID` | `4d8b928b4eb68a1b2c0001f2` (Mongo hex) |
+| `id` | base64 GraphQL global ID |
+| `gender` | `male` |
+| `birthday` / `deathday` | `1881` / `1973` |
+| `nationality` | `Spanish` |
+| `hometown` / `location` | `Malaga, Spain` / `Paris, France; Mougins, France` |
+| `formattedNationalityAndBirthday` | `Spanish, 1881–1973` |
+| `alternateNames` | often `null` |
+| `blurb`, `biographyBlurb { text credit }` | editorial prose (markdown) |
+| `counts { artworks forSaleArtworks follows articles partnerShows }` | `7261 / 1972 / 247661 / 91 / 857` |
+| `genes { name }` | `Cubism`, `Spain`, `Painting`, … |
+
+**Artist enrichment does not use Artsy.** Lifespan, nationality and description are sourced from Wikidata Q-IDs — see `docs/ENRICHMENT.md`.
+
+Caveats before reaching for it:
+
+- **No external identifiers.** No VIAF, ULAN, or Wikidata Q-ID, so cross-system linking still requires Wikidata.
+- **Bios are Artsy editorial prose** with Artsy-relative markdown links (`[Cubism](/artist-series/...)`) — needs cleaning before reuse.
+- **Marketplace-biased.** Strong on contemporary and for-sale artists, thinner on historical figures.
+- GraphQL is all-or-nothing: one unknown field fails the whole query. (`similarArtists` does not exist; it is `partnerArtists`.)
+
+### Disambiguation headroom
+
+`searchConnection(entities: [ARTIST])` will also return `nationality`, `birthday`, `deathday` and `internalID` inline in the same request, but `suggestArtists` currently asks only for `displayLabel` and `slug`. Querying `monet`:
+
+| displayLabel | nationality | dates |
+|--------------|-------------|-------|
+| Claude Monet | French | 1840–1926 |
+| André Monet | Canadian | 1965– |
+| Diane Monet | *(blank)* | — |
+
+That is free, same-call disambiguation data for the shared-name problem described in `docs/ENRICHMENT.md`. Not yet wired up.
 
 ## fetchByIdentifier
 
